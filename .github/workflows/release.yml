@@ -1,0 +1,192 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag to build and publish again (recovery)
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR and draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      publish: ${{ steps.target.outputs.publish }}
+    steps:
+      # Recovery runs skip release-please so they cannot create or publish another tag.
+      - id: rp
+        if: inputs.tag == ''
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - id: target
+        name: Select the release to publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+          CREATED: ${{ steps.rp.outputs.release_created }}
+          CREATED_TAG: ${{ steps.rp.outputs.tag_name }}
+        run: |
+          if [[ -n "$RECOVERY_TAG" ]]; then
+            if [[ ! $RECOVERY_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "tag '$RECOVERY_TAG' is not of the form vX.Y.Z" >&2
+              exit 1
+            fi
+            draft=$(gh release view "$RECOVERY_TAG" --repo "$REPOSITORY" --json isDraft --jq .isDraft)
+            if [[ "$draft" != true ]]; then
+              echo "release $RECOVERY_TAG is not a draft; refusing to publish it again" >&2
+              exit 1
+            fi
+            tag=$RECOVERY_TAG
+          elif [[ "$CREATED" == true ]]; then
+            tag=$CREATED_TAG
+          else
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "tag=$tag"
+            echo "publish=true"
+          } >>"$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify the tagged commit
+    needs: release-please
+    if: needs.release-please.outputs.publish == 'true'
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ needs.release-please.outputs.tag }}
+    permissions:
+      contents: read
+
+  build:
+    name: Build the zipapp
+    needs: [release-please, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.release-please.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag is on main
+        run: git merge-base --is-ancestor "$TAG" origin/main
+
+      # Build and smoke test with the oldest supported Python.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Validate the tag against the project version
+        id: version
+        run: echo "version=$(scripts/validate-release-version.sh "$TAG" pyproject.toml)" >>"$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python scripts/build-zipapp.py build/pisar
+          build/pisar --version | grep -Fx "pisar $VERSION"
+          scripts/package-release.sh "$VERSION" build/pisar dist
+
+      - name: Test the packaged executable outside the checkout
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tar -xzf "dist/pisar_${VERSION}_any.tar.gz" -C "$RUNNER_TEMP"
+          executable="$RUNNER_TEMP/pisar_${VERSION}_any/pisar"
+          (cd "$RUNNER_TEMP" && "$executable" --version | grep -Fx "pisar $VERSION")
+          PISAR_TEST_EXECUTABLE="$executable" python -m unittest discover -s tests -t .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [release-please, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      TAG: ${{ needs.release-please.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum ./*.tar.gz | sed 's# \./# #' >SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: Upload the assets to the draft release
+        run: gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+
+      - name: Verify the uploaded assets
+        run: |
+          version=${TAG#v}
+          mkdir verify
+          gh release download "$TAG" --dir verify
+          (cd verify && sha256sum --check --strict SHA256SUMS)
+          archives=(verify/*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          test "${archives[0]}" = "verify/pisar_${version}_any.tar.gz"
+          cmp verify/SHA256SUMS dist/SHA256SUMS
+          tar -xzf "${archives[0]}" -C verify
+          "verify/pisar_${version}_any/pisar" --version | grep -Fx "pisar $version"
+
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false --latest
+
+      - name: Fast-forward stable
+        run: |
+          sha=$(git rev-list -n1 "$TAG")
+          git fetch origin stable || true
+          if git rev-parse --verify --quiet origin/stable >/dev/null &&
+            ! git merge-base --is-ancestor origin/stable "$sha"; then
+            echo "stable is not an ancestor of $TAG; refusing to move it" >&2
+            exit 1
+          fi
+          git push origin "$sha:refs/heads/stable"
