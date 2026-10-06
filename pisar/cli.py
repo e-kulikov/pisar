@@ -1,0 +1,102 @@
+import argparse
+import json
+import sys
+from . import __version__, settings
+from .documents import check, resolve
+from .safety import WikiError, sha256
+from .spaces import Wiki
+from .search import inventory, search
+
+
+def parser():
+    p = argparse.ArgumentParser(prog='pisar',
+                                description='Offline knowledge repository CLI; lexical search, explicit Git writes.')
+    p.add_argument('--version', action='version', version=f'pisar {__version__}')
+    p.add_argument('--root', help='Knowledge root; default $PISAR_ROOT, else $XDG_DATA_HOME/wiki')
+    p.add_argument('--state-dir', help='External runtime directory outside all Git repos and the root; '
+                                       'default $PISAR_STATE_DIR, else $XDG_DATA_HOME/pisar')
+    p.add_argument('--ruwana', help='Public ruwana binary; default $PISAR_RUWANA_BIN, else ruwana on PATH')
+    commands = p.add_subparsers(dest='command', required=True)
+    for name in ('spaces', 'search', 'read', 'check', 'inventory'):
+        sub = commands.add_parser(name)
+        sub.add_argument('--scope', choices=('all', 'personal', 'work'), default='all')
+        if name in ('search', 'inventory'):
+            sub.add_argument('--space', help='Owner or related space id')
+        if name == 'search':
+            sub.add_argument('query')
+        if name == 'read':
+            sub.add_argument('reference', help='wiki:space:document or root-relative path')
+    capture = commands.add_parser('capture', help='Commit an unchanged source to its known space')
+    capture.add_argument('--space', required=True)
+    capture.add_argument('--id', required=True)
+    capture.add_argument('--source', required=True)
+    capture.add_argument('--sha256', help='Expected original hash')
+    save = commands.add_parser('save', help='Apply an external agent meeting JSON plan')
+    save.add_argument('--plan', required=True)
+    triage = commands.add_parser('triage', help='External global inbox routing')
+    actions = triage.add_subparsers(dest='action', required=True)
+    for name in ('prepare', 'report', 'accept', 'reroute', 'defer'):
+        sub = actions.add_parser(name)
+        sub.add_argument('--batch', required=True)
+        if name == 'prepare':
+            source = sub.add_mutually_exclusive_group()
+            source.add_argument('--plan', help='External routing JSON')
+            source.add_argument('--inbox', help='External inbox directory, default runtime/inbox')
+        if name in ('accept', 'reroute', 'defer'):
+            sub.add_argument('--item', required=True)
+        if name == 'reroute':
+            sub.add_argument('--space', required=True)
+    return p
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    try:
+        args.root = settings.root(args.root)
+        args.state_dir = settings.state_dir(args.state_dir)
+        args.ruwana = settings.ruwana(args.ruwana)
+        wiki = Wiki(args.root)
+        if args.command == 'check':
+            result = check(wiki, args.scope)
+        else:
+            wiki.require_valid()
+            if args.command == 'spaces':
+                result = {'spaces': [s.record(wiki.root) for s in wiki.spaces
+                                     if args.scope in ('all', s.scope)]}
+            elif args.command == 'search':
+                result = search(wiki, args.query, args.scope, args.space)
+            elif args.command == 'inventory':
+                result = inventory(wiki, args.scope, args.space)
+            elif args.command == 'read':
+                if args.reference.startswith('wiki:'):
+                    doc = resolve(wiki, args.reference, args.scope)
+                    result = {**doc.record(wiki.root), 'content': doc.path.read_text(encoding='utf-8')}
+                else:
+                    path = wiki.path(args.reference, args.scope)
+                    result = dict(path=path.relative_to(wiki.root).as_posix(),
+                                  content=path.read_text(encoding='utf-8'), sha256=sha256(path.read_bytes()))
+            elif args.command == 'capture':
+                from .operations import capture
+                result = capture(wiki, args.state_dir, args.space, args.id, args.source, args.sha256)
+            elif args.command == 'save':
+                from .operations import save
+                result = save(wiki, args.state_dir, args.plan, args.ruwana)
+            elif args.command == 'triage':
+                from . import triage
+                if args.action == 'prepare':
+                    result = triage.prepare(wiki, args.state_dir, args.batch, args.plan, args.inbox)
+                elif args.action == 'report':
+                    result = triage.report(wiki, args.state_dir, args.batch)
+                elif args.action == 'accept':
+                    result = triage.accept(wiki, args.state_dir, args.batch, args.item, args.ruwana)
+                elif args.action == 'reroute':
+                    result = triage.reroute(wiki, args.state_dir, args.batch, args.item, args.space)
+                else:
+                    result = triage.defer(wiki, args.state_dir, args.batch, args.item)
+            else:
+                raise WikiError('write operation not implemented yet')
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1 if result.get('ok') is False else 0
+    except (WikiError, OSError, ValueError, RuntimeError) as error:
+        print(f'pisar: {error}', file=sys.stderr)
+        return 1

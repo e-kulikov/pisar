@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.coverage
+.pytest_cache/
+# Generated inside release builds only; pyproject.toml is the version authority.
+pisar/_version.py
