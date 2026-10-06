@@ -7,6 +7,29 @@ their bytes, applies externally prepared meeting plans, and routes a global inbo
 only after explicit acceptance. No network, model, daemon, index service or cloud
 account is used; all Git activity is local and nothing is pushed.
 
+## The name
+
+*Pisar* (писарь) is a scribe: the person who sets down what others say and do.
+In Russian the word is simply the verb *писать* ("to write") plus the agent
+suffix *-арь* ([Wiktionary](https://en.wiktionary.org/wiki/%D0%BF%D0%B8%D1%81%D0%B0%D1%80%D1%8C)). The same word, built the same way, exists
+across the Slavic languages: Bulgarian, Macedonian, Serbo-Croatian and Ukrainian
+*писар* ([Wiktionary](https://en.wiktionary.org/wiki/%D0%BF%D0%B8%D1%81%D0%B0%D1%80)), Slovene *pisar* ([SSKJ²](https://www.fran.si/iskanje?FilteredDictionaryIds=133&View=1&Query=pisar)), Czech *písař*
+([Wiktionary](https://en.wiktionary.org/wiki/p%C3%ADsa%C5%99)) and Polish *pisarz*, recorded since 1391 ([Wiktionary](https://en.wiktionary.org/wiki/pisarz)).
+
+The verb is old. It is attested in Old Church Slavonic as *писати* ("to write";
+[Wiktionary](https://en.wiktionary.org/wiki/%D0%BF%D0%B8%D1%81%D0%B0%D1%82%D0%B8)) and comes from Proto-Slavic *\*pьsati*, which meant both
+"to draw" and "to write". That in turn goes back to the Indo-European root
+*\*peyḱ-* ("to mark, color, paint, decorate, embroider"; [Wiktionary](https://en.wiktionary.org/wiki/Reconstruction:Proto-Slavic/p%D1%8Csati)),
+the same root that gave Latin *pingō* ("I paint"; [Wiktionary](https://en.wiktionary.org/wiki/pingo)). Writing,
+in other words, began as making marks on a surface.
+
+A scribe does not decide what was agreed and does not rewrite the originals.
+They write down faithfully, keep the documents in order, and can say where each
+statement came from. That is the job description for this tool. pisar never
+invents or interprets: it keeps sources unchanged, records provenance, applies
+the plan an agent or a person prepared, and leaves a journal of what it did. The
+thinking stays with whoever reads the sources; pisar is the scribe.
+
 ## Requirements
 
 - Python 3.11 or newer, available as `python3`. pisar uses only the standard
@@ -73,7 +96,10 @@ the root, and must not contain the root; overlapping combinations are refused
 before any runtime file is written. Read-only commands do not touch the runtime.
 `WIKI_ROOT` is not a pisar setting and is ignored (see the ruwana adapter below).
 
-`pisar --version` prints `pisar <version>` and needs no root. All successful
+`pisar --version` prints `pisar <version>` and needs no root. `pisar --skill`
+prints a self-contained guide for AI agents (concepts, commands, plan formats,
+safety and recovery rules) to stdout, also without a root; point an agent at it
+before it uses pisar. All successful
 command output is JSON. Errors go to stderr prefixed with `pisar:` and exit 1
 (argument errors exit 2). `check` emits JSON and exits 1 when validation fails.
 
