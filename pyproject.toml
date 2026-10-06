@@ -15,3 +15,6 @@ pisar = "pisar.cli:main"
 
 [tool.setuptools]
 packages = ["pisar"]
+
+[tool.setuptools.package-data]
+pisar = ["skill.md"]

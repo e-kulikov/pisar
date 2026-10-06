@@ -8,10 +8,24 @@ from .spaces import Wiki
 from .search import inventory, search
 
 
+class _Skill(argparse.Action):
+    """Print the bundled agent guide and exit, like --version: needs no root."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS,
+                         help='Print the agent skill document describing how to use pisar, then exit')
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from importlib.resources import files
+        sys.stdout.write(files('pisar').joinpath('skill.md').read_text(encoding='utf-8'))
+        parser.exit()
+
+
 def parser():
     p = argparse.ArgumentParser(prog='pisar',
                                 description='Offline knowledge repository CLI; lexical search, explicit Git writes.')
     p.add_argument('--version', action='version', version=f'pisar {__version__}')
+    p.add_argument('--skill', action=_Skill)
     p.add_argument('--root', help='Knowledge root; default $PISAR_ROOT, else $XDG_DATA_HOME/wiki')
     p.add_argument('--state-dir', help='External runtime directory outside all Git repos and the root; '
                                        'default $PISAR_STATE_DIR, else $XDG_DATA_HOME/pisar')
