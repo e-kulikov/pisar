@@ -26,7 +26,7 @@ holding the `pisar` executable (a Python zipapp) and this README, plus
 With [mise](https://mise.jdx.dev), using its GitHub backend:
 
 ```sh
-mise use -g "github:e-kulikov/pisar[asset_pattern=pisar_*_any.tar.gz]"
+mise use -g "github:e-kulikov/pisar[asset_pattern=pisar_*_any.tar.gz,strip_components=1]"
 pisar --version
 ```
 
@@ -34,8 +34,11 @@ or in `mise.toml`:
 
 ```toml
 [tools]
-"github:e-kulikov/pisar" = { version = "latest", asset_pattern = "pisar_*_any.tar.gz" }
+"github:e-kulikov/pisar" = { version = "latest", asset_pattern = "pisar_*_any.tar.gz", strip_components = 1 }
 ```
+
+The archive holds a single `pisar_<version>_any/` directory; `strip_components = 1`
+puts `pisar` at the top of the installed tool directory, where mise finds it.
 
 mise checks the release's GitHub artifact attestation when one is available.
 The executable still needs a Python 3.11+ `python3` on `PATH`; mise can provide
@@ -543,11 +546,12 @@ authority, and is byte-for-byte reproducible for a given `SOURCE_DATE_EPOCH`
 Commits follow [Conventional Commits](https://www.conventionalcommits.org).
 [release-please](https://github.com/googleapis/release-please) maintains the
 version, changelog and a release pull request. Merging it creates a draft release
-and tag; the release workflow then verifies the tagged commit on Python 3.11 and
-3.14, builds the zipapp and archive, tests the packaged executable outside the
-checkout, writes `SHA256SUMS`, attests build provenance, uploads and re-downloads
-the assets to verify them, and only then publishes the release as latest and
-fast-forwards the `stable` branch. A failed run can be retried for an existing
+and tag; the release workflow resolves the tag once to a commit SHA, checks that
+the tag still names it before building and publishing, verifies that commit on
+Python 3.11 and 3.14, builds the zipapp and archive, tests the packaged
+executable outside the checkout, writes `SHA256SUMS`, attests build provenance,
+uploads and re-downloads the assets to verify them, and only then publishes the
+release as latest and fast-forwards the `stable` branch. A failed run can be retried for an existing
 draft release with the workflow's `tag` input; that recovery run never runs
 release-please and refuses tags whose release is already published.
 
