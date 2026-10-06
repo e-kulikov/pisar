@@ -32,9 +32,13 @@ def due_end_of_day(value):
 class Ruwana:
     def __init__(self, wiki, binary):
         self.wiki = wiki
-        self.binary = shutil.which(str(binary))
-        if self.binary is None:
+        found = shutil.which(str(binary))
+        if found is None:
             raise WikiError(f'ruwana unavailable: {binary}; operation incomplete, retry with --ruwana or PISAR_RUWANA_BIN')
+        # which() keeps relative flags and relative PATH entries relative; make them
+        # absolute from the invocation directory before ruwana runs inside the root.
+        # abspath, not resolve: symlinked shims dispatch on their own name.
+        self.binary = os.path.abspath(found)
 
     def run(self, *args):
         try:

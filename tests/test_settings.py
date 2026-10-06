@@ -47,7 +47,16 @@ class SettingsTests(Fixture):
         path.chmod(0o755)
         return path
 
-    def save_with_tasks(self, *flags, env):
+    def decoy_in_root(self, *names):
+        """Same relative paths inside the root, which is ruwana's working directory."""
+        for name in names:
+            path = self.root / 'bin' / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('#!/bin/sh\necho decoy >"$DECOY_RUWANA_LOG"\nexit 3\n')
+            path.chmod(0o755)
+        commit_all(self.root)
+
+    def save_with_tasks(self, *flags, env, cwd=None):
         source = self.external()
         plan = dict(schema_version=1, operation_id='settings-save', space_id='alpha',
                     source=dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()),
@@ -56,9 +65,11 @@ class SettingsTests(Fixture):
         path = self.base / 'settings-plan.json'
         path.write_text(json.dumps(plan))
         log = self.base / 'ruwana.log'
-        env = {**env, 'FAKE_RUWANA_LOG': str(log)}
+        decoy = self.base / 'decoy.log'
+        env = {**env, 'FAKE_RUWANA_LOG': str(log), 'DECOY_RUWANA_LOG': str(decoy)}
         p = self.run_pisar('--root', self.root, '--state-dir', self.state, *flags,
-                           'save', '--plan', path, env=env, ok=False)
+                           'save', '--plan', path, env=env, ok=False, cwd=cwd)
+        self.assertFalse(decoy.exists(), 'ruwana path resolved inside the root')
         self.assertIn('synthetic ruwana failure', p.stderr)
         return log.read_text().splitlines()
 
@@ -176,6 +187,24 @@ class SettingsTests(Fixture):
                'WIKI_ROOT': str(self.env_root)}
         calls = self.save_with_tasks(env=env)
         self.assertEqual(calls, [str(path_bin), str(self.root.resolve())])
+
+    def test_relative_ruwana_flag_resolves_from_invocation_directory(self):
+        flag = self.fake_ruwana('flag-ruwana')
+        self.decoy_in_root('flag-ruwana')
+        calls = self.save_with_tasks('--ruwana', 'bin/flag-ruwana', env=self.env, cwd=self.base)
+        self.assertEqual(calls[0], str(flag))
+
+    def test_relative_ruwana_environment_resolves_from_invocation_directory(self):
+        env_bin = self.fake_ruwana('env-ruwana')
+        self.decoy_in_root('env-ruwana')
+        calls = self.save_with_tasks(env={**self.env, 'PISAR_RUWANA_BIN': 'bin/env-ruwana'}, cwd=self.base)
+        self.assertEqual(calls[0], str(env_bin))
+
+    def test_relative_path_entry_resolves_from_invocation_directory(self):
+        path_bin = self.fake_ruwana('ruwana')
+        self.decoy_in_root('ruwana')
+        calls = self.save_with_tasks(env={**self.env, 'PATH': f'bin:{self.env["PATH"]}'}, cwd=self.base)
+        self.assertEqual(calls[0], str(path_bin))
 
     def test_launcher_and_module_work_outside_checkout(self):
         if EXECUTABLE:

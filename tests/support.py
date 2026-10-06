@@ -92,11 +92,14 @@ class Fixture(unittest.TestCase):
                 self.fail('PISAR_TEST_REQUIRE_RUWANA=1 but no real ruwana binary was found')
             self.skipTest('real ruwana binary unavailable')
 
-    def run_pisar(self, *args, ok=True, env=None):
-        """Run the CLI with only the given arguments and environment."""
+    def run_pisar(self, *args, ok=True, env=None, cwd=None):
+        """Run the CLI with only the given arguments, environment and directory."""
+        env = dict(self.env if env is None else env)
+        if cwd is not None and not EXECUTABLE:
+            env['PYTHONPATH'] = str(CHECKOUT)
         p = subprocess.run([*pisar_command(), *map(str, args)],
-                           cwd=self.base if EXECUTABLE else CHECKOUT,
-                           env=self.env if env is None else env, text=True, capture_output=True)
+                           cwd=cwd or (self.base if EXECUTABLE else CHECKOUT),
+                           env=env, text=True, capture_output=True)
         if ok:
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         else:
