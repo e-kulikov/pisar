@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/e-kulikov/pisar/compare/v0.1.0...v0.2.0) (2026-10-06)
+
+
+### Features
+
+* add pisar --skill agent guide ([1d1a3c1](https://github.com/e-kulikov/pisar/commit/1d1a3c199257a5c5dd3f04074054d4dd4acff804))
+
+
+### Documentation
+
+* explain the name, document --skill and expand agent rules ([797bfcd](https://github.com/e-kulikov/pisar/commit/797bfcd8f002152c61092ed09772eaefd29c963b))
+
 ## 0.1.0 (2026-10-06)
 
 
