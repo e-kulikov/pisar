@@ -20,6 +20,9 @@ Implementation workers do not publish; the supervisor owns publication and relea
   write; `safety.py` guards paths and symlinks; `settings.py` resolves options;
   `ruwana.py` is the only adapter to the external task tracker.
 - `tests/` — unittest suite; `tests/support.py` builds temporary fixtures.
+- `pisar/agent.py` and `agent-prompt.md` implement `--agent`; any change to its
+  allowlist needs a test in `tests/test_agent.py` showing the new rule cannot run
+  arbitrary code (no bare `git *`, `pisar *`, `mv`, interpreters or shells).
 - `scripts/` — zipapp build, release packaging, version and commit checks.
 - `.github/workflows/` — `verify.yml` (tests, zipapp, shell/commit checks) and
   `release.yml` (release-please, archive, checksums, provenance).

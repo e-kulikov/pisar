@@ -1,7 +1,7 @@
 import argparse
 import json
 import sys
-from . import __version__, settings
+from . import __version__, agent, settings
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -26,11 +26,14 @@ def parser():
                                 description='Offline knowledge repository CLI; lexical search, explicit Git writes.')
     p.add_argument('--version', action='version', version=f'pisar {__version__}')
     p.add_argument('--skill', action=_Skill)
+    p.add_argument('--agent', choices=agent.AGENTS,
+                   help='Start this AI agent confined to the knowledge root; '
+                        'arguments after -- are passed to the agent itself')
     p.add_argument('--root', help='Knowledge root; default $PISAR_ROOT, else $XDG_DATA_HOME/wiki')
     p.add_argument('--state-dir', help='External runtime directory outside all Git repos and the root; '
                                        'default $PISAR_STATE_DIR, else $XDG_DATA_HOME/pisar')
     p.add_argument('--ruwana', help='Public ruwana binary; default $PISAR_RUWANA_BIN, else ruwana on PATH')
-    commands = p.add_subparsers(dest='command', required=True)
+    commands = p.add_subparsers(dest='command')
     for name in ('spaces', 'search', 'read', 'check', 'inventory'):
         sub = commands.add_parser(name)
         sub.add_argument('--scope', choices=('all', 'personal', 'work'), default='all')
@@ -64,8 +67,21 @@ def parser():
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    extra = []
+    if '--' in argv and any(a == '--agent' or a.startswith('--agent=') for a in argv[:argv.index('--')]):
+        split = argv.index('--')
+        argv, extra = argv[:split], argv[split + 1:]
+    p = parser()
+    args = p.parse_args(argv)
+    if args.agent and args.command:
+        p.error('--agent cannot be combined with a command')
+    if not args.agent and not args.command:
+        p.error('a command is required (or --agent)')
     try:
+        if args.agent:
+            agent.launch(args.agent, settings.root(args.root), settings.state_dir(args.state_dir),
+                         settings.ruwana(args.ruwana), extra)
         args.root = settings.root(args.root)
         args.state_dir = settings.state_dir(args.state_dir)
         args.ruwana = settings.ruwana(args.ruwana)
