@@ -126,5 +126,9 @@ class Fixture(unittest.TestCase):
         commit_all(remote)
         git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
             str(remote), 'work/module')
+        # Cloning a submodule does not copy the origin's local author identity.
+        module = self.root / 'work/module'
+        git(module, 'config', 'user.email', 'synthetic@example.invalid')
+        git(module, 'config', 'user.name', 'Synthetic fixture')
         commit_all(self.root)
-        return self.root / 'work/module'
+        return module
