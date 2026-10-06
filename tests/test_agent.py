@@ -60,7 +60,10 @@ class AgentTests(Fixture):
         prompt = (CHECKOUT / 'pisar/agent-prompt.md').read_text(encoding='utf-8')
         self.assertEqual(argv[argv.index('--system-prompt') + 1], prompt)
         self.assertNotIn('--system-prompt-file', argv)
-        self.assertIn('pisar --skill', prompt)
+        self.assertIn('pisar spaces', prompt)
+        self.assertIn('must be done with pisar', prompt)
+        for gone in ('AGENTS.md', 'workflows', 'coding', '--skill'):
+            self.assertNotIn(gone, prompt)
         self.assertIsNone(__import__('re').search(r'/home/|ekulikov|godel|herdr|codex', prompt, 2))
 
     def test_tools_are_minimal_and_mcp_is_disabled(self):
@@ -68,6 +71,24 @@ class AgentTests(Fixture):
         argv = call['argv']
         self.assertIn('--tools=Read,Write,Edit,Glob,Grep,Bash', argv)
         self.assertIn('--strict-mcp-config', argv)
+
+    def test_mcp_config_is_passed_only_when_the_root_has_one(self):
+        _, call = self.launch()
+        self.assertNotIn('--mcp-config', call['argv'])
+        self.assertIn('--strict-mcp-config', call['argv'])
+        config = self.root / '.mcp.json'
+        config.write_text('{"mcpServers": {}}')
+        _, call = self.launch()
+        argv = call['argv']
+        self.assertEqual(values(argv, '--mcp-config'), [str(config.resolve())])
+        self.assertLess(argv.index('--mcp-config'), argv.index('--strict-mcp-config'))
+
+    def test_mcp_config_must_be_a_regular_file(self):
+        target = self.base / 'elsewhere.json'
+        target.write_text('{}')
+        (self.root / '.mcp.json').symlink_to(target)
+        _, call = self.launch()
+        self.assertNotIn('--mcp-config', call['argv'])
 
     def test_bash_allowlist_has_no_mv_no_bare_git_no_bare_pisar(self):
         _, call = self.launch()

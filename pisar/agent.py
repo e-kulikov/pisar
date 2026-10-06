@@ -12,6 +12,7 @@ from .safety import WikiError
 
 AGENTS = ('claude',)
 PROMPT = 'agent-prompt.md'
+MCP_CONFIG = '.mcp.json'
 
 # Variadic option lists must each be followed by another option, never by an
 # argument meant for the agent.
@@ -34,13 +35,23 @@ def prompt_text():
     return files('pisar').joinpath(PROMPT).read_text(encoding='utf-8')
 
 
-def claude_command(executable, prompt, extra=()):
-    """Caller's own arguments come first, so variadic options cannot swallow them."""
+def mcp_config(root):
+    """The root's own MCP servers file, when it is a regular file (never a symlink)."""
+    path = Path(root) / MCP_CONFIG
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def claude_command(executable, prompt, extra=(), mcp=None):
+    """Caller's own arguments come first, so variadic options cannot swallow them.
+
+    MCP is strict: only servers from `mcp` (the root's .mcp.json) are loaded.
+    """
     return [executable, *extra,
             '--system-prompt', prompt,
             f'--tools={CLAUDE_TOOLS}',
             '--allowedTools', *CLAUDE_ALLOWED,
             '--disallowedTools', *CLAUDE_DENIED,
+            *(['--mcp-config', str(mcp)] if mcp else []),
             '--strict-mcp-config']
 
 
@@ -63,5 +74,5 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     env.update(CLAUDE_CONFIG_DIR=str(config), PISAR_ROOT=str(root),
                PISAR_STATE_DIR=str(runtime.base), PISAR_RUWANA_BIN=str(ruwana))
     os.chdir(root)
-    command = claude_command(executable, prompt_text(), extra)
+    command = claude_command(executable, prompt_text(), extra, mcp_config(root))
     os.execve(executable, command, env)
