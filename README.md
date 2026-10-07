@@ -815,10 +815,19 @@ so the question leaves the machine. pisar never contacts a service itself.
   (also the only allowed tools), `--strict-mcp-config` without any MCP file,
   `--no-session-persistence`, a replaced researcher system prompt that treats
   page content as untrusted data, a fresh temporary working directory that is
-  removed afterwards, and an environment without `PISAR_*` and `WIKI_ROOT`. It
+  removed afterwards, and a minimal environment (below). It
   shares the launcher's configuration directory `<state>/agents/claude` (same
   login), validated like the launcher does: outside Git, no symlinks. The
   question is sent on standard input, never as an argument.
+- **Environment allowlist.** The subprocess receives only `PATH`, `HOME`,
+  `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, the proxy variables (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms), the certificate
+  variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`,
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), `ANTHROPIC_*` and `CLAUDE_CODE_*`
+  (authentication and provider selection) and `CLAUDE_CONFIG_DIR`, which pisar
+  sets. Everything else, including `PISAR_*`, `WIKI_ROOT` and unrelated
+  secrets, is dropped; a provider that needs other variables (for example cloud
+  credentials) does not work through `research`.
 - **Model and effort**: `--model`/`--effort`, else `[agents.claude.researcher]`
   in the config file, else `sonnet` and `medium`; values are passed verbatim.
 - **Result.** The answer is validated strictly (unknown fields, empty claims,

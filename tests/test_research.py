@@ -14,11 +14,14 @@ from .support import Fixture
 # FAKE_CLAUDE_MODE. No network is ever used.
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys
-mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
+# The child environment is an allowlist, so the fake is configured by a file beside it.
+with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "fake.json")) as stream:
+    conf = json.load(stream)
+mode = conf["mode"]
 call = {"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ), "stdin": sys.stdin.read()}
-with open(os.environ["FAKE_CLAUDE_OUT"], "w") as stream:
+with open(conf["out"], "w") as stream:
     json.dump(call, stream)
-RESULT = json.loads(os.environ.get("FAKE_CLAUDE_RESULT", "null"))
+RESULT = json.loads(conf["result"])
 # Like the real claude (verified live), hooks of the configuration directory
 # run at session start unless --safe-mode disables all customisations.
 settings = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", ""), "settings.json")
@@ -70,11 +73,16 @@ class ResearchTests(Fixture):
         fake.chmod(0o755)
         self.out = self.base / 'claude-call.json'
         self.fake_env = {**self.env, 'PATH': f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
-                         'FAKE_CLAUDE_OUT': str(self.out), 'FAKE_CLAUDE_RESULT': json.dumps(GOOD),
+                         'FAKE_CLAUDE_RESULT': json.dumps(GOOD),
                          'PISAR_RUWANA_BIN': '/must/not/leak', 'WIKI_ROOT': '/must/not/leak'}
 
+    def fake(self, mode='ok', result=None):
+        (self.bin / 'fake.json').write_text(json.dumps(
+            {'mode': mode, 'out': str(self.out), 'result': result or json.dumps(GOOD)}))
+
     def research(self, *args, mode='ok', ok=True, env=None):
-        env = {**(env or self.fake_env), 'FAKE_CLAUDE_MODE': mode}
+        env = env or self.fake_env
+        self.fake(mode, env.get('FAKE_CLAUDE_RESULT'))
         return self.run_pisar('--root', self.root, '--state-dir', self.state, 'research', *args,
                               env=env, ok=ok)
 
@@ -289,8 +297,9 @@ class ResearchTests(Fixture):
 
     def test_config_dir_inside_git_is_refused(self):
         state = self.root / 'state'
+        self.fake()
         p = self.run_pisar('--root', self.root, '--state-dir', state, 'research', QUESTION,
-                           env={**self.fake_env, 'FAKE_CLAUDE_MODE': 'ok'}, ok=False)
+                           env=self.fake_env, ok=False)
         self.assertFalse(self.out.exists())
         self.assertTrue(p.stderr)
 
@@ -348,7 +357,8 @@ class ResearchTests(Fixture):
 
     def in_process(self, **patches):
         """research.run in this process with the fake claude on PATH (for patched limits)."""
-        self.enterContext(mock.patch.dict(os.environ, {**self.fake_env, 'FAKE_CLAUDE_MODE': 'ok'}, clear=True))
+        self.fake()
+        self.enterContext(mock.patch.dict(os.environ, self.fake_env, clear=True))
         for name, value in patches.items():
             self.enterContext(mock.patch.object(research, name, value))
         return lambda **kw: research.run(self.root, self.state, QUESTION, **kw)
@@ -371,6 +381,17 @@ class ResearchTests(Fixture):
               'ANTHROPIC_API_KEY': 'a1', 'ANTHROPIC_BASE_URL': 'a2', 'CLAUDE_CODE_USE_BEDROCK': '1',
               'LANG': 'en_US.UTF-8', 'LC_ALL': 'C.UTF-8', 'LC_TIME': 'C', 'TERM': 'xterm',
               'HOME': '/home/someone', 'USER': 'someone', 'LOGNAME': 'someone'}
+
+    def test_only_an_allowlist_of_environment_variables_reaches_claude(self):
+        env = {**self.fake_env, **self.PRIVATE, **self.PASSED}
+        self.research(QUESTION, env=env)
+        child = self.call()['env']
+        for name in self.PRIVATE:
+            self.assertNotIn(name, child)
+        for name, value in self.PASSED.items():
+            self.assertEqual(child.get(name), value, name)
+        self.assertIn(str(self.bin), child['PATH'])
+        self.assertEqual(child['CLAUDE_CONFIG_DIR'], str(self.state.resolve() / 'agents' / 'claude'))
 
 
 if __name__ == '__main__':
