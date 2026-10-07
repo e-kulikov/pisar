@@ -628,6 +628,18 @@ class AcceptTests(LessonCase):
         self.assertEqual(self.note(result).read_bytes(), original)
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root ignores file permissions')
+    def test_finalized_retry_does_not_depend_on_the_archive_directory(self):
+        batch, _, _ = self.prepared()
+        first = json.loads(self.accept(batch).stdout)
+        archive = self.archived(batch)[0]
+        before = archive.read_bytes()
+        archive.parent.chmod(0o500)
+        self.addCleanup(archive.parent.chmod, 0o700)
+        again = json.loads(self.accept(batch).stdout)
+        self.assertEqual(again, first | {'notes': again['notes']})
+        self.assertEqual(archive.read_bytes(), before)
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)

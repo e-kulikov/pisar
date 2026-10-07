@@ -78,9 +78,16 @@ class Batch:
         return journal
 
     def sync_archive(self, meta, journal=None):
-        # The retained copy survives discarding the workspace.
-        write_json(self.archive, {**(journal or self.journal()), 'root': meta['root'], 'from': meta['from'],
-                                  'to': meta['to'], 'title': meta['title']})
+        # The retained copy survives discarding the workspace. Unchanged content is never rewritten.
+        value = {**(journal or self.journal()), 'root': meta['root'], 'from': meta['from'],
+                 'to': meta['to'], 'title': meta['title']}
+        wanted = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
+        try:
+            if self.archive.is_file() and self.archive.read_bytes() == wanted:
+                return
+        except OSError:
+            pass
+        write_json(self.archive, value)
 
     def current(self, meta):
         if not meta['revisions']:
@@ -457,7 +464,10 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         verdict = decision.get('verdict')
         # Finalization is idempotent: a retry repairs a missing event, status or retained journal.
         if any(e['event'] == 'accept' for e in batch.journal()['events']):
-            batch.sync_archive(meta)
+            try:
+                batch.sync_archive(meta)
+            except OSError:
+                pass  # Archive upkeep never fails an acceptance that is already finalized.
         else:
             batch.record(meta, 'accept', revision=rev['revision'], sha256=rev['sha256'], keeps=keeps,
                          skip_review=bool(skip_review), mention_origin=bool(mention_origin), verdict=verdict,
