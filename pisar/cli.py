@@ -1,7 +1,8 @@
 import argparse
 import json
 import sys
-from . import __version__, agent, settings
+from types import SimpleNamespace
+from . import __version__, agent, config_command, settings
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -63,6 +64,7 @@ def parser():
             sub.add_argument('--item', required=True)
         if name == 'reroute':
             sub.add_argument('--space', required=True)
+    config_command.add_parser(commands)
     return p
 
 
@@ -82,6 +84,10 @@ def main(argv=None):
         if args.agent:
             agent.launch(args.agent, settings.root(args.root), settings.state_dir(args.state_dir),
                          settings.ruwana(args.ruwana), extra)
+        if args.command == 'config':
+            ctx = SimpleNamespace(flags=dict(root=args.root, state_dir=args.state_dir, ruwana=args.ruwana))
+            print(json.dumps(config_command.run(args, ctx), ensure_ascii=False, indent=2))
+            return 0
         args.root = settings.root(args.root)
         args.state_dir = settings.state_dir(args.state_dir)
         args.ruwana = settings.ruwana(args.ruwana)

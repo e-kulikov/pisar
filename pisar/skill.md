@@ -43,7 +43,9 @@ validation fails.
 ## Configuration
 
 Global options go **before** the command. A flag beats its environment variable,
-which beats the default; empty variables count as unset.
+which beats the user's config file (`$XDG_CONFIG_HOME/pisar/config.toml`), which
+beats the default; empty variables count as unset. `pisar config show` prints
+each effective value and its source (`flag`, `env`, `config` or `default`).
 
 | Option | Environment | Default |
 | --- | --- | --- |
