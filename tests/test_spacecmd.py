@@ -125,6 +125,30 @@ class DomainTests(SpaceCommandFixture):
         self.assertTrue((self.root / 'acme/.domain.toml').is_file())
         self.clean()
 
+    def test_cloned_marker_must_be_a_regular_file_and_nothing_is_left_behind(self):
+        work = self.base / 'linked-work'
+        init_repo(work)
+        (work / 'real.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
+        (work / '.domain.toml').symlink_to('real.toml')
+        commit_all(work)
+        bare = self.base / 'linked.git'
+        git(self.base, 'clone', '-q', '--bare', str(work), str(bare))
+        head = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', bare, ok=False)
+        self.assertIn('symlink', failed.stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertFalse((self.root / 'acme').exists())
+        self.assertFalse((self.root / '.git/modules/acme').exists())
+        self.clean()
+        self.assertTrue(self.data('check')['ok'])
+
+    def test_cloned_marker_with_another_title_is_refused_and_cleaned_up(self):
+        bare = self.origin(marker='acme')
+        failed = self.cli('domain', 'add', '--id', 'acme', '--title', 'Different', '--repo', bare, ok=False)
+        self.assertIn('Seed', failed.stderr)
+        self.assertFalse((self.root / 'acme').exists())
+        self.clean()
+
     def test_add_repo_refuses_option_like_locations(self):
         self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', '--upload-pack=x', ok=False)
         self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', 'ext::sh -c id', ok=False)

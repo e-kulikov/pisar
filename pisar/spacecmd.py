@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import tomllib
 import unicodedata
 from . import gitops
@@ -176,6 +177,33 @@ def _marker(ident, title):
     return f'schema_version = 1\nid = "{ident}"\ntitle = {json.dumps(title, ensure_ascii=False)}\n'
 
 
+def _check_marker(base, ident, title):
+    """An existing marker must be a regular file naming this domain and title."""
+    marker = base / '.domain.toml'
+    if marker.is_symlink() or not marker.is_file():
+        raise WikiError(f'{ident}/.domain.toml must be a regular file; symlink refused')
+    try:
+        known = load_domain(base)
+    except (WikiError, ValueError, OSError) as error:
+        raise WikiError(f'{ident}/.domain.toml: {error}') from None
+    if known.title != title:
+        raise WikiError(f'domain {ident} marker has title {known.title!r}')
+
+
+def _undo_submodule(root, ident, had_modules):
+    """Remove a submodule this command just added, leaving the tree as it was."""
+    gitops.run(root, 'rm', '-f', '-q', '--', ident, check=False)
+    gitops.run(root, 'config', '--remove-section', f'submodule.{ident}', check=False)
+    modules = root / '.git/modules' / ident
+    if modules.is_dir() and not modules.is_symlink():
+        shutil.rmtree(modules)
+    if not had_modules:
+        gitops.run(root, 'rm', '-f', '-q', '--cached', '--', '.gitmodules', check=False)
+        (root / '.gitmodules').unlink(missing_ok=True)
+    if (root / ident).is_dir() and not (root / ident).is_symlink():
+        shutil.rmtree(root / ident)
+
+
 def _blank(path):
     return not path.exists() or all(BLANK.fullmatch(p.name) for p in path.iterdir())
 
@@ -190,7 +218,10 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
     intent = dict(id=ident, title=title, repo=location and location[0], layout=layout)
 
     def finish(changed, commits=()):
-        record = Wiki(root).domains[ident].record(root)
+        fresh = Wiki(root)
+        if ident not in fresh.domains:
+            raise WikiError('; '.join(fresh.errors_in({ident})) or f'domain {ident} was not created')
+        record = fresh.domains[ident].record(root)
         return dict(domain=record, changed=changed, commits=list(commits))
 
     def body(runtime, resumed):
@@ -217,7 +248,14 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
         def apply(journal):
             if location and not _registered(wiki, ident):
                 options = ['-c', 'protocol.file.allow=always'] if location[1] else []
+                had_modules = bool(gitops.run(root, 'ls-files', '--', '.gitmodules').strip())
                 gitops.run(root, *options, 'submodule', 'add', '-q', '--', location[0], ident)
+                try:
+                    if (base / '.domain.toml').exists() or (base / '.domain.toml').is_symlink():
+                        _check_marker(base, ident, title)
+                except WikiError:
+                    _undo_submodule(root, ident, had_modules)
+                    raise
             target = gitops.owner(base, root)
             marker = base / '.domain.toml'
             # Decided once, after any clone and before the marker exists; a retry reuses it.
@@ -225,10 +263,8 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
                 journal['scaffold'] = layout == 'para' and not marker.exists() and _blank(base)
                 runtime.store(journal)
             paths = []
-            if marker.exists():
-                known = load_domain(base)
-                if known.title != title:
-                    raise WikiError(f'domain {ident} marker has title {known.title!r}')
+            if marker.exists() or marker.is_symlink():
+                _check_marker(base, ident, title)
             else:
                 atomic_bytes(marker, _marker(ident, title).encode())
                 paths.append('.domain.toml')
