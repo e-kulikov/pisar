@@ -819,15 +819,26 @@ so the question leaves the machine. pisar never contacts a service itself.
   shares the launcher's configuration directory `<state>/agents/claude` (same
   login), validated like the launcher does: outside Git, no symlinks. The
   question is sent on standard input, never as an argument.
-- **Environment allowlist.** The subprocess receives only `PATH`, `HOME`,
-  `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, the proxy variables (`HTTP_PROXY`,
-  `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms), the certificate
+- **Environment allowlist.** The subprocess receives only these variables, by
+  exact name (no `ANTHROPIC_*`/`CLAUDE_CODE_*` prefix match, so unrelated or
+  session variables of a parent Claude Code never pass): `PATH`, `HOME`,
+  `USER`, `LOGNAME`, `LANG`, `LC_*` (locale), `TERM`; the proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and lowercase forms); the certificate
   variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`,
-  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`), `ANTHROPIC_*` and `CLAUDE_CODE_*`
-  (authentication and provider selection) and `CLAUDE_CONFIG_DIR`, which pisar
-  sets. Everything else, including `PISAR_*`, `WIKI_ROOT` and unrelated
-  secrets, is dropped; a provider that needs other variables (for example cloud
-  credentials) does not work through `research`.
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`); Anthropic credentials, endpoint and
+  models (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+  `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`,
+  `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
+  `CLAUDE_CODE_OAUTH_TOKEN`); and the provider selectors
+  `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY`. Cloud credentials pass only for the
+  provider that is selected (value `1`, `true`, `yes` or `on`): Bedrock
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+  `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_BEARER_TOKEN_BEDROCK`,
+  `ANTHROPIC_BEDROCK_BASE_URL`; Vertex `GOOGLE_APPLICATION_CREDENTIALS`,
+  `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_VERTEX_BASE_URL`;
+  Foundry `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_BASE_URL`,
+  `ANTHROPIC_FOUNDRY_RESOURCE`. `CLAUDE_CONFIG_DIR` is set by pisar. Everything
+  else, including `PISAR_*`, `WIKI_ROOT` and unrelated secrets, is dropped.
 - **Model and effort**: `--model`/`--effort`, else `[agents.claude.researcher]`
   in the config file, else `sonnet` and `medium`; values are passed verbatim.
 - **Result.** The answer is validated strictly (unknown fields, empty claims,

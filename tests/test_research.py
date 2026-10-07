@@ -379,7 +379,7 @@ class ResearchTests(Fixture):
     PASSED = {'HTTP_PROXY': 'p1', 'HTTPS_PROXY': 'p2', 'NO_PROXY': 'p3', 'http_proxy': 'p4',
               'https_proxy': 'p5', 'no_proxy': 'p6', 'SSL_CERT_FILE': 'c1', 'SSL_CERT_DIR': 'c2',
               'NODE_EXTRA_CA_CERTS': 'c3', 'REQUESTS_CA_BUNDLE': 'c4', 'CURL_CA_BUNDLE': 'c5',
-              'ANTHROPIC_API_KEY': 'a1', 'ANTHROPIC_BASE_URL': 'a2', 'CLAUDE_CODE_USE_BEDROCK': '1',
+              'ANTHROPIC_API_KEY': 'a1', 'ANTHROPIC_BASE_URL': 'a2', 'CLAUDE_CODE_USE_FOUNDRY': '1',
               'LANG': 'en_US.UTF-8', 'LC_ALL': 'C.UTF-8', 'LC_TIME': 'C', 'TERM': 'xterm',
               'HOME': '/home/someone', 'USER': 'someone', 'LOGNAME': 'someone'}
 
@@ -393,6 +393,39 @@ class ResearchTests(Fixture):
             self.assertEqual(child.get(name), value, name)
         self.assertIn(str(self.bin), child['PATH'])
         self.assertEqual(child['CLAUDE_CONFIG_DIR'], str(self.state.resolve() / 'agents' / 'claude'))
+
+    def test_unrelated_variables_with_vetted_prefixes_do_not_reach_claude(self):
+        unrelated = {'ANTHROPIC_INTERNAL_CLIENT_NOTE': 'n1', 'CLAUDE_CODE_PRIVATE_NOTE': 'n2',
+                     'LC_PRIVATE': 'ok-locale-like'}  # LC_* is locale by definition and stays
+        self.research(QUESTION, env={**self.fake_env, **unrelated})
+        child = self.call()['env']
+        self.assertNotIn('ANTHROPIC_INTERNAL_CLIENT_NOTE', child)
+        self.assertNotIn('CLAUDE_CODE_PRIVATE_NOTE', child)
+
+    def test_vetted_authentication_and_provider_variables_reach_claude(self):
+        vetted = {'ANTHROPIC_API_KEY': '1', 'ANTHROPIC_AUTH_TOKEN': '2', 'ANTHROPIC_BASE_URL': '3',
+                  'ANTHROPIC_CUSTOM_HEADERS': '4', 'ANTHROPIC_MODEL': '5', 'CLAUDE_CODE_OAUTH_TOKEN': '6',
+                  'CLAUDE_CODE_USE_BEDROCK': '', 'CLAUDE_CODE_USE_VERTEX': '', 'CLAUDE_CODE_USE_FOUNDRY': ''}
+        self.research(QUESTION, env={**self.fake_env, **vetted})
+        child = self.call()['env']
+        for name, value in vetted.items():
+            self.assertEqual(child.get(name), value, name)
+
+    def test_cloud_credentials_pass_only_for_their_selected_provider(self):
+        cloud = {'AWS_ACCESS_KEY_ID': 'a', 'AWS_SECRET_ACCESS_KEY': 'b', 'AWS_REGION': 'r',
+                 'GOOGLE_APPLICATION_CREDENTIALS': '/g', 'CLOUD_ML_REGION': 'm', 'ANTHROPIC_FOUNDRY_API_KEY': 'f'}
+        self.research(QUESTION, env={**self.fake_env, **cloud})
+        self.assertFalse(set(cloud) & set(self.call()['env']))
+        self.research(QUESTION, env={**self.fake_env, **cloud, 'CLAUDE_CODE_USE_BEDROCK': '1'})
+        child = self.call()['env']
+        self.assertEqual({k: child.get(k) for k in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION')},
+                         {'AWS_ACCESS_KEY_ID': 'a', 'AWS_SECRET_ACCESS_KEY': 'b', 'AWS_REGION': 'r'})
+        self.assertNotIn('GOOGLE_APPLICATION_CREDENTIALS', child)
+        self.assertNotIn('ANTHROPIC_FOUNDRY_API_KEY', child)
+        self.research(QUESTION, env={**self.fake_env, **cloud, 'CLAUDE_CODE_USE_VERTEX': '1'})
+        child = self.call()['env']
+        self.assertEqual(child['GOOGLE_APPLICATION_CREDENTIALS'], '/g')
+        self.assertNotIn('AWS_SECRET_ACCESS_KEY', child)
 
     def tmpdir_case(self, tmp, via_environment):
         tmp.mkdir(exist_ok=True)
