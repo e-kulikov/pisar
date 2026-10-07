@@ -215,6 +215,39 @@ URLs, hostnames, IPs), `warn` (terms of the `--from` domain, day-precise dates).
 scan: it misses paraphrases and unlisted names and never edits text. Show the
 findings to the user and change the text only with their agreement.
 
+## Lessons: carry an insight between domains
+
+```sh
+pisar lesson start --from DOMAIN_OR_ADDRESS --to ADDRESS --title T
+pisar lesson check --batch ID
+pisar lesson review --batch ID --file review.json
+pisar lesson show --batch ID
+pisar lesson accept --batch ID [--keep F1,F2] [--mention-origin] [--skip-review]
+pisar lesson discard --batch ID
+```
+
+Use it when the user wants a general lesson from one domain kept in another
+space. `start` prints the batch id and the `draft.md` path (outside the wiki:
+edit it with your normal file tools). Write only the generalised insight.
+`check` snapshots the draft as a revision and reports guard findings (stable
+ids) plus the diff. Show the findings to the user, edit the draft only with
+their agreement, and `check` again. Then have the revision reviewed by the
+senior reviewer, which must answer exactly the JSON of `review`
+(`schema_version`, `revision`, `sha256`, `verdict` clear|concerns|block,
+`findings[{tier, category, excerpt, comment, suggestion}]`, `reviewer.model`);
+`review` refuses a file for a stale revision. `show` summarises everything.
+
+`accept` writes exactly the reviewed revision as a `note` (no link to the
+origin; `--mention-origin` adds only the origin domain title as plain text). It
+refuses without a review of the current revision and while a finding of the
+current revision is undecided. A decision is an edit that removes the finding,
+or the user's explicit consent recorded with `--keep ID,ID`. For `severe`
+findings warn strongly and ask at most twice, then follow the user's explicit
+decision. `--skip-review` only when the user asks for it. The verdict is
+advisory. Crossing domains shows a CROSS-DOMAIN warning: repeat it to the user.
+Never strip text on your own and never run `accept` without the user's go-ahead.
+`discard` drops the workspace and keeps a journal entry.
+
 ## Recovery and rollback
 
 - Every write has a journal in the state directory. If an operation stops

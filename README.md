@@ -793,6 +793,65 @@ misspellings, inflected or unlisted names, images and encoded content, and it ca
 flag harmless text. It only reports; it never edits, strips or redacts anything,
 and the input file is only read. Decide on each finding with the user.
 
+## Lessons: carry a reviewed insight into a space
+
+```sh
+pisar lesson start --from acme --to personal/career-notes --title 'Sizing a launch team'
+pisar lesson check --batch lesson-3fa9c1d2b4
+pisar lesson review --batch lesson-3fa9c1d2b4 --file /abs/review.json
+pisar lesson show --batch lesson-3fa9c1d2b4
+pisar lesson accept --batch lesson-3fa9c1d2b4 [--keep F1,F2] [--mention-origin] [--skip-review]
+pisar lesson discard --batch lesson-3fa9c1d2b4
+```
+
+A lesson is a general insight written from experience in one domain (`--from`, a
+domain id or a space address) and filed as a `note` in a space of any domain
+(`--to`, an address). The guard and a reviewer only report; the agent edits the
+draft after asking the user; `accept` writes exactly what was reviewed.
+
+The batch lives outside Git and outside the wiki, in `<state>/lessons/<batch>/`:
+`draft.md` (edited freely), `meta.json`, `revisions/rN.md`, `rN.report.json`,
+`rN.review.json` and `journal.json`. Batch ids are generated and unique. A state
+directory inside the wiki root or any Git repository is refused.
+
+- `check` snapshots `draft.md` as the next immutable revision (sha256 recorded;
+  an unchanged draft keeps the current revision and its review), runs the guard
+  with the terms of the `--from` domain, stores the report with stable finding
+  ids and prints the findings and the diff against the previous revision.
+- `review` attaches reviewer JSON to the **current** revision:
+
+  ```json
+  {"schema_version": 1, "revision": "r2", "sha256": "<sha256 of that revision>",
+   "verdict": "clear|concerns|block",
+   "findings": [{"tier": "severe|ask|warn", "category": "...", "excerpt": "...",
+                 "comment": "...", "suggestion": "..."}],
+   "reviewer": {"model": "..."}}
+  ```
+
+  A file for another revision or hash is refused as stale. The verdict is
+  advisory: even `block` does not stop `accept` once the user decided.
+- `show` prints a human-readable report: destination, current text, findings by
+  tier, suggested generalisations, the review, open decisions and the diff.
+- `accept` refuses unless the current revision has a review (`--skip-review`
+  accepts without one and is recorded), `draft.md` equals the current revision,
+  and every finding of the current revision is decided: removed by a later edit,
+  or listed in `--keep` (the user's explicit decision; unknown ids are refused).
+  It writes exactly the reviewed text as `notes/<title-slug>.md` with valid front
+  matter (`type = "note"`, `sources = []`) and no reference to the origin;
+  `--mention-origin` adds only a plain-text `Origin: <domain title>` line. The
+  write uses the normal machinery: writer lock, journal (operation id equals the
+  batch id), commit of explicit paths, submodules committed before their parent.
+  Keeps, skip and mention are recorded in the batch journal. Rerunning a
+  completed `accept` verifies and writes nothing; changed flags are refused.
+- `discard` removes the workspace and keeps the journal under the runtime
+  directory (`roots/<id>/lessons/<batch>.json`).
+
+Source and target may be any domains. Across domains, `start`, `check`, `show`
+and `accept` print a prominent `CROSS-DOMAIN` warning; it never blocks, but the
+decision to proceed is the user's. Nothing is silently stripped: the guard is a
+best-effort lexical scan and the reviewer is a model, so neither guarantees
+confidentiality.
+
 ## Research through an isolated web researcher
 
 ```sh
