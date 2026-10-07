@@ -125,27 +125,33 @@ class AgentTests(Fixture):
         self.assertNotIn('--add-dir', call['argv'])
 
     def test_bundled_plugin_is_extracted_and_passed_with_plugin_dir(self):
-        from pisar import __version__
+        from pisar import claude_plugin
         _, call = self.launch()
-        directory = self.state.resolve() / 'agents' / 'claude' / 'plugin' / __version__
+        directory = self.state.resolve() / 'agents' / 'claude' / 'plugin' / claude_plugin.generation({})
         self.assertEqual(values(call['argv'], '--plugin-dir'), [str(directory)])
         self.assertTrue((directory / '.claude-plugin' / 'plugin.json').is_file())
         self.assertTrue((directory / 'skills' / 'lessons' / 'SKILL.md').is_file())
 
     def test_reviewer_agent_takes_model_and_effort_from_the_config(self):
-        from pisar import __version__
-        directory = self.state.resolve() / 'agents' / 'claude' / 'plugin' / __version__
-        reviewer = directory / 'agents' / 'lesson-reviewer.md'
-        self.launch()
-        self.assertIn('model: opus\neffort: high\n', reviewer.read_text())
+        from pisar import claude_plugin
+        plugins = self.state.resolve() / 'agents' / 'claude' / 'plugin'
+        _, call = self.launch()
+        default = Path(values(call['argv'], '--plugin-dir')[0])
+        self.assertEqual(default, plugins / claude_plugin.generation({}))
+        self.assertIn('model: opus\neffort: high\n', (default / 'agents/lesson-reviewer.md').read_text())
         self.write_config('[agents.claude.reviewer]\nmodel = "m1"\neffort = "low"\n')
-        self.launch()
-        self.assertIn('model: m1\neffort: low\n', reviewer.read_text())
+        _, call = self.launch()
+        changed = Path(values(call['argv'], '--plugin-dir')[0])
+        self.assertEqual(changed, plugins / claude_plugin.generation({'model': 'm1', 'effort': 'low'}))
+        self.assertNotEqual(changed, default)
+        self.assertIn('model: m1\neffort: low\n', (changed / 'agents/lesson-reviewer.md').read_text())
+        self.assertIn('model: opus\neffort: high\n', (default / 'agents/lesson-reviewer.md').read_text())
 
     def test_relaunch_reuses_the_extracted_plugin_without_rewriting_it(self):
-        from pisar import __version__
+        from pisar import claude_plugin
         self.launch()
-        manifest = self.state.resolve() / 'agents/claude/plugin' / __version__ / '.claude-plugin/plugin.json'
+        manifest = (self.state.resolve() / 'agents/claude/plugin' / claude_plugin.generation({})
+                    / '.claude-plugin/plugin.json')
         before = manifest.stat().st_mtime_ns
         self.launch()
         self.assertEqual(manifest.stat().st_mtime_ns, before)
@@ -190,12 +196,12 @@ class AgentTests(Fixture):
         self.assertEqual([x.name for x in repo.iterdir()], ['.git'])
 
     def test_version_directory_symlink_is_refused(self):
-        from pisar import __version__
+        from pisar import claude_plugin
         target = self.base / 'elsewhere'
         target.mkdir()
         plugin = self.state / 'agents' / 'claude' / 'plugin'
         plugin.mkdir(parents=True)
-        (plugin / __version__).symlink_to(target)
+        (plugin / claude_plugin.generation({})).symlink_to(target)
         p, call = self.launch(ok=False)
         self.assertIn('symlink', p.stderr)
         self.assertIsNone(call)

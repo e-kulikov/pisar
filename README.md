@@ -210,8 +210,10 @@ is supported. It is used instead of a command:
   only place the agent may edit outside the root is the lesson workspace
   `<state-dir>/lessons` (`--allowedTools Edit(//<state-dir>/lessons/**)`).
 - A bundled plugin is extracted to `<state-dir>/agents/claude/plugin/<pisar
-  version>/` and passed with `--plugin-dir`. Extraction is atomic and does
-  nothing when the tree is already current. It provides the skills `pisar` (the
+  version>-<hash>/` and passed with `--plugin-dir`. The hash covers everything
+  generated, so each generation is immutable: changed settings or a new pisar
+  publish a new directory with one atomic rename and never alter one a running
+  session uses. Only the five most recently used generations are kept. It provides the skills `pisar` (the
   text of `pisar --skill`), `lessons` and `research`; a hook that denies direct
   `Write`/`Edit`/`MultiEdit` of `.wiki.toml` and `.domain.toml` (use `pisar domain`
   and `pisar space`); and the `lesson-reviewer` subagent, generated with

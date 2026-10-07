@@ -19,6 +19,8 @@ from .operations import outside_git
 
 SOURCE = 'plugin/claude'
 SKILL = 'skill.md'
+KEEP = 5  # generations kept; see _prune
+STAGING = '.build.tmp-'
 DEFAULT_REVIEWER = {'model': 'opus', 'effort': 'high'}
 
 REVIEWER = '''---
@@ -119,60 +121,69 @@ def _locked(parent):
             fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def _recover(parent, target):
-    """Under the lock: finish what an interrupted extractor left behind.
+def generation(reviewer=None):
+    """Directory name of the plugin generation for these reviewer settings.
 
-    A retired tree is put back when the installed one is missing, otherwise dropped;
-    half-built staging directories are dropped.
+    Everything generated is part of the hash, so a generation's content never changes
+    after publication: new settings or a new pisar build mean a new directory.
     """
-    retired = sorted(parent.glob(f'.{__version__}.old-*'), key=lambda p: p.stat().st_mtime_ns)
-    for path in reversed(retired):
-        if not target.exists() and not target.is_symlink():
-            os.replace(path, target)
-        else:
-            shutil.rmtree(path, ignore_errors=True)
-    for path in parent.glob(f'.{__version__}.tmp-*'):
+    return f'{__version__}-{_digest(tree(reviewer))[:8]}'
+
+
+def _is_generation(path):
+    name = path.name
+    return not name.startswith('.') and path.is_dir() and not path.is_symlink() \
+        and name[-9:-8] == '-' and all(c in '0123456789abcdef' for c in name[-8:])
+
+
+def _prune(parent, current):
+    """Drop all but the KEEP most recently used generations (never CURRENT).
+
+    Running sessions keep reading the generation they started with, so old ones
+    stay for a while; a session older than KEEP newer generations loses its plugin.
+    """
+    found = sorted((p for p in parent.iterdir() if _is_generation(p)),
+                   key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for path in [p for p in found[KEEP:] if p != current]:
         shutil.rmtree(path, ignore_errors=True)
 
 
 def extract(config, reviewer=None):
-    """Write the plugin to ``<config>/plugin/<version>`` and return that directory.
+    """Publish the plugin generation for REVIEWER settings and return its directory.
 
-    Idempotent: an identical tree is left alone, anything else (missing, damaged, or
-    generated for other reviewer settings) is replaced as a whole. Extractors are
-    serialized by a lock; the installed tree is retired aside and put back if
-    publishing the new one fails, and an interrupted run is recovered by the next.
+    Generations are immutable: an installed one is never modified or moved while it
+    is intact. A new one is built in a staging directory and published with a single
+    atomic rename to a path that does not exist yet, so a running session never
+    finds a file missing. Builders are serialized by a lock. A launch marks its
+    generation as recently used and prunes only the generations beyond KEEP. A
+    damaged generation (the only case that changes an installed path) is moved
+    aside and rebuilt.
     """
     parent = outside_git(Path(config) / 'plugin')
-    target = outside_git(parent / __version__)
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _locked(parent):
-        _recover(parent, target)
         files = tree(reviewer)
+        target = outside_git(parent / f'{__version__}-{_digest(files)[:8]}')
+        for stale in parent.glob(f'{STAGING}*'):
+            shutil.rmtree(stale, ignore_errors=True)
         existing = _current(target)
-        if existing is not None and _digest(existing) == _digest(files):
-            return target
-        staging = Path(tempfile.mkdtemp(prefix=f'.{__version__}.tmp-', dir=parent))
-        retired = None
-        try:
-            for name, data in files.items():
-                file = staging / name
-                file.parent.mkdir(parents=True, exist_ok=True)
-                file.write_bytes(data)
-                file.chmod(0o644)
-            for directory in (staging, *(p for p in staging.rglob('*') if p.is_dir())):
-                directory.chmod(0o755)
-            if target.exists() or target.is_symlink():
-                retired = parent / f'.{__version__}.old-{os.getpid()}'
-                os.replace(target, retired)
+        if existing is None or _digest(existing) != _digest(files):
+            staging = Path(tempfile.mkdtemp(prefix=STAGING, dir=parent))
             try:
+                for name, data in files.items():
+                    file = staging / name
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    file.write_bytes(data)
+                    file.chmod(0o644)
+                for directory in (staging, *(p for p in staging.rglob('*') if p.is_dir())):
+                    directory.chmod(0o755)
+                if target.exists() or target.is_symlink():
+                    os.replace(target, Path(tempfile.mkdtemp(prefix=STAGING, dir=parent)) / 'damaged')
                 os.replace(staging, target)
-            except BaseException:
-                if retired is not None:
-                    os.replace(retired, target)
-                raise
-            if retired is not None:
-                shutil.rmtree(retired, ignore_errors=True)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+                for leftover in parent.glob(f'{STAGING}*'):
+                    shutil.rmtree(leftover, ignore_errors=True)
+        os.utime(target)
+        _prune(parent, target)
     return target

@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -94,8 +95,8 @@ class PackagingTests(unittest.TestCase):
         init_repo(root)
         env = {**self.env, 'PATH': f'{fake.parent}{os.pathsep}{os.environ["PATH"]}'}
         run(zipapp, '--root', root, '--state-dir', state, '--agent', 'claude', env=env, cwd=self.base)
-        plugin = next((state / 'agents/claude/plugin').iterdir())
-        self.assertEqual(plugin.name, VERSION)
+        plugin, = [p for p in (state / 'agents/claude/plugin').iterdir() if not p.name.startswith('.')]
+        self.assertRegex(plugin.name, rf'^{re.escape(VERSION)}-[0-9a-f]{{8}}$')
         for name in ('.claude-plugin/plugin.json', 'skills/pisar/SKILL.md', 'skills/lessons/SKILL.md',
                      'skills/research/SKILL.md', 'hooks/hooks.json', 'hooks/protect-descriptors.py',
                      'agents/lesson-reviewer.md'):

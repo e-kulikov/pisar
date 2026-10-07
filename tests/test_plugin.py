@@ -1,5 +1,6 @@
 """Extraction of the bundled Claude plugin: contents, atomicity, idempotence, hook."""
 import json
+import re
 import threading
 from unittest import mock
 import os
@@ -67,12 +68,17 @@ class ExtractionTests(unittest.TestCase):
     def extract(self, **reviewer):
         return plugin.extract(self.target, reviewer)
 
+    def generations(self):
+        return sorted(p.name for p in (self.target / 'plugin').iterdir() if not p.name.startswith('.'))
+
     def tree(self, root):
         return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file()}
 
-    def test_extracts_into_a_directory_named_by_the_pisar_version(self):
+    def test_extracts_into_a_generation_named_by_version_and_content_hash(self):
         path = self.extract()
-        self.assertEqual(path, self.target / 'plugin' / __version__)
+        self.assertEqual(path, self.target / 'plugin' / plugin.generation({}))
+        self.assertRegex(path.name, rf'^{re.escape(__version__)}-[0-9a-f]{{8}}$')
+        self.assertNotEqual(path, self.extract(model='other'))
         manifest = json.loads((path / '.claude-plugin' / 'plugin.json').read_text())
         self.assertEqual(manifest['version'], __version__)
         self.assertEqual(manifest['name'], 'pisar')
@@ -96,8 +102,6 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual((frontmatter(text)['model'], frontmatter(text)['effort']), ('opus', 'high'))
         text = (self.extract(model='some-model[1m]', effort='max') / 'agents' / 'lesson-reviewer.md').read_text()
         self.assertEqual((frontmatter(text)['model'], frontmatter(text)['effort']), ('some-model[1m]', 'max'))
-        self.assertEqual(json.loads((self.target / 'plugin' / __version__ / '.claude-plugin/plugin.json')
-                                    .read_text())['version'], __version__)
 
     def reviewer(self, **options):
         return (self.extract(**options) / 'agents' / 'lesson-reviewer.md').read_text()
@@ -140,63 +144,105 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(self.tree(path), before)
         self.assertEqual({p: (path / p).stat().st_mtime_ns for p in before}, stamps)
 
-    def test_changed_reviewer_settings_replace_the_tree_and_leave_no_leftovers(self):
-        path = self.extract()
-        (path / 'stray.txt').write_text('edited by hand')
-        self.extract(model='other')
-        self.assertFalse((path / 'stray.txt').exists())
-        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'other')
-        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir() if p.name != '.lock'), [__version__])
+    def test_changed_settings_publish_a_new_generation_and_never_touch_the_old_one(self):
+        old = self.extract(model='first')
+        before = self.tree(old)
+        stamps = {n: (old / n).stat().st_mtime_ns for n in before}
+        new = self.extract(model='second')
+        self.assertNotEqual(old, new)
+        self.assertEqual(frontmatter((new / 'agents/lesson-reviewer.md').read_text())['model'], 'second')
+        self.assertEqual(self.tree(old), before)
+        self.assertEqual({n: (old / n).stat().st_mtime_ns for n in before}, stamps)
+        self.assertEqual(self.extract(model='first'), old)
+        self.assertEqual(len(self.generations()), 2)
 
-    def test_damaged_tree_is_repaired(self):
+    def test_damaged_generation_is_repaired(self):
         path = self.extract()
         (path / 'hooks' / 'hooks.json').unlink()
-        self.extract()
-        self.assertTrue((path / 'hooks' / 'hooks.json').is_file())
+        self.assertEqual(self.extract(), path)
+        self.assertEqual(self.tree(path), plugin.tree({}))
+        self.assertEqual(self.generations(), [path.name])
 
-    def test_other_versions_stay_and_partial_leftovers_are_ignored(self):
-        old = self.target / 'plugin' / '0.0.1'
+    def test_other_versions_stay_and_partial_leftovers_are_removed(self):
+        old = self.target / 'plugin' / '0.0.1-0123abcd'
         old.mkdir(parents=True)
         (old / 'marker').write_text('x')
-        (self.target / 'plugin' / f'.{__version__}.tmp-123').mkdir()
+        stale = self.target / 'plugin' / '.build.tmp-123'
+        stale.mkdir()
         self.extract()
         self.assertTrue((old / 'marker').exists())
+        self.assertFalse(stale.exists())
 
-    def test_failed_replacement_keeps_the_installed_tree(self):
-        path = self.extract(model='first')
+    def test_publication_is_a_single_rename_to_a_new_path(self):
+        self.extract(model='first')
         real = os.replace
         calls = []
 
-        def failing(src, dst, *a, **k):
-            calls.append(dst)
-            if len(calls) == 2:
-                raise OSError('simulated failure')
+        def spy(src, dst, *a, **k):
+            calls.append((Path(src).name, Path(dst).name, Path(dst).exists()))
             return real(src, dst, *a, **k)
 
-        with mock.patch.object(plugin.os, 'replace', failing):
+        with mock.patch.object(plugin.os, 'replace', spy):
+            new = self.extract(model='second')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((calls[0][1], calls[0][2]), (new.name, False))
+
+    def test_failed_publication_keeps_installed_generations_and_leaves_no_staging(self):
+        old = self.extract(model='first')
+        before = self.tree(old)
+        with mock.patch.object(plugin.os, 'replace', side_effect=OSError('simulated failure')):
             with self.assertRaises(OSError):
                 self.extract(model='second')
-        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'first')
-        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir() if p.name != '.lock'),
-                         [__version__])
+        self.assertEqual(self.tree(old), before)
+        self.assertEqual(self.generations(), [old.name])
+        self.assertEqual([p.name for p in (self.target / 'plugin').iterdir() if p.name.startswith('.build')], [])
 
-    def test_interrupted_replacement_is_recovered_from_the_retired_tree(self):
-        path = self.extract(model='first')
-        retired = path.with_name(f'.{__version__}.old-1')
-        path.rename(retired)  # a crash between the two renames
-        self.assertFalse(path.exists())
-        self.extract(model='first')
-        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'first')
-        self.assertFalse(retired.exists())
+    def test_only_the_newest_generations_are_kept(self):
+        paths = []
+        for i in range(plugin.KEEP + 3):
+            paths.append(self.extract(model=f'model-{i}'))
+            os.utime(paths[-1], (1_000_000 + i, 1_000_000 + i))
+        remaining = self.generations()
+        self.assertEqual(len(remaining), plugin.KEEP)
+        self.assertIn(paths[-1].name, remaining)
+        self.assertNotIn(paths[0].name, remaining)
 
-    def test_interrupted_replacement_restores_the_retired_tree_before_replacing(self):
-        path = self.extract(model='first')
-        retired = path.with_name(f'.{__version__}.old-1')
-        path.rename(retired)
-        with mock.patch.object(plugin, 'tree', side_effect=OSError('cannot build')):
-            with self.assertRaises(OSError):
-                self.extract(model='second')
-        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'first')
+    def test_current_generation_is_never_pruned_even_when_oldest(self):
+        for i in range(plugin.KEEP + 2):
+            path = self.extract(model=f'model-{i}')
+            os.utime(path, (2_000_000 + i, 2_000_000 + i))
+        first = self.extract(model='model-0')
+        self.assertTrue(first.is_dir())
+        self.assertIn(first.name, self.generations())
+
+    def test_running_hook_never_misses_a_file_while_generations_change(self):
+        first = self.extract(model='m0')
+        seen = [first]
+        stop = threading.Event()
+        problems = []
+
+        def reader():
+            while not stop.is_set():
+                for path in list(seen):
+                    for name in ('hooks/protect-descriptors.py', 'hooks/hooks.json',
+                                 'agents/lesson-reviewer.md', '.claude-plugin/plugin.json'):
+                        try:
+                            (path / name).read_bytes()
+                        except OSError as error:
+                            problems.append(f'{path.name}/{name}: {error}')
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        try:
+            for i in range(60):
+                path = self.extract(model=f'm{i % 3}')
+                if path not in seen:
+                    seen.append(path)
+        finally:
+            stop.set()
+            thread.join()
+        self.assertEqual(problems, [])
+        self.assertEqual(len(seen), 3)
 
     def test_concurrent_extractors_are_serialized_and_leave_one_complete_tree(self):
         errors = []
@@ -214,11 +260,12 @@ class ExtractionTests(unittest.TestCase):
         for t in threads:
             t.join()
         self.assertEqual(errors, [])
-        path = self.target / 'plugin' / __version__
-        model = frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model']
-        self.assertEqual(self.tree(path), plugin.tree({'model': model}))
-        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir() if p.name != '.lock'),
-                         [__version__])
+        for name in self.generations():
+            path = self.target / 'plugin' / name
+            model = frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model']
+            self.assertEqual(self.tree(path), plugin.tree({'model': model}))
+            self.assertEqual(name, plugin.generation({'model': model}))
+        self.assertEqual([p.name for p in (self.target / 'plugin').iterdir() if p.name.startswith('.build')], [])
 
     def test_hook_json_matches_write_edit_and_multiedit(self):
         hooks = json.loads((self.extract() / 'hooks' / 'hooks.json').read_text())
