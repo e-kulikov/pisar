@@ -34,14 +34,16 @@ generally, show the user what was found, and edit only what the user decided.
    prints the batch id and the path of `draft.md`. Write the note into that
    file with your edit tool (only the lessons workspace is writable).
 3. `pisar lesson check --batch ID` snapshots the draft as a revision and prints
-   the findings by tier with a hint for each.
+   the findings by tier with a hint for each. Its JSON includes the `revision`
+   (for example `r2`) and the `sha256` of that revision's text.
 4. Present the findings briefly to the user: what, where, and a suggested
    generalisation. Apply only the edits the user chooses, then run
    `pisar lesson check --batch ID` again. A finding counts as decided when the
    text changed in a later revision or when the user chose `--keep`.
 5. Review is mandatory: start the `pisar:lesson-reviewer` subagent on the current
-   revision. Give it the revision id, its text and its sha256 (shown by
-   `pisar lesson show --batch ID`). It answers with JSON only. Save that JSON
+   revision. Give it the revision id, its text and its sha256: the `revision`
+   and `sha256` fields of the `lesson check` JSON, also shown as the lines
+   `revision: rN` and `sha256: <hex>` by `pisar lesson show --batch ID`. It answers with JSON only. Save that JSON
    to a file in the batch directory and run
    `pisar lesson review --batch ID --file FILE`. A stale review (the draft
    changed since) is rejected: check again and re-review. The verdict is advice;
