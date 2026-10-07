@@ -359,14 +359,24 @@ def space_find(wiki, text, domains=None):
     return dict(spaces=found)
 
 
-def _edit_marker(path, kind, status):
-    text = path.read_text(encoding='utf-8')
+def _rewrite(text, kind, status):
+    """TEXT with the top-level kind/status values replaced; validated by parsing the result."""
     for key, value in (('kind', kind), ('status', status)):
-        text = re.sub(rf'(?m)^(\s*{key}\s*=\s*)"[^"\n]*"', lambda m, v=value: f'{m[1]}"{v}"', text, count=1)
-    meta = tomllib.loads(text)
+        text = re.sub(rf'(?m)^([ \t]*{key}[ \t]*=[ \t]*)("[^"\n]*"|\'[^\'\n]*\')',
+                      lambda m, v=value: f'{m[1]}"{v}"', text, count=1)
+    try:
+        meta = tomllib.loads(text)
+    except ValueError:
+        meta = {}
     if (meta.get('kind'), meta.get('status')) != (kind, status):
-        raise WikiError(f'cannot update kind/status in {path.name}; edit it by hand')
-    if text != path.read_text(encoding='utf-8'):
+        raise WikiError('cannot update kind/status in .wiki.toml; edit it by hand')
+    return text
+
+
+def _edit_marker(path, kind, status):
+    old = path.read_text(encoding='utf-8')
+    text = _rewrite(old, kind, status)
+    if text != old:
         atomic_bytes(path, text.encode())
 
 
@@ -405,6 +415,7 @@ def relocate(wiki, state_dir, action, value, to=None):
                                 message=f'{value} is already active; nothing to do')
                 status, folder = 'active', domain.layout[kind]
             old = space.path
+            _rewrite((old / '.wiki.toml').read_text(encoding='utf-8'), kind, status)
             new = safe_path(root, f'{domain_id}/{folder}') / old.name
             if new != old and (new.exists() or new.is_symlink()):
                 raise WikiError(f'target exists: {new.relative_to(root)}')

@@ -301,6 +301,27 @@ class RelocateTests(SpaceCommandFixture):
         self.cli('space', 'move', 'launch-plan', '--to', 'area', ok=False)
         self.cli('space', 'move', 'work/launch-plan', '--to', 'archive', ok=False)
 
+    def test_move_rewrites_single_quoted_markers(self):
+        marker = self.root / 'work/10-projects/launch-plan/.wiki.toml'
+        marker.write_text("schema_version = 1\nid = 'launch-plan'\nkind = 'project' # kept\nstatus = 'active'\n")
+        commit_all(self.root)
+        self.data('space', 'move', 'work/launch-plan', '--to', 'area')
+        text = (self.root / 'work/20-areas/launch-plan/.wiki.toml').read_text()
+        self.assertIn('# kept', text)
+        self.assertEqual(self.spaces()['work/launch-plan']['kind'], 'area')
+        self.clean()
+
+    def test_unrewritable_marker_is_refused_before_anything_moves(self):
+        marker = self.root / 'work/10-projects/launch-plan/.wiki.toml'
+        marker.write_text('schema_version = 1\nid = "launch-plan"\nkind = """project"""\nstatus = "active"\n')
+        commit_all(self.root)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)
+        self.assertTrue((self.root / 'work/10-projects/launch-plan').is_dir())
+        self.assertFalse((self.root / 'work/20-areas/launch-plan').exists())
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.clean()
+
     def test_move_refuses_while_an_incomplete_operation_touches_the_space(self):
         self.block('save-1', artifacts=[dict(path='work/10-projects/launch-plan/meetings/a.md')])
         failed = self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)
