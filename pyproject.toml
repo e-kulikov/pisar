@@ -17,4 +17,4 @@ pisar = "pisar.cli:main"
 packages = ["pisar"]
 
 [tool.setuptools.package-data]
-pisar = ["*.md"]
+pisar = ["*.md", "plugin/claude/**/*"]

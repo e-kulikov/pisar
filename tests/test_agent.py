@@ -93,10 +93,67 @@ class AgentTests(Fixture):
                      'Bash(pisar spaces*)', 'Bash(pisar save *)', 'Bash(pisar triage *)'):
             self.assertIn(rule, allowed)
         for rule in allowed:
-            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ')), rule)
+            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ', 'Edit(//')), rule)
             self.assertNotIn(rule, ('Bash(git *)', 'Bash(pisar *)', 'Bash(mv *)', 'Bash(*)', 'Bash'))
             self.assertFalse(rule.startswith('Bash(mv'), rule)
         self.assertFalse([r for r in allowed if 'pisar --' in r], 'global flags would allow --ruwana')
+
+    def test_domain_space_guard_config_lesson_and_research_commands_are_allowed(self):
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        for rule in ('Bash(pisar domain *)', 'Bash(pisar space *)', 'Bash(pisar guard *)',
+                     'Bash(pisar config *)', 'Bash(pisar research *)',
+                     'Bash(pisar lesson start *)', 'Bash(pisar lesson check *)',
+                     'Bash(pisar lesson review *)', 'Bash(pisar lesson show *)',
+                     'Bash(pisar lesson discard *)'):
+            self.assertIn(rule, allowed)
+        self.assertNotIn('Bash(pisar lesson *)', allowed)
+        self.assertFalse([r for r in allowed if 'lesson accept' in r])
+
+    def test_lesson_accept_asks_through_settings_and_is_not_allowed(self):
+        _, call = self.launch()
+        argv = call['argv']
+        settings = json.loads(argv[argv.index('--settings') + 1])
+        self.assertEqual(settings, {'permissions': {'ask': ['Bash(pisar lesson accept *)']}})
+
+    def test_only_the_lesson_workspace_is_writable_by_absolute_path(self):
+        _, call = self.launch()
+        edits = [r for r in values(call['argv'], '--allowedTools') if r.startswith('Edit(')]
+        self.assertEqual(edits, [f'Edit(/{self.state.resolve()}/lessons/**)'])
+        self.assertTrue(edits[0].startswith('Edit(//'))
+        self.assertNotIn('--add-dir', call['argv'])
+
+    def test_bundled_plugin_is_extracted_and_passed_with_plugin_dir(self):
+        from pisar import __version__
+        _, call = self.launch()
+        directory = self.state.resolve() / 'agents' / 'claude' / 'plugin' / __version__
+        self.assertEqual(values(call['argv'], '--plugin-dir'), [str(directory)])
+        self.assertTrue((directory / '.claude-plugin' / 'plugin.json').is_file())
+        self.assertTrue((directory / 'skills' / 'lessons' / 'SKILL.md').is_file())
+
+    def test_reviewer_agent_takes_model_and_effort_from_the_config(self):
+        from pisar import __version__
+        directory = self.state.resolve() / 'agents' / 'claude' / 'plugin' / __version__
+        reviewer = directory / 'agents' / 'lesson-reviewer.md'
+        self.launch()
+        self.assertIn('model: opus\neffort: high\n', reviewer.read_text())
+        self.write_config('[agents.claude.reviewer]\nmodel = "m1"\neffort = "low"\n')
+        self.launch()
+        self.assertIn('model: m1\neffort: low\n', reviewer.read_text())
+
+    def test_relaunch_reuses_the_extracted_plugin_without_rewriting_it(self):
+        from pisar import __version__
+        self.launch()
+        manifest = self.state.resolve() / 'agents/claude/plugin' / __version__ / '.claude-plugin/plugin.json'
+        before = manifest.stat().st_mtime_ns
+        self.launch()
+        self.assertEqual(manifest.stat().st_mtime_ns, before)
+
+    def test_plugin_dir_comes_before_the_system_prompt_and_after_caller_arguments(self):
+        _, call = self.launch('--', '-p', 'hi')
+        argv = call['argv']
+        self.assertEqual(argv[:2], ['-p', 'hi'])
+        self.assertLess(argv.index('--plugin-dir'), argv.index('--system-prompt'))
 
     def test_push_and_git_internals_are_denied(self):
         _, call = self.launch()

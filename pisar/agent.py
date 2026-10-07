@@ -7,7 +7,8 @@ the user's global settings, hooks, plugins, skills or MCP servers apply.
 import os
 from pathlib import Path
 import shutil
-from . import settings
+import json
+from . import claude_plugin, settings
 from .config import AGENTS, path as config_path
 from .operations import Runtime, outside_git
 from .safety import WikiError
@@ -29,8 +30,21 @@ CLAUDE_ALLOWED = (
     'Bash(pisar spaces*)', 'Bash(pisar check*)', 'Bash(pisar search *)',
     'Bash(pisar read *)', 'Bash(pisar inventory*)', 'Bash(pisar capture *)',
     'Bash(pisar save *)', 'Bash(pisar triage *)',
+    'Bash(pisar domain *)', 'Bash(pisar space *)', 'Bash(pisar guard *)',
+    'Bash(pisar config *)', 'Bash(pisar research *)',
+    # Not `lesson accept`: it is in CLAUDE_ASK and always needs the user.
+    'Bash(pisar lesson start *)', 'Bash(pisar lesson check *)',
+    'Bash(pisar lesson review *)', 'Bash(pisar lesson show *)',
+    'Bash(pisar lesson discard *)',
 )
 CLAUDE_DENIED = ('Bash(git push*)', 'Edit(.git/**)')
+# `ask` overrides `allow`, so accepting a lesson stays a user decision.
+CLAUDE_ASK = ('Bash(pisar lesson accept *)',)
+
+
+def lesson_workspace_rule(state):
+    """Edit permission for the lesson drafts only; an absolute path needs the `//` prefix."""
+    return f'Edit(/{Path(state) / "lessons"}/**)'
 
 
 def prompt_text():
@@ -57,15 +71,18 @@ def session_options(agent, extra=()):
     return options
 
 
-def claude_command(executable, prompt, extra=(), mcp=None, options=()):
+def claude_command(executable, prompt, extra=(), mcp=None, options=(), plugin=None, workspace=None):
     """Caller's own arguments come first, so variadic options cannot swallow them.
 
     MCP is strict: only servers from `mcp` (the root's .mcp.json) are loaded.
+    `plugin` is the extracted plugin directory, `workspace` the Edit rule for lesson drafts.
     """
     return [executable, *extra, *options,
+            *(['--plugin-dir', str(plugin)] if plugin else []),
+            '--settings', json.dumps({'permissions': {'ask': list(CLAUDE_ASK)}}),
             '--system-prompt', prompt,
             f'--tools={CLAUDE_TOOLS}',
-            '--allowedTools', *CLAUDE_ALLOWED,
+            '--allowedTools', *CLAUDE_ALLOWED, *([workspace] if workspace else []),
             '--disallowedTools', *CLAUDE_DENIED,
             *(['--mcp-config', str(mcp)] if mcp else []),
             '--strict-mcp-config']
@@ -99,7 +116,10 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     env = {k: v for k, v in os.environ.items() if k != 'WIKI_ROOT'}
     env.update(CLAUDE_CONFIG_DIR=str(config), PISAR_ROOT=str(root),
                PISAR_STATE_DIR=str(runtime.base), PISAR_RUWANA_BIN=str(ruwana))
+    plugin = claude_plugin.extract(config, settings.agent_options(agent, 'reviewer'))
+    lessons = runtime.base / 'lessons'
+    lessons.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chdir(root)
     command = claude_command(executable, prompt_text(), extra, mcp_config(root),
-                             session_options(agent, extra))
+                             session_options(agent, extra), plugin, lesson_workspace_rule(runtime.base))
     os.execve(executable, command, env)
