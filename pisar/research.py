@@ -12,7 +12,9 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import subprocess
+import threading
 import tempfile
 from . import guard, settings
 from .operations import Runtime, outside_git, write_json
@@ -21,6 +23,19 @@ from .safety import WikiError
 SCHEMA_VERSION = 1
 QUOTE_LIMIT = 300  # characters; longer quotes are cut to this length
 TIMEOUT = 1800     # seconds
+# Bounds: the subprocess output that is read, each string, the item counts and the
+# stored record (UTF-8 bytes). Anything above them is rejected, never stored.
+STDOUT_LIMIT = 1024 * 1024
+STDERR_LIMIT = 64 * 1024
+DIAGNOSTIC_LIMIT = 64 * 1024  # kept of each stream for diagnosis
+QUESTION_LIMIT = 8000
+SUMMARY_LIMIT = 4000
+CLAIM_LIMIT = 1000
+URL_LIMIT = 2000
+GAP_LIMIT = 1000
+FINDINGS_LIMIT = 30
+GAPS_LIMIT = 20
+RECORD_LIMIT = 96 * 1024
 FALLBACKS = ('/tmp',)  # used when TMPDIR is unset or not acceptable
 TOOLS = ('WebSearch', 'WebFetch')
 # The child sees only these variables (plus CLAUDE_CONFIG_DIR, set by pisar): enough to find
@@ -66,10 +81,17 @@ SCHEMA = {
 }
 
 
-def _text(value, name, empty=False):
+def _text(value, name, limit, empty=False):
     if not isinstance(value, str) or not (empty or value.strip()):
         raise WikiError(f'research result: {name} must be {"a string" if empty else "a non-empty string"}')
+    if len(value) > limit and not empty:
+        raise WikiError(f'research result: {name} is too long (more than {limit} characters)')
     return value.strip() if not empty else value
+
+
+def _name(value):
+    """A field name from the model, safe to print: short, plain characters only."""
+    return re.sub(r'[^A-Za-z0-9_.-]', '?', str(value)[:40])
 
 
 def validate(result):
@@ -78,27 +100,34 @@ def validate(result):
         raise WikiError('research result: expected a JSON object')
     for name in result:
         if name not in ('summary', 'findings', 'gaps'):
-            raise WikiError(f'research result: unexpected field {name}')
-    summary = _text(result.get('summary'), 'summary')
+            raise WikiError(f'research result: unexpected field {_name(name)}')
+    summary = _text(result.get('summary'), 'summary', SUMMARY_LIMIT)
     findings = result.get('findings')
     if not isinstance(findings, list):
         raise WikiError('research result: findings must be a list')
+    if len(findings) > FINDINGS_LIMIT:
+        raise WikiError(f'research result: too many findings (more than {FINDINGS_LIMIT})')
     checked = []
     for number, item in enumerate(findings, 1):
         if not isinstance(item, dict):
             raise WikiError(f'research result: findings[{number}] must be an object')
         for name in item:
             if name not in ('claim', 'source_url', 'quote'):
-                raise WikiError(f'research result: findings[{number}] has unexpected field {name}')
-        url = _text(item.get('source_url'), f'findings[{number}].source_url')
+                raise WikiError(f'research result: findings[{number}] has unexpected field {_name(name)}')
+        url = _text(item.get('source_url'), f'findings[{number}].source_url', URL_LIMIT)
         if not re.fullmatch(r'https?://\S+', url):
             raise WikiError(f'research result: findings[{number}].source_url must be an http(s) URL')
-        checked.append({'claim': _text(item.get('claim'), f'findings[{number}].claim'),
+        checked.append({'claim': _text(item.get('claim'), f'findings[{number}].claim', CLAIM_LIMIT),
                         'source_url': url,
-                        'quote': _text(item.get('quote'), f'findings[{number}].quote', empty=True)[:QUOTE_LIMIT]})
+                        'quote': _text(item.get('quote'), f'findings[{number}].quote', QUOTE_LIMIT, empty=True)[:QUOTE_LIMIT]})
     gaps = result.get('gaps')
     if not isinstance(gaps, list) or not all(isinstance(g, str) for g in gaps):
         raise WikiError('research result: gaps must be a list of strings')
+    if len(gaps) > GAPS_LIMIT:
+        raise WikiError(f'research result: too many gaps (more than {GAPS_LIMIT})')
+    for gap in gaps:
+        if len(gap) > GAP_LIMIT:
+            raise WikiError(f'research result: a gap is too long (more than {GAP_LIMIT} characters)')
     return {'summary': summary, 'findings': checked, 'gaps': gaps}
 
 
@@ -141,6 +170,64 @@ def child_environment(config):
     return env
 
 
+class Completed:
+    def __init__(self, returncode, stdout, stderr, state):
+        self.returncode, self.stdout, self.stderr, self.state = returncode, stdout, stderr, state
+
+
+def _drain(stream, limit, sink, overflow, stop):
+    """Read STREAM into SINK, at most LIMIT bytes; more than that ends the child."""
+    while True:
+        chunk = stream.read1(65536)
+        if not chunk:
+            return
+        room = limit - len(sink)
+        sink += chunk[:max(room, 0)]
+        if len(chunk) > room:
+            overflow.set()
+            stop()
+            return
+
+
+def run_bounded(argv, question, cwd, env):
+    """Run ARGV with QUESTION on stdin, reading at most STDOUT_LIMIT/STDERR_LIMIT bytes.
+
+    The child leads its own process group, which is killed on timeout or overflow.
+    state is 'ok', 'timeout' or 'overflow'.
+    """
+    process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               cwd=cwd, env=env, start_new_session=True)
+
+    def stop():
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    out, err, overflow = bytearray(), bytearray(), threading.Event()
+    readers = [threading.Thread(target=_drain, args=(stream, limit, sink, overflow, stop), daemon=True)
+               for stream, limit, sink in ((process.stdout, STDOUT_LIMIT, out), (process.stderr, STDERR_LIMIT, err))]
+    for reader in readers:
+        reader.start()
+    try:
+        process.stdin.write(question.encode('utf-8'))
+        process.stdin.close()
+    except BrokenPipeError:
+        pass
+    state = 'ok'
+    try:
+        process.wait(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        state = 'timeout'
+        stop()
+        process.wait()
+    for reader in readers:
+        reader.join(timeout=5)
+    if overflow.is_set():
+        state = 'overflow'
+    return Completed(process.returncode, bytes(out), bytes(err), state)
+
+
 def config_dir(base):
     """The launcher's configuration directory (same login), validated like the launcher does."""
     config = outside_git(base / 'agents' / 'claude')
@@ -177,6 +264,8 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
     """Research QUESTION; returns the printed result (a stored record or a gate report)."""
     if not isinstance(question, str) or not question.strip():
         raise WikiError('research: the question must not be empty')
+    if len(question) > QUESTION_LIMIT:
+        raise WikiError(f'research: the question is too long (more than {QUESTION_LIMIT} characters)')
     report = guard.check(root, question, source=source, outbound=True)
     findings = report['findings']
     if findings and not confirm:
@@ -198,23 +287,26 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
     ident = f'{now:%Y%m%dT%H%M%S}-{secrets.token_hex(4)}'
     env = child_environment(config)
     with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
-        try:
-            done = subprocess.run(command(executable, model, effort), input=question, text=True,
-                                  capture_output=True, cwd=cwd, env=env, timeout=TIMEOUT)
-        except subprocess.TimeoutExpired:
-            raise WikiError(f'claude did not finish within {TIMEOUT} seconds') from None
-    if done.returncode != 0:
-        detail = (done.stderr or done.stdout).strip()[-500:]
+        done = run_bounded(command(executable, model, effort), question, cwd, env)
+    output = done.stdout.decode('utf-8', errors='replace')
+    if done.state == 'timeout':
+        raise WikiError(f'claude did not finish within {TIMEOUT} seconds')
+    if done.returncode != 0 and done.state != 'overflow':
+        detail = (done.stderr.decode('utf-8', errors='replace') or output).strip()[-500:]
         raise WikiError(f'claude exited with status {done.returncode}: {detail}')
     try:
-        result = validate(_payload(done.stdout))
+        if done.state == 'overflow':
+            raise WikiError(f'claude output is too large (more than {STDOUT_LIMIT} bytes)')
+        result = validate(_payload(output))
+        record = {'schema_version': SCHEMA_VERSION, 'id': ident, 'question': question, 'model': model,
+                  'effort': effort, 'retrieved_at': f'{now:%Y-%m-%dT%H:%M:%SZ}', 'untrusted': True,
+                  'confirm_outbound': bool(confirm), **result}
+        if len(json.dumps(record, ensure_ascii=False).encode('utf-8')) > RECORD_LIMIT:
+            raise WikiError(f'research result: record is too large (more than {RECORD_LIMIT} bytes)')
     except WikiError as error:
         raw = store / f'{ident}.raw.txt'
-        raw.write_text(done.stdout, encoding='utf-8')
+        raw.write_text(output[:DIAGNOSTIC_LIMIT], encoding='utf-8')
         os.chmod(raw, 0o600)
         raise WikiError(f'{error}; raw output kept in {raw}') from None
-    record = {'schema_version': SCHEMA_VERSION, 'id': ident, 'question': question, 'model': model,
-              'effort': effort, 'retrieved_at': f'{now:%Y-%m-%dT%H:%M:%SZ}', 'untrusted': True,
-              'confirm_outbound': bool(confirm), **result}
     write_json(store / f'{ident}.json', record)
     return {**record, 'guard': {'findings': findings, 'limits': report['limits'], 'notice': NOTICE}}

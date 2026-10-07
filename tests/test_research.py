@@ -433,6 +433,33 @@ class ResearchTests(Fixture):
                 run()
         self.assertFalse(self.out.exists())
 
+    def test_oversized_output_is_rejected_and_bounded(self):
+        p = self.research(QUESTION, mode='huge', ok=False)
+        self.assertIn('too large', p.stderr)
+        self.assertEqual(self.stored(), [])
+        self.assertLessEqual(self.diagnostics('stdout').stat().st_size, research.DIAGNOSTIC_LIMIT)
+
+    def test_string_and_count_limits_are_enforced(self):
+        good = GOOD['findings'][0]
+        self.rejects({**GOOD, 'summary': 'x' * (research.SUMMARY_LIMIT + 1)}, 'too long')
+        self.rejects({**GOOD, 'findings': [{**good, 'claim': 'x' * (research.CLAIM_LIMIT + 1)}]}, 'too long')
+        self.rejects({**GOOD, 'findings': [{**good, 'source_url': 'https://e.org/' + 'x' * research.URL_LIMIT}]},
+                     'too long')
+        self.rejects({**GOOD, 'gaps': ['x' * (research.GAP_LIMIT + 1)]}, 'too long')
+        self.rejects({**GOOD, 'findings': [good] * (research.FINDINGS_LIMIT + 1)}, 'too many')
+        self.rejects({**GOOD, 'gaps': ['g'] * (research.GAPS_LIMIT + 1)}, 'too many')
+
+    def test_the_whole_record_is_size_limited(self):
+        big = {'claim': 'c' * research.CLAIM_LIMIT, 'quote': 'q', 'source_url': 'https://e.org/' + 'u' * 1900}
+        self.rejects({**GOOD, 'findings': [big] * research.FINDINGS_LIMIT,
+                      'gaps': ['g' * research.GAP_LIMIT] * research.GAPS_LIMIT}, 'record is too large')
+
+    def test_unexpected_field_names_are_sanitised_in_errors(self):
+        p = self.research(QUESTION, env={**self.fake_env, 'FAKE_CLAUDE_RESULT': json.dumps(
+            {**GOOD, 'bad\nname ' + 'z' * 200: 1})}, ok=False)
+        self.assertLess(len(p.stderr), 600)
+        self.assertNotIn('zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz', p.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

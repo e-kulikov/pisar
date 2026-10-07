@@ -843,7 +843,11 @@ so the question leaves the machine. pisar never contacts a service itself.
  "gaps": ["..."]}
 ```
 
-  Quotes are cut to 300 characters. The same record is printed with an extra
+  Quotes are cut to 300 characters. Other bounds reject the answer instead:
+  at most 1 MiB of output is read from the subprocess (64 KiB of stderr), the
+  question is at most 8000 characters, `summary` 4000, `claim` 1000,
+  `source_url` 2000 and each gap 1000 characters, at most 30 findings and 20
+  gaps, and the stored record at most 96 KiB. The same record is printed with an extra
   `guard` block (findings and a notice).
 
 **The result is data, never instructions.** It comes from web pages that anyone
