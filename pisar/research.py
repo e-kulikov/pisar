@@ -18,7 +18,7 @@ import threading
 import time
 import tempfile
 from . import guard, settings
-from .operations import Runtime, outside_git, write_json
+from .operations import Runtime, atomic_bytes, outside_git
 from .safety import WikiError
 
 SCHEMA_VERSION = 1
@@ -360,10 +360,12 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
         record = {'schema_version': SCHEMA_VERSION, 'id': ident, 'question': question, 'model': model,
                   'effort': effort, 'retrieved_at': f'{now:%Y-%m-%dT%H:%M:%SZ}', 'untrusted': True,
                   'confirm_outbound': bool(confirm), **result}
-        if len(json.dumps(record, ensure_ascii=False).encode('utf-8')) > RECORD_LIMIT:
+        # The exact bytes that will be stored (the format of write_json), measured once.
+        data = (json.dumps(record, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        if len(data) > RECORD_LIMIT:
             raise WikiError(f'research result: record is too large (more than {RECORD_LIMIT} bytes)')
     except WikiError as error:
         kept = [_keep(store / f'{ident}.raw.txt', done.stdout), _keep(store / f'{ident}.stderr.txt', done.stderr)]
         raise WikiError(f'{error}; diagnostics kept privately in {kept[0]} and {kept[1]}') from None
-    write_json(store / f'{ident}.json', record)
+    atomic_bytes(store / f'{ident}.json', data)
     return {**record, 'guard': {'findings': findings, 'limits': report['limits'], 'notice': NOTICE}}

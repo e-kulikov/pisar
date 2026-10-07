@@ -484,6 +484,24 @@ class ResearchTests(Fixture):
         self.assertIn('diagnostics kept', str(caught.exception))
         self.assertEqual(self.stored(), [])
 
+    def test_the_size_limit_applies_to_the_exact_bytes_written(self):
+        run = self.in_process()
+        run()
+        file = self.stored()[0]
+        size = file.stat().st_size
+        compact = len(json.dumps(json.loads(file.read_text()), ensure_ascii=False).encode())
+        # The written (indented) file is larger than the compact JSON: the limit must follow the file.
+        self.assertLess(compact, size)
+        file.unlink()
+        with mock.patch.object(research, 'RECORD_LIMIT', size):
+            run()
+        self.assertEqual([f.stat().st_size for f in self.stored()], [size])
+        self.stored()[0].unlink()
+        with mock.patch.object(research, 'RECORD_LIMIT', size - 1):
+            with self.assertRaisesRegex(research.WikiError, 'record is too large'):
+                run()
+        self.assertEqual(self.stored(), [])
+
     def tmpdir_case(self, tmp, via_environment):
         tmp.mkdir(exist_ok=True)
         env = {**self.fake_env, 'TMPDIR': str(tmp)}
