@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 from types import SimpleNamespace
-from . import __version__, agent, config_command, guard, settings, spacecmd
+from . import __version__, agent, config_command, guard, research_command, settings, spacecmd
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -72,6 +72,7 @@ def parser():
     config_command.add_parser(commands)
     guard.add_parser(commands)
     spacecmd.add_parser(commands)
+    research_command.add_parser(commands)
     return p
 
 
@@ -104,6 +105,10 @@ def main(argv=None):
             result = guard.run(args, args)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == 'research':
+            result = research_command.run(args, args)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1 if result.get('ok') is False else 0
         wiki = Wiki(args.root)
         domains = None
         if getattr(args, 'include', None) or getattr(args, 'exclude', None):
