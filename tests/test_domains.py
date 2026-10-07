@@ -1,6 +1,6 @@
 """Domains: top-level directories marked by .domain.toml, nothing hardcoded."""
 import json
-from .support import Fixture, commit_all, document, domain, space
+from .support import Fixture, commit_all, document, domain, git, init_repo, space
 
 
 class DomainDiscoveryTests(Fixture):
@@ -209,3 +209,23 @@ class SelectionTests(Fixture):
 
     def test_scope_flag_is_gone(self):
         self.assertEqual(self.cli('spaces', '--scope', 'work', ok=False).returncode, 2)
+
+
+class SubmoduleDomainTests(Fixture):
+    def test_a_domain_can_be_a_submodule_and_writes_commit_child_then_parent(self):
+        remote = self.base / 'acme-origin'
+        init_repo(remote)
+        (remote / '.domain.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
+        space(remote, '10-projects/rocket', 'rocket')
+        commit_all(remote)
+        git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(remote), 'acme')
+        module = self.root / 'acme'
+        git(module, 'config', 'user.email', 'synthetic@example.invalid')
+        git(module, 'config', 'user.name', 'Synthetic fixture')
+        commit_all(self.root)
+        self.assertIn('acme/rocket', [s['address'] for s in self.data('spaces', '--include', 'acme')['spaces']])
+        result = self.data('capture', '--space', 'acme/rocket', '--id', 'acme-call', '--source', self.external())
+        self.assertEqual(len(result['commits']), 2)
+        self.assertEqual(git(self.root, 'show', '--format=', '--name-only', 'HEAD'), 'acme')
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(self.data('read', 'wiki:acme/rocket:acme-call')['metadata']['space_ids'], ['acme/rocket'])
