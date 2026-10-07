@@ -84,6 +84,30 @@ def is_ancestor(repo, ancestor, descendant):
                           capture_output=True, env=env).returncode == 0
 
 
+def attribute_problems(repo, relative):
+    """Why Git would not store the bytes of RELATIVE unchanged (empty when it would)."""
+    found = {}
+    for line in run(repo, 'check-attr', 'text', 'eol', 'filter', 'ident', 'working-tree-encoding',
+                    '--', relative).splitlines():
+        _, name, value = line.split(': ', 2)
+        found[name] = value
+    problems = []
+    if found.get('text') not in ('unspecified', 'unset'):
+        problems.append(f'text={found["text"]}')
+    if found.get('text') != 'unset' and found.get('eol', 'unspecified') != 'unspecified':  # -text ignores eol
+        problems.append(f'eol={found["eol"]}')
+    if found.get('filter') not in ('unspecified', 'unset'):
+        problems.append(f'filter={found["filter"]}')
+    if found.get('ident') == 'set':
+        problems.append('ident')
+    if found.get('working-tree-encoding', 'unspecified') != 'unspecified':
+        problems.append(f'working-tree-encoding={found["working-tree-encoding"]}')
+    autocrlf = run(repo, 'config', '--get', 'core.autocrlf', check=False).strip().lower()
+    if found.get('text') == 'unspecified' and autocrlf in ('true', 'input'):
+        problems.append(f'core.autocrlf={autocrlf}')
+    return problems
+
+
 def entry_mode(repo, relative, index=None):
     entry = run(repo, 'ls-files', '--stage', '--', relative, index=index).split()
     return entry[0] if entry and entry[0] in ('100644', '100755') else '100644'

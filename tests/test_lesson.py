@@ -659,24 +659,48 @@ class AcceptTests(LessonCase):
         import base64
         return base64.b64decode(self.operation_record(batch)['artifacts'][0]['data'])
 
-    def test_line_ending_conversion_never_alters_the_committed_bytes(self):
-        (self.personal / '.gitattributes').write_text('* text eol=crlf\n')
+    def attributes(self, text, config=None):
+        (self.personal / '.gitattributes').write_text(text)
+        for key, value in (config or {}).items():
+            git(self.root, 'config', key, value)
         git(self.root, 'add', '--', 'personal')
         git(self.root, 'commit', '-qm', 'attributes')
-        batch, _, _ = self.prepared('Line one\r\nLine two\r\n')
-        result = json.loads(self.accept(batch).stdout)
-        self.assertEqual(self.committed_bytes(result), self.journaled_bytes(batch))
-        self.assertIn(b'\r\n', self.committed_bytes(result))
 
-    def test_a_clean_filter_never_alters_the_committed_bytes(self):
-        (self.personal / '.gitattributes').write_text('*.md filter=rewrite\n')
-        git(self.root, 'config', 'filter.rewrite.clean', 'sed s/launch/UNREVIEWED/')
-        git(self.root, 'add', '--', 'personal')
-        git(self.root, 'commit', '-qm', 'attributes')
-        batch, _, _ = self.prepared()
+    def assert_refused_up_front(self, batch, *words):
+        head = git(self.root, 'rev-parse', 'HEAD')
+        p = self.accept(batch, ok=False)
+        for word in words:
+            self.assertIn(word, p.stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertFalse((self.personal / 'notes').exists())
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(list(self.state.glob(f'roots/*/operations/{batch}.json')), [])
+        self.assertTrue(self.workspace(batch).is_dir())
+
+    def test_line_ending_conversion_is_refused_before_anything_is_written(self):
+        self.attributes('* text eol=crlf\n')
+        batch, _, _ = self.prepared('Line one\r\nLine two\r\n')
+        self.assert_refused_up_front(batch, 'eol', '.gitattributes', '-text')
+        self.attributes('* text eol=crlf\n*.md -text\n')  # the instructed change
         result = json.loads(self.accept(batch).stdout)
         self.assertEqual(self.committed_bytes(result), self.journaled_bytes(batch))
-        self.assertNotIn(b'UNREVIEWED', self.committed_bytes(result))
+
+    def test_a_clean_filter_is_refused_before_anything_is_written(self):
+        self.attributes('*.md filter=rewrite\n', {'filter.rewrite.clean': 'sed s/launch/UNREVIEWED/'})
+        batch, _, _ = self.prepared()
+        self.assert_refused_up_front(batch, 'filter', '-filter')
+
+    def test_autocrlf_is_refused_before_anything_is_written(self):
+        git(self.root, 'config', 'core.autocrlf', 'true')
+        batch, _, _ = self.prepared()
+        self.assert_refused_up_front(batch, 'autocrlf')
+
+    def test_gitops_commit_preserves_bytes_under_conversion(self):
+        self.attributes('* text eol=crlf\n')
+        relative = 'personal/10-projects/home/raw.md'
+        (self.root / relative).write_bytes(b'x\n')
+        gitops.commit(self.root, [relative], 'bytes-test', verified={relative: b'a\r\nb\r\n'})
+        self.assertEqual(gitops.blob(self.root, f'HEAD:{relative}'), b'a\r\nb\r\n')
 
     def test_a_concurrent_git_add_never_changes_the_acceptance_commit(self):
         batch, _, _ = self.prepared()

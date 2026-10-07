@@ -7,6 +7,7 @@ A batch lives outside Git and outside the wiki, in `<state>/lessons/<batch>/`:
 the reviewed revision; nothing is ever stripped or rewritten.
 """
 from datetime import datetime, timezone
+from pathlib import Path
 import difflib
 import json
 import re
@@ -442,6 +443,16 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
             proposed = metadata(text.decode('utf-8'))
             validate_meta(proposed, target, wiki)
             artifacts = [artifact(wiki, target, relative, text)]
+            repo = Path(artifacts[0]['repo'])
+            inside = (wiki.root / artifacts[0]['path']).relative_to(repo).as_posix()
+            problems = gitops.attribute_problems(repo, inside)
+            if problems:
+                raise WikiError(
+                    f'Git would not store {artifacts[0]["path"]} byte for byte ({", ".join(problems)}), so the '
+                    'reviewed text could not be committed unchanged. Nothing was written. Make the path '
+                    f'byte-preserving, e.g. add the line `/{inside} -text -filter -ident` to a .gitattributes '
+                    f'in {repo.name} (and unset core.autocrlf for it), commit that yourself and rerun '
+                    f'`pisar lesson accept --batch {ident}`')
             # The body is checked too: the same cross-domain and reference rules as `pisar check`.
             future = Document(safe_path(wiki.root, artifacts[0]['path']), target, proposed, text.decode('utf-8'))
             problems = check_references(wiki, future, [*docs, future])
