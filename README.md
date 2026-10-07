@@ -6,7 +6,9 @@ employer or client). It discovers domains and spaces, validates and searches
 Markdown documents with TOML front matter, captures sources without changing
 their bytes, applies externally prepared meeting plans, and routes a global inbox
 only after explicit acceptance. No network, model, daemon, index service or cloud
-account is used; all Git activity is local and nothing is pushed.
+account is used; all Git activity is local and nothing is pushed. The one
+exception is `pisar domain add --repo`, which asks `git` to clone a repository
+(see [Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces)).
 
 ## The name
 
@@ -343,6 +345,62 @@ full traversal, lists raw source files and metadata documents, and has no top-k
 limit. Symlinks, `.git`, and `.ruwana` internals are excluded from traversal.
 Files are reread for results; there is no cache or stale evidence index.
 Disconnected submodules contribute no unavailable evidence.
+
+## Creating and organising domains and spaces
+
+```sh
+pisar domain list
+pisar domain add --id acme --title 'Acme Corp'
+pisar domain add --id acme --title 'Acme Corp' --repo git@host:acme/wiki.git
+pisar space create --domain acme --kind project --title 'Launch Plan'
+pisar space find launch --include acme
+pisar space move acme/launch-plan --to area
+pisar space archive acme/launch-plan
+pisar space restore acme/launch-plan
+```
+
+Every write here holds the writer lock, requires clean Git trees (the owning
+repository and every parent), records a journal in the runtime directory, makes
+**one local commit** of explicit paths (inside a submodule first, then the parent
+gitlink) and can be retried with the same inputs: a finished operation reports
+`"changed": false`, an interrupted one resumes. Results are JSON.
+
+- `domain list` prints each domain's `id`, `title`, `path` and `layout`.
+- `domain add --id ID --title T [--layout para|none]` creates `ID/.domain.toml`.
+  With `--layout para` (the default) a new, empty or blank directory also gets the
+  layout folders (`10-projects`, `20-areas`, `30-resources`, `40-archives`,
+  `inbox`) with a `.gitkeep` each; a directory that already holds files only gets
+  the marker. Repeating it with the same title is a no-op; another title is an
+  error.
+- `domain add ... --repo URL_OR_PATH` runs `git submodule add` for the domain
+  directory, writes the marker inside the submodule, commits there and then
+  commits the parent's `.gitmodules` and gitlink. **This clones over the network
+  when the location is a URL: it is the only place pisar itself asks Git to
+  reach the network, and only on that explicit command.** A local path is cloned
+  with `protocol.file.allow=always` for that one command; nothing else relaxes Git.
+  Locations beginning with `-` or containing `::` are refused. The repository
+  needs at least one commit (Git cannot add an empty one). If a clone already
+  carries a different `.domain.toml`, pisar stops and leaves the submodule for you
+  to inspect.
+- `space create --domain D --kind project|area|resource --title T [--id ID]`
+  derives the id from the title (lowercase ASCII kebab; the kind is never added).
+  A title with no ASCII letters or digits needs `--id`. The id must have at least
+  the domain's `[ids] min_segments` segments and be unused in the domain,
+  **archived spaces included**; a conflict names the owner (`ai: area, archived`)
+  and suggests free alternatives. It writes `.wiki.toml` and a README whose H1 is
+  the title under `<domain>/<layout.kind>/<id>/`.
+- `space find TEXT [--include/--exclude]` matches the id, the README's first H1
+  and the optional `aliases = [...]` array of `.wiki.toml`, case-insensitively.
+- `space move ADDRESS --to project|area|resource` changes `kind` in `.wiki.toml`
+  and `git mv`s the directory to `<layout.to>/<name>` inside the same domain, in
+  one commit. Moves across domains do not exist. It refuses a dirty tree, an
+  existing target, an archived space (restore first), a space that is itself a
+  submodule, and any space an incomplete journaled operation still touches; moving
+  to the current kind reports `"changed": false`. `ruwana` tasks live inside the
+  directory and move with it.
+- `space archive ADDRESS` sets `status = "archived"` and moves the directory to
+  `<layout.archive>/`; `space restore ADDRESS` sets it back to `active` and moves
+  it to the folder of its (unchanged) kind.
 
 ## Known-space inbox capture
 
