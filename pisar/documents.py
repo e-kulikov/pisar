@@ -42,7 +42,7 @@ def validate_meta(meta, owner, wiki):
     for ident in ids:
         concrete_id(ident, 'space_ids')
         related = wiki.space(ident)
-        if related.scope != owner.scope:
+        if related.domain != owner.domain:
             raise WikiError('cross-domain related space')
     if len(set(ids)) != len(ids):
         raise WikiError('duplicate space_ids')
@@ -106,7 +106,7 @@ def resolve(wiki, reference, scope='all'):
     if not match:
         raise WikiError('expected wiki:<space-id>:<document-id>')
     owner = wiki.space(match[1], scope)
-    docs, errors = scan(wiki, owner.scope)
+    docs, errors = scan(wiki, owner.domain)
     if errors:
         raise WikiError('; '.join(errors))
     matches = [d for d in docs if d.owner.id == owner.id and d.meta['id'] == match[2]]
@@ -123,7 +123,7 @@ def check_references(wiki, doc, docs, available=()):
         target = by_ref.get(ref)
         if target is None:
             errors.append(f'{doc.reference}: unresolved reference {ref}')
-        elif target.owner.scope != doc.owner.scope:
+        elif target.owner.domain != doc.owner.domain:
             errors.append(f'{doc.reference}: cross-domain reference {ref}')
     for source in doc.meta['sources']:
         if source.startswith('wiki:'):
@@ -152,12 +152,10 @@ def check(wiki, scope='all'):
     for doc in docs:
         errors.extend(check_references(wiki, doc, docs))
     import os
-    for domain in ('personal', 'work'):
-        if scope not in ('all', domain):
+    for domain in wiki.domains.values():
+        if scope not in ('all', domain.id):
             continue
-        if (wiki.root / domain).is_symlink():
-            continue
-        for parent, dirs, files in os.walk(wiki.root / domain, followlinks=False):
+        for parent, dirs, files in os.walk(domain.path, followlinks=False):
             dirs[:] = [d for d in dirs if d not in ('.git', '.ruwana')]
             for name in [*dirs, *files]:
                 if (Path(parent) / name).is_symlink():

@@ -108,7 +108,7 @@ def main(argv=None):
             wiki.require_valid()
             if args.command == 'spaces':
                 result = {'spaces': [s.record(wiki.root) for s in wiki.spaces
-                                     if args.scope in ('all', s.scope)]}
+                                     if args.scope in ('all', s.domain)]}
             elif args.command == 'search':
                 result = search(wiki, args.query, args.scope, args.space)
             elif args.command == 'inventory':

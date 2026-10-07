@@ -59,11 +59,24 @@ def commit_all(root):
     git(root, 'commit', '-qm', 'fixture')
 
 
-def space(root, relative, ident, kind='project'):
+def domain(root, ident, title=None, extra=''):
+    """Mark a top-level directory of the root as a domain."""
+    path = root / ident
+    path.mkdir(parents=True, exist_ok=True)
+    (path / '.domain.toml').write_text(
+        f'schema_version = 1\nid = "{ident}"\ntitle = {json.dumps(title or ident.title())}\n{extra}')
+    return path
+
+
+def space(root, relative, ident, kind='project', status='active'):
+    """A space; its top-level directory becomes a domain unless already marked."""
+    parts = Path(relative).parts
+    if len(parts) > 1 and not (root / parts[0] / '.domain.toml').exists():
+        domain(root, parts[0])
     path = root / relative
     path.mkdir(parents=True, exist_ok=True)
     (path / '.wiki.toml').write_text(
-        f'schema_version = 1\nid = "{ident}"\nkind = "{kind}"\nstatus = "active"\n')
+        f'schema_version = 1\nid = "{ident}"\nkind = "{kind}"\nstatus = "{status}"\n')
     return path
 
 

@@ -121,8 +121,8 @@ def check_source_scope(wiki, space, path):
     path = external_path(path)
     if path.is_relative_to(wiki.root):
         relative = path.relative_to(wiki.root)
-        if not relative.parts or relative.parts[0] != space.scope:
-            raise WikiError(f'source scope violation: in-root source must be in {space.scope}/')
+        if not relative.parts or relative.parts[0] != space.domain:
+            raise WikiError(f'source scope violation: in-root source must be in {space.domain}/')
     return path
 
 
@@ -359,7 +359,7 @@ def validate_plan(wiki, plan):
     if not isinstance(related, list):
         raise WikiError('related_space_ids must be array')
     for ident in related:
-        if wiki.space(ident).scope != owner.scope:
+        if wiki.space(ident).domain != owner.domain:
             raise WikiError('cross-domain meeting relation')
     if owner.id in related or len(set(related)) != len(related):
         raise WikiError('duplicate owner/related space ids')
@@ -387,7 +387,7 @@ def validate_plan(wiki, plan):
             raise WikiError('duplicate task id')
         ids.add(ident)
         target = wiki.space(task.get('space_id'))
-        if target.scope != owner.scope or target.kind != 'project':
+        if target.domain != owner.domain or target.kind != 'project':
             raise WikiError('task target must be a project in the meeting domain')
         if target.id not in [owner.id, *related]:
             raise WikiError('task target must be owner or related project')
@@ -405,7 +405,7 @@ def validate_plan(wiki, plan):
         if not isinstance(page, dict):
             raise WikiError('page must be object')
         target = wiki.space(page.get('space_id'))
-        if target.scope != owner.scope:
+        if target.domain != owner.domain:
             raise WikiError('cross-domain derived page')
         path = safe_path(target.path, page.get('path'))
         if path.suffix != '.md' or wiki.owner(path) != target:

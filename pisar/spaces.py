@@ -18,17 +18,85 @@ def walk_files(root):
                 yield path
 
 
+LAYOUT = dict(project='10-projects', area='20-areas', resource='30-resources',
+              archive='40-archives', inbox='inbox')
+MARKER_KEYS = {'schema_version', 'id', 'title', 'layout', 'ids', 'sensitive'}
+
+
+@dataclass(frozen=True)
+class Domain:
+    id: str
+    path: Path
+    title: str
+    layout: dict
+    min_segments: int
+    aliases: tuple
+    terms: tuple
+
+    def record(self, root):
+        return dict(id=self.id, title=self.title, path=self.path.relative_to(root).as_posix(),
+                    layout=dict(self.layout))
+
+
+def _table(meta, key, allowed):
+    value = meta.get(key, {})
+    if not isinstance(value, dict):
+        raise WikiError(f'[{key}] must be a table')
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise WikiError(f'unknown key in [{key}]: {", ".join(unknown)}')
+    return value
+
+
+def load_domain(path):
+    """Validate a .domain.toml marker; path is the domain directory."""
+    meta = tomllib.loads((path / '.domain.toml').read_text(encoding='utf-8'))
+    unknown = sorted(set(meta) - MARKER_KEYS)
+    if unknown:
+        raise WikiError(f'unknown key: {", ".join(unknown)}')
+    if type(meta.get('schema_version')) is not int or meta['schema_version'] != 1:
+        raise WikiError('schema_version must be 1')
+    ident = concrete_id(meta.get('id'))
+    if ident != path.name:
+        raise WikiError(f'id {ident} must equal the directory name {path.name}')
+    title = meta.get('title')
+    if not isinstance(title, str) or not title.strip():
+        raise WikiError('title must be nonempty string')
+    layout = {**LAYOUT, **_table(meta, 'layout', LAYOUT)}
+    for kind, folder in layout.items():
+        if (not isinstance(folder, str) or not folder or '\\' in folder or folder.startswith('/')
+                or any(p in ('', '.', '..', '.git') for p in folder.split('/'))):
+            raise WikiError(f'layout.{kind}: expected a relative folder inside the domain')
+    if len(set(layout.values())) != len(layout):
+        raise WikiError('layout folders must be distinct')
+    segments = _table(meta, 'ids', ('min_segments',)).get('min_segments', 1)
+    if type(segments) is not int or segments < 1:
+        raise WikiError('ids.min_segments must be a positive integer')
+    sensitive = _table(meta, 'sensitive', ('aliases', 'terms'))
+    lists = {}
+    for key in ('aliases', 'terms'):
+        value = sensitive.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+            raise WikiError(f'sensitive.{key} must be an array of nonempty strings')
+        lists[key] = tuple(value)
+    return Domain(ident, path, title, layout, segments, lists['aliases'], lists['terms'])
+
+
 @dataclass(frozen=True)
 class Space:
     id: str
     path: Path
-    scope: str
+    domain: str
     kind: str
     status: str
 
+    @property
+    def address(self):
+        return f'{self.domain}/{self.id}'
+
     def record(self, root):
-        return dict(id=self.id, path=self.path.relative_to(root).as_posix(),
-                    scope=self.scope, kind=self.kind, status=self.status)
+        return dict(id=self.id, domain=self.domain, address=self.address,
+                    path=self.path.relative_to(root).as_posix(), kind=self.kind, status=self.status)
 
 
 class Wiki:
@@ -37,16 +105,35 @@ class Wiki:
         if not self.root.is_dir():
             raise WikiError(f'wiki root is not a directory: {self.root}')
         self.errors = []
+        self.domains = {}
         self.spaces = []
-        for scope in ('personal', 'work'):
-            base = self.root / scope
-            if base.is_symlink():
-                self.errors.append(f'{scope}: symlink namespace refused')
+        for base in sorted(self.root.iterdir()):
+            if base.name.startswith('.') or not base.is_dir():
                 continue
-            for path in walk_files(base):
+            marker = base / '.domain.toml'
+            name = marker.relative_to(self.root).as_posix()
+            if base.is_symlink():
+                if marker.exists():
+                    self.errors.append(f'{base.name}: symlink domain refused')
+                continue
+            if marker.is_symlink():
+                self.errors.append(f'{name}: symlink refused')
+                continue
+            if not marker.exists():
+                continue  # Not a domain: docs, schemas, templates, ...
+            try:
+                if not marker.is_file():
+                    raise WikiError('marker must be a regular file')
+                self.domains[base.name] = load_domain(base)
+            except (WikiError, ValueError, OSError) as error:
+                self.errors.append(f'{name}: {error}')
+        for domain in self.domains.values():
+            for path in walk_files(domain.path):
                 if path.name != '.wiki.toml':
                     continue
                 try:
+                    if path.parent == domain.path:
+                        raise WikiError('a domain directory cannot itself be a space')
                     meta = tomllib.loads(path.read_text(encoding='utf-8'))
                     if type(meta.get('schema_version')) is not int or meta['schema_version'] != 1:
                         raise WikiError('schema_version must be 1')
@@ -55,7 +142,7 @@ class Wiki:
                         raise WikiError('kind must be project/area/resource')
                     if meta.get('status') not in ('active', 'archived'):
                         raise WikiError('status must be active/archived')
-                    self.spaces.append(Space(ident, path.parent, scope, meta['kind'], meta['status']))
+                    self.spaces.append(Space(ident, path.parent, domain.id, meta['kind'], meta['status']))
                 except (WikiError, ValueError, OSError) as error:
                     self.errors.append(f'{path.relative_to(self.root)}: {error}')
         seen = set()
@@ -74,7 +161,7 @@ class Wiki:
         if len(matches) != 1:
             raise WikiError(f'unknown or ambiguous space: {ident}')
         s = matches[0]
-        if scope != 'all' and s.scope != scope:
+        if scope != 'all' and s.domain != scope:
             raise WikiError(f'scope violation: {ident}')
         return s
 
@@ -83,16 +170,15 @@ class Wiki:
         return max(matches, key=lambda s: len(s.path.parts)) if matches else None
 
     def files(self, scope='all'):
-        for domain in ('personal', 'work'):
-            if scope not in ('all', domain) or (self.root / domain).is_symlink():
-                continue
-            yield from walk_files(self.root / domain)
+        for domain in self.domains.values():
+            if scope in ('all', domain.id):
+                yield from walk_files(domain.path)
 
     def path(self, relative, scope='all'):
         path = safe_path(self.root, relative)
         parts = Path(relative).parts
-        if parts[0] not in ('personal', 'work') or (scope != 'all' and parts[0] != scope):
-            raise WikiError('path outside requested personal/work scope')
+        if parts[0] not in self.domains or (scope != 'all' and parts[0] != scope):
+            raise WikiError('path outside requested domains')
         if not self.owner(path):
             raise WikiError('path is not in a discovered space')
         return path
