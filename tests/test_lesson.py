@@ -386,6 +386,29 @@ class AcceptTests(LessonCase):
         self.accept(batch, '--keep', ','.join(f['id'] for f in checked['findings']))
         self.assertEqual(self.data('check')['ok'], True)
 
+    def interrupted_submodule_accept(self):
+        self.add_submodule()
+        batch, _, _ = self.prepared(source='personal', to='work/module')
+        real = gitops.commit
+
+        def commit(repo, paths, operation):
+            if repo == self.root:
+                raise gitops.WikiError('interrupted before the parent commit')
+            return real(repo, paths, operation)
+        with mock.patch.object(gitops, 'commit', commit), self.assertRaises(gitops.WikiError):
+            lesson.accept(Wiki(self.root), self.state, batch)
+        return batch
+
+    def test_discard_is_refused_while_the_acceptance_is_incomplete(self):
+        batch = self.interrupted_submodule_accept()
+        p = self.cli('lesson', 'discard', '--batch', batch, ok=False)
+        self.assertIn('accept', p.stderr)
+        self.assertTrue(self.workspace(batch).is_dir())
+        result = json.loads(self.accept(batch).stdout)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertTrue(self.note(result).is_file())
+        self.data('lesson', 'discard', '--batch', batch)
+
     def test_accepted_batch_cannot_be_checked_or_reviewed_again(self):
         batch, draft, checked = self.prepared()
         self.accept(batch)

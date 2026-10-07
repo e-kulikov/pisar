@@ -386,6 +386,11 @@ def discard(wiki, state, ident):
     batch = Batch(wiki, state, ident)
     with batch.runtime.lock():
         meta = batch.load()
+        pending = batch.runtime.load(batch.ident)
+        if pending is not None and pending['status'] != 'complete':
+            raise WikiError(f'the acceptance of {ident} is incomplete; finish it by rerunning the same '
+                            f'`pisar lesson accept --batch {ident}` (the workspace is needed to resume), '
+                            'then discard')
         batch.record(meta, 'discard', status=meta['status'])
         shutil.rmtree(batch.dir)
     return dict(batch=ident, discarded=True, journal=str(batch.archive))
