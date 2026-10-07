@@ -19,6 +19,9 @@ def frontmatter(text):
     return dict(line.split(': ', 1) for line in head.splitlines())
 
 
+MANY = 8  # more generations than any retention bound could plausibly be
+
+
 def parse_reviewer(text):
     """(frontmatter dict, JSON example object) of a generated reviewer subagent file."""
     if not text.startswith('---\n') or '\n---\n' not in text[4:]:
@@ -156,64 +159,82 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(self.extract(model='first'), old)
         self.assertEqual(len(self.generations()), 2)
 
-    def test_damaged_generation_is_repaired(self):
-        path = self.extract()
-        (path / 'hooks' / 'hooks.json').unlink()
-        self.assertEqual(self.extract(), path)
-        self.assertEqual(self.tree(path), plugin.tree({}))
-        self.assertEqual(self.generations(), [path.name])
+    def decoys(self):
+        base = self.target / 'plugin'
+        base.mkdir(parents=True, exist_ok=True)
+        found = []
+        for name in ('custom-deadbeef', '.build.tmp-unrelated', f'{__version__}-0123abcd.keep'):
+            repo = base / name
+            (repo / '.git').mkdir(parents=True)
+            (repo / 'data.txt').write_text('user data')
+            found.append(repo)
+        return found
 
-    def test_other_versions_stay_and_partial_leftovers_are_removed(self):
+    def test_nothing_under_the_plugin_directory_is_ever_removed_or_moved(self):
+        decoys = self.decoys()
         old = self.target / 'plugin' / '0.0.1-0123abcd'
-        old.mkdir(parents=True)
+        old.mkdir()
         (old / 'marker').write_text('x')
-        stale = self.target / 'plugin' / '.build.tmp-123'
-        stale.mkdir()
-        self.extract()
-        self.assertTrue((old / 'marker').exists())
-        self.assertFalse(stale.exists())
+        paths = [self.extract(model=f'model-{i}') for i in range(MANY)]
+        for path in paths + decoys + [old]:
+            self.assertTrue(path.is_dir(), path)
+        for repo in decoys:
+            self.assertEqual((repo / 'data.txt').read_text(), 'user data')
+            self.assertTrue((repo / '.git').is_dir())
+        self.assertEqual((old / 'marker').read_text(), 'x')
+        self.assertEqual(len(set(paths)), len(paths))
+
+    def test_a_reader_on_the_first_generation_survives_many_newer_generations(self):
+        first = self.extract(model='first')
+        before = self.tree(first)
+        for i in range(MANY):
+            self.extract(model=f'newer-{i}')
+        self.assertEqual(self.tree(first), before)
+
+    def test_damaged_generation_is_replaced_by_a_fresh_one_and_left_untouched(self):
+        damaged = self.extract()
+        (damaged / 'hooks' / 'hooks.json').unlink()
+        (damaged / 'extra.txt').write_text('mine')
+        before = self.tree(damaged)
+        fresh = self.extract()
+        self.assertNotEqual(fresh, damaged)
+        self.assertEqual(self.tree(damaged), before)
+        self.assertEqual(self.tree(fresh), plugin.tree({}))
+        self.assertEqual(self.extract(), fresh)
+        self.assertEqual(len(self.generations()), 2)
+
+    def test_extra_file_in_a_generation_counts_as_damage_not_as_a_reason_to_move_it(self):
+        path = self.extract()
+        (path / 'stray.txt').write_text('edited by hand')
+        self.assertNotEqual(self.extract(), path)
+        self.assertEqual((path / 'stray.txt').read_text(), 'edited by hand')
+        self.assertTrue((path / 'hooks' / 'protect-descriptors.py').is_file())
 
     def test_publication_is_a_single_rename_to_a_new_path(self):
         self.extract(model='first')
-        real = os.replace
+        real = os.rename
         calls = []
 
         def spy(src, dst, *a, **k):
-            calls.append((Path(src).name, Path(dst).name, Path(dst).exists()))
+            calls.append((Path(dst).name, Path(dst).exists()))
             return real(src, dst, *a, **k)
 
-        with mock.patch.object(plugin.os, 'replace', spy):
+        with mock.patch.object(plugin.os, 'rename', spy):
             new = self.extract(model='second')
-        self.assertEqual(len(calls), 1)
-        self.assertEqual((calls[0][1], calls[0][2]), (new.name, False))
+        self.assertEqual(calls, [(new.name, False)])
 
-    def test_failed_publication_keeps_installed_generations_and_leaves_no_staging(self):
-        old = self.extract(model='first')
-        before = self.tree(old)
-        with mock.patch.object(plugin.os, 'replace', side_effect=OSError('simulated failure')):
+    def test_failed_publication_leaves_every_existing_generation_intact(self):
+        first = self.extract(model='first')
+        damaged = self.extract(model='second')
+        (damaged / 'hooks' / 'hooks.json').unlink()
+        trees = {p: self.tree(p) for p in (first, damaged)}
+        with mock.patch.object(plugin.os, 'rename', side_effect=OSError('simulated failure')):
             with self.assertRaises(OSError):
                 self.extract(model='second')
-        self.assertEqual(self.tree(old), before)
-        self.assertEqual(self.generations(), [old.name])
-        self.assertEqual([p.name for p in (self.target / 'plugin').iterdir() if p.name.startswith('.build')], [])
-
-    def test_only_the_newest_generations_are_kept(self):
-        paths = []
-        for i in range(plugin.KEEP + 3):
-            paths.append(self.extract(model=f'model-{i}'))
-            os.utime(paths[-1], (1_000_000 + i, 1_000_000 + i))
-        remaining = self.generations()
-        self.assertEqual(len(remaining), plugin.KEEP)
-        self.assertIn(paths[-1].name, remaining)
-        self.assertNotIn(paths[0].name, remaining)
-
-    def test_current_generation_is_never_pruned_even_when_oldest(self):
-        for i in range(plugin.KEEP + 2):
-            path = self.extract(model=f'model-{i}')
-            os.utime(path, (2_000_000 + i, 2_000_000 + i))
-        first = self.extract(model='model-0')
-        self.assertTrue(first.is_dir())
-        self.assertIn(first.name, self.generations())
+            with self.assertRaises(OSError):
+                self.extract(model='third')
+        self.assertEqual({p: self.tree(p) for p in trees}, trees)
+        self.assertEqual(self.generations(), sorted(p.name for p in trees))
 
     def test_running_hook_never_misses_a_file_while_generations_change(self):
         first = self.extract(model='m0')

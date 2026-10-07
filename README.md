@@ -213,7 +213,10 @@ is supported. It is used instead of a command:
   version>-<hash>/` and passed with `--plugin-dir`. The hash covers everything
   generated, so each generation is immutable: changed settings or a new pisar
   publish a new directory with one atomic rename and never alter one a running
-  session uses. Only the five most recently used generations are kept. It provides the skills `pisar` (the
+  session uses. pisar never deletes, moves or repairs plugin directories (a
+  damaged one is left alone and a fresh generation with a `-N` suffix is used),
+  so old generations and the rare `.build.tmp-*` leftover of a crash stay until
+  you remove them; they are tiny. It provides the skills `pisar` (the
   text of `pisar --skill`), `lessons` and `research`; a hook that denies direct
   `Write`/`Edit`/`MultiEdit` of `.wiki.toml` and `.domain.toml` (use `pisar domain`
   and `pisar space`); and the `lesson-reviewer` subagent, generated with

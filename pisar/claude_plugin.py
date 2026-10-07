@@ -3,12 +3,13 @@
 The static files live in the package (``pisar/plugin/claude``); the manifest, the
 ``pisar`` skill (the text of ``pisar --skill``) and the lesson reviewer (which
 depends on the configured model) are generated. Extraction builds the whole tree
-aside and renames it into place, so a launch never sees a half-written plugin,
-and does nothing when the tree is already exactly right.
+aside and publishes it with one rename to a new path; existing generations are
+never touched.
 """
 import contextlib
 import fcntl
 import hashlib
+from itertools import count
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,6 @@ from .operations import outside_git
 
 SOURCE = 'plugin/claude'
 SKILL = 'skill.md'
-KEEP = 5  # generations kept; see _prune
 STAGING = '.build.tmp-'
 DEFAULT_REVIEWER = {'model': 'opus', 'effort': 'high'}
 
@@ -122,52 +122,44 @@ def _locked(parent):
 
 
 def generation(reviewer=None):
-    """Directory name of the plugin generation for these reviewer settings.
+    """First candidate directory name for these reviewer settings.
 
-    Everything generated is part of the hash, so a generation's content never changes
-    after publication: new settings or a new pisar build mean a new directory.
+    Everything generated is part of the hash, so new settings or a new pisar build
+    mean a new directory. A ``-N`` suffix is added only when that name is taken by
+    a damaged generation (see extract).
     """
     return f'{__version__}-{_digest(tree(reviewer))[:8]}'
 
 
-def _is_generation(path):
-    name = path.name
-    return not name.startswith('.') and path.is_dir() and not path.is_symlink() \
-        and name[-9:-8] == '-' and all(c in '0123456789abcdef' for c in name[-8:])
-
-
-def _prune(parent, current):
-    """Drop all but the KEEP most recently used generations (never CURRENT).
-
-    Running sessions keep reading the generation they started with, so old ones
-    stay for a while; a session older than KEEP newer generations loses its plugin.
-    """
-    found = sorted((p for p in parent.iterdir() if _is_generation(p)),
-                   key=lambda p: p.stat().st_mtime_ns, reverse=True)
-    for path in [p for p in found[KEEP:] if p != current]:
-        shutil.rmtree(path, ignore_errors=True)
+def _intact(path, files):
+    existing = _current(path)
+    return existing is not None and _digest(existing) == _digest(files)
 
 
 def extract(config, reviewer=None):
     """Publish the plugin generation for REVIEWER settings and return its directory.
 
-    Generations are immutable: an installed one is never modified or moved while it
-    is intact. A new one is built in a staging directory and published with a single
-    atomic rename to a path that does not exist yet, so a running session never
-    finds a file missing. Builders are serialized by a lock. A launch marks its
-    generation as recently used and prunes only the generations beyond KEEP. A
-    damaged generation (the only case that changes an installed path) is moved
-    aside and rebuilt.
+    pisar never deletes, moves, renames or repairs anything under the plugin
+    directory. Generations are immutable and tiny: the first of ``<name>``,
+    ``<name>-2``, ``<name>-3`` ... that is either intact (returned as is) or does
+    not exist yet (published) is used, so a damaged or edited generation is simply
+    left alone and a fresh one takes its place. A new generation is built in a
+    uniquely named staging directory and published with ONE atomic rename to a path
+    that does not exist, so a running session never finds a file missing. A crash
+    can leave a ``.build.tmp-*`` staging directory behind; it is never cleaned up.
+    Builders are serialized by a lock.
     """
     parent = outside_git(Path(config) / 'plugin')
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _locked(parent):
         files = tree(reviewer)
-        target = outside_git(parent / f'{__version__}-{_digest(files)[:8]}')
-        for stale in parent.glob(f'{STAGING}*'):
-            shutil.rmtree(stale, ignore_errors=True)
-        existing = _current(target)
-        if existing is None or _digest(existing) != _digest(files):
+        base = f'{__version__}-{_digest(files)[:8]}'
+        for attempt in count(1):
+            target = outside_git(parent / (base if attempt == 1 else f'{base}-{attempt}'))
+            if os.path.lexists(target):
+                if _intact(target, files):
+                    return target
+                continue
             staging = Path(tempfile.mkdtemp(prefix=STAGING, dir=parent))
             try:
                 for name, data in files.items():
@@ -177,13 +169,8 @@ def extract(config, reviewer=None):
                     file.chmod(0o644)
                 for directory in (staging, *(p for p in staging.rglob('*') if p.is_dir())):
                     directory.chmod(0o755)
-                if target.exists() or target.is_symlink():
-                    os.replace(target, Path(tempfile.mkdtemp(prefix=STAGING, dir=parent)) / 'damaged')
-                os.replace(staging, target)
-            finally:
-                shutil.rmtree(staging, ignore_errors=True)
-                for leftover in parent.glob(f'{STAGING}*'):
-                    shutil.rmtree(leftover, ignore_errors=True)
-        os.utime(target)
-        _prune(parent, target)
-    return target
+                os.rename(staging, target)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)  # our own, just created
+                raise
+            return target
