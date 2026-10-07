@@ -391,10 +391,10 @@ def validate_plan(wiki, plan):
             raise WikiError('duplicate task id')
         ids.add(ident)
         target = wiki.space(task.get('space_id'))
-        if target.domain != owner.domain or target.kind != 'project':
-            raise WikiError('task target must be a project in the meeting domain')
+        if target.domain != owner.domain:
+            raise WikiError('task target must be a space in the meeting domain')
         if target.address not in [owner.address, *related]:
-            raise WikiError('task target must be owner or related project')
+            raise WikiError('task target must be owner or related space')
         if task.get('agreed') is not True:
             raise WikiError('task requires agreed=true; proposals must not create tasks')
         if not isinstance(task.get('title'), str) or not task['title'].strip():

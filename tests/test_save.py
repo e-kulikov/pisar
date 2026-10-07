@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import time
 from unittest.mock import patch
-from .support import Fixture, RUWANA, RUWANA_AVAILABLE, commit_all, document, git
+from .support import Fixture, RUWANA, RUWANA_AVAILABLE, commit_all, document, git, space
 
 
 BODY = '''# Synthetic launch meeting
@@ -434,3 +434,22 @@ class SaveTests(Fixture):
         path.write_text(json.dumps(value))
         self.save(path)
         self.assertEqual((self.alpha / 'sources/meetings/launch-meeting/transcript.md').read_bytes(), source.read_bytes())
+
+    def test_tasks_are_allowed_in_spaces_of_any_kind(self):
+        area = space(self.root, 'work/20-areas/ops', 'ops', kind='area')
+        resource = space(self.root, 'work/30-resources/kit', 'kit', kind='resource')
+        commit_all(self.root)
+        tasks = [dict(id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True),
+                 dict(id='staff-rota', space_id='work/ops', title='Update rota', agreed=True),
+                 dict(id='refresh-kit', space_id='work/kit', title='Refresh kit', agreed=True)]
+        path, value = self.plan(tasks=tasks)
+        value['meeting']['related_space_ids'] = ['work/ops', 'work/kit']
+        path.write_text(json.dumps(value))
+        # Validation passes; only the missing tracker stops the operation.
+        self.assertIn('unavailable', self.save(path, binary=self.base / 'missing', ok=False).stderr)
+        if RUWANA_AVAILABLE:
+            result = json.loads(self.save(path).stdout)
+            self.assertEqual(result['status'], 'complete')
+            for task_id, target in (('staff-rota', area), ('refresh-kit', resource)):
+                self.assertTrue((self.root / result['tasks'][task_id]['path']).is_relative_to(target / '.ruwana'))
+            self.assertEqual(git(self.root, 'status', '--porcelain'), '')
