@@ -699,6 +699,30 @@ class AcceptTests(LessonCase):
         self.assertEqual(self.note(result).read_bytes(), b'UNREVIEWED REPLACEMENT\n')
         self.assertIn(result['operation_id'], git(self.root, 'log', '-1', '--format=%s'))
 
+    def test_parent_gitlink_is_pinned_to_the_recorded_child_commit(self):
+        module = self.add_submodule()
+        batch, _, _ = self.prepared(source='personal', to='work/module')
+        real = gitops.commit
+        later = []
+
+        def commit(repo, paths, operation, **kwargs):
+            if repo == self.root:  # a concurrent child commit between the child and the parent commit
+                note = next((module / 'notes').glob('*.md'))
+                note.write_bytes(b'UNREVIEWED CHILD EDIT\n')
+                git(module, 'add', '--', note.relative_to(module).as_posix())
+                git(module, 'commit', '-qm', 'concurrent child commit')
+                later.append(git(module, 'rev-parse', 'HEAD'))
+            return real(repo, paths, operation, **kwargs)
+        with mock.patch.object(gitops, 'commit', commit):
+            result = lesson.accept(Wiki(self.root), self.state, batch)
+        recorded = next(c['commit'] for c in self.operation_record(batch)['commits'] if c['repo'] == str(module))
+        pinned = git(self.root, 'ls-tree', 'HEAD', 'work/module').split()[2]
+        self.assertEqual(pinned, recorded)
+        self.assertNotEqual(pinned, later[0])
+        self.assertEqual(git(module, 'rev-parse', 'HEAD'), later[0])  # the later child commit is untouched
+        self.assertIn('work/module', git(self.root, 'status', '--porcelain'))  # shown as a modified submodule
+        self.assertTrue(any('moved' in note for note in result['notes']))
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)

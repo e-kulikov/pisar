@@ -78,6 +78,12 @@ def blob(repo, spec):
     return result.stdout
 
 
+def is_ancestor(repo, ancestor, descendant):
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    return subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', ancestor, descendant],
+                          capture_output=True, env=env).returncode == 0
+
+
 def entry_mode(repo, relative, index=None):
     entry = run(repo, 'ls-files', '--stage', '--', relative, index=index).split()
     return entry[0] if entry and entry[0] in ('100644', '100755') else '100644'
@@ -90,12 +96,13 @@ def stage_entry(repo, index, relative, data):
         index=index)
 
 
-def commit(repo, paths, operation_id, verified=None):
+def commit(repo, paths, operation_id, verified=None, pins=None):
     """Commit PATHS without ever using the shared index.
 
     The tree is built in a private index read from HEAD; VERIFIED maps a path to the exact journaled
-    bytes for it, other files are taken from the working tree and submodules as their current HEAD
-    (gitlink). A concurrent `git add` or an edit of the working file can therefore never enter the
+    bytes for it. A submodule gitlink is PINNED: PINS maps its path to the child commit recorded by
+    the operation (None leaves the entry unchanged); without PINS the child's current HEAD is used.
+    Other files are taken from the working tree. A concurrent `git add` or an edit of the working file can therefore never enter the
     commit. The branch then advances by compare-and-swap, and the real index is made to agree for
     ONLY these paths: every other staged or unstaged change of the user is left as it was."""
     paths = sorted(set(paths))
@@ -111,7 +118,9 @@ def commit(repo, paths, operation_id, verified=None):
             if relative in verified:
                 stage_entry(repo, index, relative, verified[relative])
             elif (target / '.git').exists():
-                child = run(target, 'rev-parse', 'HEAD').strip()
+                child = run(target, 'rev-parse', 'HEAD').strip() if pins is None else pins.get(relative)
+                if child is None:
+                    continue
                 run(repo, 'update-index', '--add', '--cacheinfo', f'160000,{child},{relative}', index=index)
             elif target.is_file() and not target.is_symlink():
                 stage_entry(repo, index, relative, target.read_bytes())

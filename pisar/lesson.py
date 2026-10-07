@@ -483,7 +483,7 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         if meta['status'] != 'accepted':
             meta['status'] = 'accepted'
             batch.save(meta)
-        notes = []
+        notes = list(journal.get('notes', []))
         if resumed:
             notes.append(f'resumed from the persisted revision {rev["revision"]}: draft.md was not read, is '
                          'ignored and left untouched')

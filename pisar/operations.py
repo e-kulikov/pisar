@@ -234,6 +234,22 @@ def owned_artifacts(wiki, journal):
     return items
 
 
+def pinned_commit(journal, child, wiki):
+    """The child commit this operation recorded, checked to hold the journaled bytes; None if it made none.
+
+    The parent gitlink is pinned to it and never follows the child's current HEAD, so later child
+    commits cannot slip into the parent's snapshot; they show as a modified submodule."""
+    recorded = next((c['commit'] for c in reversed(journal['commits']) if c['repo'] == str(child)), None)
+    if recorded is None:
+        return None
+    for item in journal['artifacts']:
+        if item['repo'] == str(child):
+            relative = (wiki.root / item['path']).relative_to(child).as_posix()
+            if gitops.blob(child, f'{recorded}:{relative}') != base64.b64decode(item['data']):
+                raise WikiError(f'recorded commit {recorded} in {child} does not hold the journaled bytes of {relative}')
+    return recorded
+
+
 def apply_files(wiki, runtime, journal):
     remove_leftovers(wiki, journal)
     validate_artifacts(wiki, journal)
@@ -253,6 +269,8 @@ def apply_files(wiki, runtime, journal):
             if parent_head != previous_head or subject != f'wiki: {journal["operation_id"]}' or not changed <= allowed:
                 raise WikiError(f'Git HEAD changed outside operation: {repo}')
             journal['heads'][str(repo)] = current_head
+            if not any(c['repo'] == str(repo) for c in journal['commits']):
+                journal['commits'].append(dict(repo=str(repo), commit=current_head))
             runtime.store(journal)
         gitops.clean_except(repo, allowed)
         for _, relative in gitops.dirty(repo):
@@ -274,9 +292,21 @@ def apply_files(wiki, runtime, journal):
         for item in journal['artifacts']:
             if item['repo'] == str(repo):
                 verified[(wiki.root / item['path']).relative_to(repo).as_posix()] = base64.b64decode(item['data'])
-        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified)
+        pins = {link: pinned_commit(journal, child, wiki)
+                for (parent, link), child in links.items() if parent == repo}
+        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins)
         if commit:
             journal['commits'].append(dict(repo=str(repo), commit=commit))
+        for (parent, link), child in links.items():
+            pinned = pins.get(link) if parent == repo else None
+            head = gitops.run(child, 'rev-parse', 'HEAD').strip() if pinned else pinned
+            if pinned and head != pinned:
+                if not gitops.is_ancestor(child, pinned, head):
+                    raise WikiError(f'recorded commit {pinned} is no longer reachable from HEAD of {child}')
+                note = (f'{child.name} moved on after the accepted commit {pinned[:10]}; the parent was pinned to '
+                        'that commit and later commits there show as a modified submodule')
+                if note not in journal.setdefault('notes', []):
+                    journal['notes'].append(note)
         journal['heads'][str(repo)] = gitops.run(repo, 'rev-parse', 'HEAD').strip()
         runtime.store(journal)
 
