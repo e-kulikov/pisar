@@ -186,6 +186,7 @@ class ShowTests(LessonCase):
                          'say "a client"', 'CROSS-DOMAIN', '+Alpha rollout', batch, 'r2'):
             self.assertIn(expected, out)
         self.assertEqual(first['revision'], 'r1')
+        self.assertIn(f'\nrevision: r2\nsha256: {checked["sha256"]}\n', out)
 
     def test_show_lists_open_decisions(self):
         batch, draft = self.start()

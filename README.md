@@ -828,7 +828,9 @@ directory inside the wiki root or any Git repository is refused.
    "reviewer": {"model": "..."}}
   ```
 
-  A file for another revision or hash is refused as stale. The verdict is
+  `check` prints the current `revision` and `sha256` as JSON fields and `show`
+  prints them as the lines `revision: rN` and `sha256: <hex>`; a reviewer copies
+  both into its JSON. A file for another revision or hash is refused as stale. The verdict is
   advisory: even `block` does not stop `accept` once the user decided.
 - `show` prints a human-readable report: destination, current text, findings by
   tier, suggested generalisations, the review, open decisions and the diff.

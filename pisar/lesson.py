@@ -243,7 +243,7 @@ def show(wiki, state, ident):
     report = read_json(batch.file(f'{revision}.report.json'), 'report')
     review_path = batch.file(f'{revision}.review.json')
     reviewed = read_json(review_path, 'review') if review_path.is_file() else None
-    out += ['', f'Current revision: {revision} sha256 {rev["sha256"]}']
+    out += ['', f'revision: {revision}', f'sha256: {rev["sha256"]}']
     if meta['status'] == 'open' and batch.draft()[1] != data:
         out.append('The draft has unchecked changes: run `pisar lesson check`.')
     out += ['', '--- text ---', data.decode('utf-8').rstrip('\n'), '--- end ---', '', 'Findings by tier:']
