@@ -8,8 +8,10 @@ description: Use the pisar CLI to discover, validate, search, capture and save k
 pisar is an offline, standard-library command-line tool for a **file-authoritative
 knowledge repository kept in Git**. Files are the source of truth. pisar finds,
 validates and searches documents, and performs a few explicit, journaled Git
-writes. It never calls a model, never reads meaning into text and never touches
-the network or any remote. **You** (the agent) read sources, understand them and
+writes. It reads no meaning into text and calls no model; it is offline except
+`pisar domain add --repo` (a git clone) and `pisar research` (isolated web
+research; the question leaves the machine, so it needs the user's explicit
+`--confirm-outbound`). **You** (the agent) read sources, understand them and
 write the summaries; pisar checks structure and applies what you prepared.
 
 All successful output is JSON on stdout. Errors go to stderr prefixed `pisar:`

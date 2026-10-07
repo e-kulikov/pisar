@@ -5,10 +5,14 @@ repository kept in Git and split into domains (for example personal and one per
 employer or client). It discovers domains and spaces, validates and searches
 Markdown documents with TOML front matter, captures sources without changing
 their bytes, applies externally prepared meeting plans, and routes a global inbox
-only after explicit acceptance. No network, model, daemon, index service or cloud
-account is used; all Git activity is local and nothing is pushed. The one
-exception is `pisar domain add --repo`, which asks `git` to clone a repository
-(see [Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces)).
+only after explicit acceptance. Apart from two explicit exceptions everything is
+offline and model-free: no daemon, index service or cloud account is used, all Git
+activity is local and nothing is pushed. The only network uses are
+`pisar domain add --repo` (asks `git` to clone a repository; see
+[Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces))
+and `pisar research` (an isolated `claude` subprocess with web tools; the question
+leaves the machine, so it passes the outbound guard and needs explicit
+`--confirm-outbound` consent; see [Research](#research-through-an-isolated-web-researcher)).
 
 ## The name
 
