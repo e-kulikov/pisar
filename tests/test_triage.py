@@ -236,3 +236,19 @@ class TriageTests(Fixture):
         self.assertEqual(journal.read_bytes(), history)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertEqual(len(list(self.alpha.glob('.ruwana/*.toml'))), 1)
+
+    def test_items_route_by_address_when_domains_reuse_an_id(self):
+        acme = space(self.root, 'acme/10-projects/alpha', 'alpha')
+        commit_all(self.root)
+        plan, item = self.routing()
+        item['space_id'] = 'alpha'
+        plan.write_text(json.dumps(dict(schema_version=1, items=[item])))
+        self.cli('triage', 'prepare', '--batch', 'bare-id', '--plan', plan, ok=False)
+        item['space_id'] = 'acme/alpha'
+        plan.write_text(json.dumps(dict(schema_version=1, items=[item])))
+        self.prepare(plan)
+        self.cli('triage', 'reroute', '--batch', 'morning-one', '--item', 'routed-call', '--space', 'beta', ok=False)
+        self.action('accept')
+        self.assertTrue((acme / 'inbox/routed-call.md').is_file())
+        self.assertFalse((self.alpha / 'inbox').exists())
+        self.assertEqual(self.data('read', 'wiki:acme/alpha:routed-call')['metadata']['space_ids'], ['acme/alpha'])

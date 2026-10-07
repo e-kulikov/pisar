@@ -453,3 +453,23 @@ class SaveTests(Fixture):
             for task_id, target in (('staff-rota', area), ('refresh-kit', resource)):
                 self.assertTrue((self.root / result['tasks'][task_id]['path']).is_relative_to(target / '.ruwana'))
             self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
+    def test_plan_targets_are_addresses_and_stay_in_the_owner_domain(self):
+        space(self.root, 'acme/10-projects/alpha', 'alpha')
+        commit_all(self.root)
+        changes = [lambda v: v.update(space_id='alpha'),
+                   lambda v: v['meeting'].update(related_space_ids=['beta']),
+                   lambda v: v['tasks'][0].update(space_id='alpha'),
+                   lambda v: v['meeting'].update(related_space_ids=['acme/alpha']),
+                   lambda v: v['tasks'][0].update(space_id='acme/alpha'),
+                   lambda v: v.update(pages=[dict(space_id='acme/alpha', path='leak.md',
+                                                  content=document('leak', 'acme/alpha'))])]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                path, value = self.plan(tasks=[dict(id='prepare-launch', space_id='work/alpha',
+                                                    title='Prepare launch', agreed=True)])
+                change(value)
+                path.write_text(json.dumps(value))
+                self.save(path, binary=self.base / 'missing', ok=False)
+                self.assertFalse((self.alpha / 'meetings').exists())
+                self.assertFalse(list(self.root.rglob('leak.md')))
