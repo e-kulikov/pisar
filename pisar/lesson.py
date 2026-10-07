@@ -14,7 +14,7 @@ import shutil
 import unicodedata
 import uuid
 from . import guard
-from .documents import metadata, scan, validate_meta
+from .documents import Document, check_references, metadata, scan, validate_meta
 from .operations import (Runtime, apply_files, artifact, atomic_bytes, existing, external_path,
                          outside_git, result as operation_result, start as start_operation, write_json)
 from .safety import WikiError, address, concrete_id, safe_path, sha256
@@ -344,8 +344,15 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
                 raise WikiError('; '.join(errors))
             if any(d.reference == f'wiki:{target.address}:{doc_id}' for d in docs):
                 raise WikiError(f'duplicate document id: wiki:{target.address}:{doc_id}')
-            validate_meta(metadata(text.decode('utf-8')), target, wiki)
+            proposed = metadata(text.decode('utf-8'))
+            validate_meta(proposed, target, wiki)
             artifacts = [artifact(wiki, target, relative, text)]
+            # The body is checked too: the same cross-domain and reference rules as `pisar check`.
+            future = Document(safe_path(wiki.root, artifacts[0]['path']), target, proposed, text.decode('utf-8'))
+            problems = check_references(wiki, future, [*docs, future])
+            if problems:
+                raise WikiError('the text would not pass `pisar check` (nothing was changed; edit the draft and '
+                                'run `pisar lesson check` again): ' + '; '.join(problems))
             journal = start_operation(wiki, batch.runtime, operation, payload, artifacts)
         try:
             if journal['status'] != 'complete':

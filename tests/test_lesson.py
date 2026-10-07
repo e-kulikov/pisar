@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
+from pisar import gitops, lesson
+from pisar.spaces import Wiki
 from .support import Fixture, git, init_repo
 
 
@@ -362,6 +365,26 @@ class AcceptTests(LessonCase):
         self.assertIn(result['operation_id'], git(module, 'log', '-1', '--format=%s'))
         self.assertIn(result['operation_id'], git(self.root, 'log', '-1', '--format=%s'))
         self.assertTrue(self.note(result).is_file())
+
+    def test_body_references_are_validated_before_the_write(self):
+        text = 'See wiki:work/alpha:call-one for the story.\n'
+        batch, draft = self.start()
+        checked = self.check(batch, text, draft)
+        self.attach(batch, checked)
+        keeps = ','.join(f['id'] for f in checked['findings'])
+        p = self.accept(batch, '--keep', keeps, ok=False)
+        self.assertIn('wiki:work/alpha:call-one', p.stderr)
+        self.assertEqual(draft.read_text(), text)  # nothing stripped
+        self.assertFalse((self.personal / 'notes').exists())
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(self.data('check')['ok'], True)
+
+    def test_same_domain_body_reference_is_accepted(self):
+        batch, draft = self.start(source='work', to='work/alpha')
+        checked = self.check(batch, 'Follow-up to wiki:work/alpha:call-one.\n', draft)
+        self.attach(batch, checked)
+        self.accept(batch, '--keep', ','.join(f['id'] for f in checked['findings']))
+        self.assertEqual(self.data('check')['ok'], True)
 
     def test_accepted_batch_cannot_be_checked_or_reviewed_again(self):
         batch, draft, checked = self.prepared()
