@@ -108,9 +108,15 @@ class Batch:
 
     def require_not_accepting(self):
         """Once an acceptance has started its revision is fixed: only `accept` may continue."""
-        if self.accepting() is not None:
+        journal = self.accepting()
+        if journal is not None:
             raise WikiError(f'the acceptance of {self.ident} has started; finish it by rerunning the same '
-                            f'`pisar lesson accept --batch {self.ident}` (no new revision or review is possible)')
+                            f'`pisar lesson accept --batch {self.ident}` (no new revision or review is possible)'
+                            + self.conflict_hint(journal))
+
+    def conflict_hint(self, journal):
+        paths = conflicts(self.wiki, journal)
+        return '. ' + conflict_message(self.ident, paths, journal.get('decision', {}).get('revision', '?')) if paths else ''
 
 
 def acceptance_started(wiki, journal):
@@ -127,9 +133,27 @@ def acceptance_started(wiki, journal):
             return True
     for item in journal['artifacts']:
         path = safe_path(wiki.root, item['path'])
-        if path.is_file() and sha256(path.read_bytes()) == item['after']:
+        # Anything but the recorded pre-operation state counts: our write, or a later edit of it.
+        if path.is_file() and sha256(path.read_bytes()) != item['before']:
             return True
     return False
+
+
+def conflicts(wiki, journal):
+    """Artifact paths holding neither the pre-operation state nor the journaled bytes."""
+    found = []
+    for item in journal['artifacts']:
+        path = safe_path(wiki.root, item['path'])
+        if path.is_file() and sha256(path.read_bytes()) not in (item['before'], item['after']):
+            found.append(item['path'])
+    return found
+
+
+def conflict_message(ident, paths, revision):
+    where = ', '.join(paths)
+    return (f'{where} was edited after pisar wrote it (or differs from the reviewed text). Pisar never commits '
+            f'such edits and never overwrites them. Remove {where} (or restore it to the reviewed text) and '
+            f'rerun `pisar lesson accept --batch {ident}`; the reviewed revision {revision} is kept')
 
 
 def warnings(wiki, meta):
@@ -409,11 +433,15 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
             if problems:
                 raise WikiError('the text would not pass `pisar check` (nothing was changed; edit the draft and '
                                 'run `pisar lesson check` again): ' + '; '.join(problems))
-            decision = dict(keeps=keeps, skip_review=bool(skip_review),
+            decision = dict(revision=rev['revision'], keeps=keeps, skip_review=bool(skip_review),
                             mention_origin=bool(mention_origin), verdict=verdict)
             journal = start_operation(wiki, batch.runtime, operation, payload, artifacts,
                                       extra=dict(decision=decision))
         decision = journal.get('decision', {})
+        if resumed and journal['status'] != 'complete':
+            clash = conflicts(wiki, journal)
+            if clash:
+                raise WikiError(conflict_message(ident, clash, rev['revision']))
         try:
             if journal['status'] != 'complete':
                 apply_files(wiki, batch.runtime, journal)
@@ -458,7 +486,7 @@ def discard(wiki, state, ident):
         if pending is not None and (pending['status'] != 'complete' or meta['status'] != 'accepted' or not recorded):
             raise WikiError(f'the acceptance of {ident} is not finalized; finish it by rerunning the same '
                             f'`pisar lesson accept --batch {ident}` (the workspace is needed to resume), '
-                            'then discard')
+                            'then discard' + batch.conflict_hint(pending))
         batch.record(meta, 'discard', status=meta['status'])
         shutil.rmtree(batch.dir)
     return dict(batch=ident, discarded=True, journal=str(batch.archive))

@@ -607,6 +607,27 @@ class AcceptTests(LessonCase):
         self.assertFalse(leftover.exists())
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
+    def test_editing_an_uncommitted_note_is_a_conflict_not_a_reset(self):
+        batch, draft, _ = self.prepared()
+        self.crash(batch, mock.patch.object(gitops, 'commit', side_effect=gitops.WikiError('crash')))
+        note = next((self.personal / 'notes').glob('*.md'))
+        original = note.read_bytes()
+        note.write_bytes(original + b'my own edit\n')
+        relative = note.relative_to(self.root).as_posix()
+        for args in (('check',), ('discard',)):
+            p = self.cli('lesson', *args, '--batch', batch, ok=False)
+            self.assertIn('accept', p.stderr)
+            self.assertIn(relative, p.stderr)
+        p = self.accept(batch, ok=False)
+        self.assertIn(relative, p.stderr)
+        self.assertIn('remove', p.stderr.lower())
+        self.assertEqual(note.read_bytes(), original + b'my own edit\n')  # preserved
+        self.assertFalse((self.workspace(batch) / 'revisions/r2.md').exists())
+        note.unlink()  # the instructed recovery
+        result = json.loads(self.accept(batch).stdout)
+        self.assertEqual(self.note(result).read_bytes(), original)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)
