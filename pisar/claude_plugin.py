@@ -6,6 +6,8 @@ depends on the configured model) are generated. Extraction builds the whole tree
 aside and renames it into place, so a launch never sees a half-written plugin,
 and does nothing when the tree is already exactly right.
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -106,35 +108,71 @@ def _current(directory):
     return found
 
 
+@contextlib.contextmanager
+def _locked(parent):
+    """Serialize extractors of the same configuration directory."""
+    with open(parent / '.lock', 'a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _recover(parent, target):
+    """Under the lock: finish what an interrupted extractor left behind.
+
+    A retired tree is put back when the installed one is missing, otherwise dropped;
+    half-built staging directories are dropped.
+    """
+    retired = sorted(parent.glob(f'.{__version__}.old-*'), key=lambda p: p.stat().st_mtime_ns)
+    for path in reversed(retired):
+        if not target.exists() and not target.is_symlink():
+            os.replace(path, target)
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+    for path in parent.glob(f'.{__version__}.tmp-*'):
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def extract(config, reviewer=None):
     """Write the plugin to ``<config>/plugin/<version>`` and return that directory.
 
-    Atomic and idempotent: an identical tree is left alone, anything else (missing,
-    damaged, or generated for other reviewer settings) is replaced as a whole.
+    Idempotent: an identical tree is left alone, anything else (missing, damaged, or
+    generated for other reviewer settings) is replaced as a whole. Extractors are
+    serialized by a lock; the installed tree is retired aside and put back if
+    publishing the new one fails, and an interrupted run is recovered by the next.
     """
     parent = outside_git(Path(config) / 'plugin')
     target = outside_git(parent / __version__)
-    files = tree(reviewer)
-    existing = _current(target)
-    if existing is not None and _digest(existing) == _digest(files):
-        return target
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    staging = Path(tempfile.mkdtemp(prefix=f'.{__version__}.tmp-', dir=parent))
-    try:
-        for name, data in files.items():
-            file = staging / name
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_bytes(data)
-            file.chmod(0o644)
-        for directory in (staging, *(p for p in staging.rglob('*') if p.is_dir())):
-            directory.chmod(0o755)
-        if target.exists() or target.is_symlink():
-            retired = parent / f'.{__version__}.old-{os.getpid()}'
-            os.replace(target, retired)
-            os.replace(staging, target)
-            shutil.rmtree(retired, ignore_errors=True)
-        else:
-            os.replace(staging, target)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+    with _locked(parent):
+        _recover(parent, target)
+        files = tree(reviewer)
+        existing = _current(target)
+        if existing is not None and _digest(existing) == _digest(files):
+            return target
+        staging = Path(tempfile.mkdtemp(prefix=f'.{__version__}.tmp-', dir=parent))
+        retired = None
+        try:
+            for name, data in files.items():
+                file = staging / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(data)
+                file.chmod(0o644)
+            for directory in (staging, *(p for p in staging.rglob('*') if p.is_dir())):
+                directory.chmod(0o755)
+            if target.exists() or target.is_symlink():
+                retired = parent / f'.{__version__}.old-{os.getpid()}'
+                os.replace(target, retired)
+            try:
+                os.replace(staging, target)
+            except BaseException:
+                if retired is not None:
+                    os.replace(retired, target)
+                raise
+            if retired is not None:
+                shutil.rmtree(retired, ignore_errors=True)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     return target

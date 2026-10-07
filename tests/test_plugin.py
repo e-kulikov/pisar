@@ -1,5 +1,8 @@
 """Extraction of the bundled Claude plugin: contents, atomicity, idempotence, hook."""
 import json
+import threading
+from unittest import mock
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -78,7 +81,7 @@ class ExtractionTests(unittest.TestCase):
         self.extract(model='other')
         self.assertFalse((path / 'stray.txt').exists())
         self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'other')
-        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir()), [__version__])
+        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir() if p.name != '.lock'), [__version__])
 
     def test_damaged_tree_is_repaired(self):
         path = self.extract()
@@ -93,6 +96,64 @@ class ExtractionTests(unittest.TestCase):
         (self.target / 'plugin' / f'.{__version__}.tmp-123').mkdir()
         self.extract()
         self.assertTrue((old / 'marker').exists())
+
+    def test_failed_replacement_keeps_the_installed_tree(self):
+        path = self.extract(model='first')
+        real = os.replace
+        calls = []
+
+        def failing(src, dst, *a, **k):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise OSError('simulated failure')
+            return real(src, dst, *a, **k)
+
+        with mock.patch.object(plugin.os, 'replace', failing):
+            with self.assertRaises(OSError):
+                self.extract(model='second')
+        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'first')
+        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir() if p.name != '.lock'),
+                         [__version__])
+
+    def test_interrupted_replacement_is_recovered_from_the_retired_tree(self):
+        path = self.extract(model='first')
+        retired = path.with_name(f'.{__version__}.old-1')
+        path.rename(retired)  # a crash between the two renames
+        self.assertFalse(path.exists())
+        self.extract(model='first')
+        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'first')
+        self.assertFalse(retired.exists())
+
+    def test_interrupted_replacement_restores_the_retired_tree_before_replacing(self):
+        path = self.extract(model='first')
+        retired = path.with_name(f'.{__version__}.old-1')
+        path.rename(retired)
+        with mock.patch.object(plugin, 'tree', side_effect=OSError('cannot build')):
+            with self.assertRaises(OSError):
+                self.extract(model='second')
+        self.assertEqual(frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model'], 'first')
+
+    def test_concurrent_extractors_are_serialized_and_leave_one_complete_tree(self):
+        errors = []
+
+        def worker(model):
+            try:
+                for _ in range(5):
+                    self.extract(model=model)
+            except Exception as error:  # noqa: BLE001
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(f'm{i}',)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        path = self.target / 'plugin' / __version__
+        model = frontmatter((path / 'agents/lesson-reviewer.md').read_text())['model']
+        self.assertEqual(self.tree(path), plugin.tree({'model': model}))
+        self.assertEqual(sorted(p.name for p in (self.target / 'plugin').iterdir() if p.name != '.lock'),
+                         [__version__])
 
     def test_hook_json_matches_write_edit_and_multiedit(self):
         hooks = json.loads((self.extract() / 'hooks' / 'hooks.json').read_text())
