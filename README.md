@@ -117,6 +117,37 @@ stable: space descriptors are named `.wiki.toml`, stable document references are
 `wiki: OPERATION-ID`. Retries recognize their own commits by that subject and the
 rollback procedure below selects commits with it.
 
+## Running an agent
+
+```sh
+pisar --agent claude                 # start Claude Code in the knowledge root
+pisar --agent claude -- -c           # arguments after -- go to the agent itself
+```
+
+`--agent` starts an AI agent confined to this repository, so it behaves as a
+knowledge assistant. Today only `claude` (Claude Code, which must be on `PATH`)
+is supported. It is used instead of a command:
+
+- It runs in the root, with its own configuration directory
+  `<state-dir>/agents/claude` (mode 0700, outside every Git repository). Log in
+  once there; none of your global Claude settings, hooks, plugins, skills or MCP
+  servers apply. The child gets `PISAR_ROOT`, `PISAR_STATE_DIR` and
+  `PISAR_RUWANA_BIN` for the same selection and never inherits `WIKI_ROOT`.
+- Its system prompt is replaced by a short built-in one: start with
+  `pisar spaces`, and do with pisar everything pisar can do, so the repository,
+  its journals and the task tracker stay in sync.
+- Only the tools `Read`, `Write`, `Edit`, `Glob`, `Grep` and `Bash` exist. MCP is
+  strict: no servers are loaded unless the root contains a regular (non-symlink)
+  `.mcp.json`, which is then passed with `--mcp-config`. `Bash` is limited to read-only `git status|diff|log`, `git add`,
+  `git commit`, `git mv` and the pisar subcommands. There is no bare `git *`
+  or `pisar *` (git aliases and `-c`, or `pisar --ruwana BIN`, would run arbitrary
+  programs) and no `mv`: files enter the repository with `pisar capture` and are
+  renamed with `git mv`. `git push` and edits inside `.git` are denied.
+
+In an interactive session a command outside the allowlist asks for confirmation;
+non-interactively it is refused. The allowlist narrows what the agent may do, it
+is not a sandbox: it can still read and edit files in the repository.
+
 ## Read, discover, and validate
 
 ```sh

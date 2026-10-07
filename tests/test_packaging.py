@@ -58,6 +58,8 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('pisar/cli.py', names)
             self.assertIn('pisar/_version.py', names)
             self.assertIn('pisar/skill.md', names)
+            self.assertIn('pisar/agent-prompt.md', names)
+            self.assertIn('pisar/agent.py', names)
             self.assertFalse([n for n in names if not (n == '__main__.py' or n.startswith('pisar/'))])
             self.assertFalse([n for n in names if '__pycache__' in n or n.endswith('.pyc')])
             self.assertEqual({i.date_time for i in archive.infolist()}, {(2023, 11, 14, 22, 13, 20)})

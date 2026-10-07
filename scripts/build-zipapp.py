@@ -43,8 +43,8 @@ def entries(version):
         if path.name == '_version.py':
             continue
         files[f'pisar/{path.name}'] = path.read_bytes()
-    skill = REPO / 'pisar' / 'skill.md'
-    files['pisar/skill.md'] = skill.read_bytes()
+    for path in sorted((REPO / 'pisar').glob('*.md')):
+        files[f'pisar/{path.name}'] = path.read_bytes()
     return dict(sorted(files.items()))
 
 
