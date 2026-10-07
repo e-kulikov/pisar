@@ -98,6 +98,23 @@ class DomainTests(SpaceCommandFixture):
         self.assertFalse((self.root / 'acme/10-projects').exists())
         self.clean()
 
+    def test_interrupted_add_commits_the_marker_it_wrote_before_the_crash(self):
+        args = ('domain', 'add', '--id', 'acme', '--title', 'Acme', '--layout', 'none')
+        self.cli(*args)
+        git(self.root, 'reset', '-q', '--hard', 'HEAD~1')
+        (self.root / 'acme').mkdir()
+        (self.root / 'acme/.domain.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
+        runtime = Runtime(self.state, self.root)
+        for journal in (runtime.path / 'operations').glob('domain-add-*.json'):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+        before = commits(self.root)
+        self.assertTrue(self.data(*args)['changed'])
+        self.assertEqual(commits(self.root), before + 1)
+        self.clean()
+        self.assertIn('acme/.domain.toml', git(self.root, 'ls-files'))
+
     def test_add_repo_clones_a_local_repository_as_a_submodule(self):
         bare = self.origin()
         before = commits(self.root)

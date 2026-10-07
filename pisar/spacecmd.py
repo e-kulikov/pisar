@@ -12,7 +12,7 @@ import tomllib
 import unicodedata
 from . import gitops
 from .operations import Runtime, atomic_bytes, fingerprint
-from .safety import WikiError, address, concrete_id, safe_path
+from .safety import WikiError, address, concrete_id, safe_path, sha256
 from .spaces import LAYOUT, Wiki, load_domain
 
 COMMANDS = ('domain', 'space')
@@ -258,24 +258,29 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
                     raise
             target = gitops.owner(base, root)
             marker = base / '.domain.toml'
-            # Decided once, after any clone and before the marker exists; a retry reuses it.
-            if 'scaffold' not in journal:
-                journal['scaffold'] = layout == 'para' and not marker.exists() and _blank(base)
+            # Decided once, after any clone and before anything is written; a retry commits
+            # exactly these files, whether or not the interrupted run already wrote them.
+            if 'planned' not in journal:
+                files = {}
+                if marker.exists() or marker.is_symlink():
+                    _check_marker(base, ident, title)
+                else:
+                    files['.domain.toml'] = _marker(ident, title).encode()
+                    if layout == 'para' and _blank(base):
+                        for kind in SCAFFOLD:
+                            folder = base / LAYOUT[kind]
+                            if not folder.exists() or not any(folder.iterdir()):
+                                files[f'{LAYOUT[kind]}/.gitkeep'] = b''
+                journal['planned'] = {rel: sha256(data) for rel, data in files.items()}
                 runtime.store(journal)
-            paths = []
-            if marker.exists() or marker.is_symlink():
-                _check_marker(base, ident, title)
-            else:
-                atomic_bytes(marker, _marker(ident, title).encode())
-                paths.append('.domain.toml')
-            if journal['scaffold']:
-                for kind in SCAFFOLD:
-                    folder = base / LAYOUT[kind]
-                    if not folder.exists() or not any(folder.iterdir()):
-                        atomic_bytes(folder / '.gitkeep', b'')
-                    if (folder / '.gitkeep').is_file():
-                        paths.append(f'{LAYOUT[kind]}/.gitkeep')
-            inner = [(base / p).relative_to(target).as_posix() for p in paths]
+            for rel, digest in journal['planned'].items():
+                path = base / rel
+                content = _marker(ident, title).encode() if rel == '.domain.toml' else b''
+                if path.is_symlink() or (path.exists() and sha256(path.read_bytes()) != digest):
+                    raise WikiError(f'{ident}/{rel} changed since the interrupted operation')
+                if not path.exists():
+                    atomic_bytes(path, content)
+            inner = [(base / rel).relative_to(target).as_posix() for rel in journal['planned']]
             done = [(target, gitops.commit(target, inner, op))]
             if location:
                 done.append((root, gitops.commit(root, ['.gitmodules', ident], op)))
