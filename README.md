@@ -202,8 +202,13 @@ is supported. It is used instead of a command:
 - Its system prompt is replaced by a short built-in one: start with
   `pisar spaces`, and do with pisar everything pisar can do, so the repository,
   its journals and the task tracker stay in sync.
-- Only the tools `Read`, `Write`, `Edit`, `Glob`, `Grep` and `Bash` exist. MCP is
-  strict: no servers are loaded unless the root contains a regular (non-symlink)
+- Only the tools `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `Agent` and
+  `Skill` exist. `Agent` and `Skill` serve the lesson review workflow and are
+  limited by name: the only permitted subagent is the plugin's reviewer
+  `pisar:lesson-reviewer`, the only permitted skills are `pisar:pisar`,
+  `pisar:lessons` and `pisar:research`, and every built-in subagent type
+  (`general-purpose`, `Explore`, `Plan`, `claude`, `statusline-setup`,
+  `claude-code-guide`) is denied. MCP is strict: no servers are loaded unless the root contains a regular (non-symlink)
   `.mcp.json`, which is then passed with `--mcp-config`. `Bash` is limited to read-only `git status|diff|log`, `git add`,
   `git commit`, `git mv` and the pisar subcommands. There is no bare `git *`
   or `pisar *` (git aliases and `-c`, or `pisar --ruwana BIN`, would run arbitrary
