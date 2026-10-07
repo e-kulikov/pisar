@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import unittest
 from unittest import mock
 
@@ -649,6 +650,33 @@ class AcceptTests(LessonCase):
         self.assertNotIn('lesson check', out)
         self.assertNotIn('lesson review', out)
         self.assertNotIn('--keep', out)
+
+    def committed_bytes(self, result):
+        return subprocess.run(['git', '-C', str(self.root), 'cat-file', 'blob', f'HEAD:{result["path"]}'],
+                              capture_output=True, check=True).stdout
+
+    def journaled_bytes(self, batch):
+        import base64
+        return base64.b64decode(self.operation_record(batch)['artifacts'][0]['data'])
+
+    def test_line_ending_conversion_never_alters_the_committed_bytes(self):
+        (self.personal / '.gitattributes').write_text('* text eol=crlf\n')
+        git(self.root, 'add', '--', 'personal')
+        git(self.root, 'commit', '-qm', 'attributes')
+        batch, _, _ = self.prepared('Line one\r\nLine two\r\n')
+        result = json.loads(self.accept(batch).stdout)
+        self.assertEqual(self.committed_bytes(result), self.journaled_bytes(batch))
+        self.assertIn(b'\r\n', self.committed_bytes(result))
+
+    def test_a_clean_filter_never_alters_the_committed_bytes(self):
+        (self.personal / '.gitattributes').write_text('*.md filter=rewrite\n')
+        git(self.root, 'config', 'filter.rewrite.clean', 'sed s/launch/UNREVIEWED/')
+        git(self.root, 'add', '--', 'personal')
+        git(self.root, 'commit', '-qm', 'attributes')
+        batch, _, _ = self.prepared()
+        result = json.loads(self.accept(batch).stdout)
+        self.assertEqual(self.committed_bytes(result), self.journaled_bytes(batch))
+        self.assertNotIn(b'UNREVIEWED', self.committed_bytes(result))
 
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()

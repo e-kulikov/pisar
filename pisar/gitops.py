@@ -66,9 +66,18 @@ def clean_except(repo, allowed=()):
         raise WikiError(f'dirty/staged repository {repo}: {", ".join(conflicts)}')
 
 
+def blob(repo, spec):
+    """The exact bytes of a Git object, e.g. COMMIT:path (never filtered)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    result = subprocess.run(['git', '-C', str(repo), 'cat-file', 'blob', spec], capture_output=True, env=env)
+    if result.returncode:
+        raise WikiError(f'git cat-file failed in {repo}: {result.stderr.decode().strip()}')
+    return result.stdout
+
+
 def stage_verified(repo, relative, data):
     """Stage exactly DATA at RELATIVE, never rereading the working file."""
-    oid = run(repo, 'hash-object', '-w', '--stdin', '--path', relative, input=data).strip()
+    oid = run(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=data).strip()
     entry = run(repo, 'ls-files', '--stage', '--', relative).split()
     mode = entry[0] if entry and entry[0] in ('100644', '100755') else '100644'
     run(repo, 'update-index', '--add', '--cacheinfo', f'{mode},{oid},{relative}')
@@ -96,7 +105,11 @@ def commit(repo, paths, operation_id, verified=None):
     # (a pathspec commit would reread the working files).
     run(repo, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
         'commit', '-qm', f'wiki: {operation_id}')
-    return run(repo, 'rev-parse', 'HEAD').strip()
+    head = run(repo, 'rev-parse', 'HEAD').strip()
+    for relative, data in verified.items():
+        if blob(repo, f'{head}:{relative}') != data:
+            raise WikiError(f'committed bytes of {relative} differ from the journal in {repo} (Git filters?)')
+    return head
 
 
 def commit_move(repo, old, new, operation_id):
