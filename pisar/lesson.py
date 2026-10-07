@@ -303,7 +303,40 @@ def note_text(meta, doc_id, body, mention):
     return f'+++\n{header}\n+++\n\n{origin}'.encode() + body
 
 
+def decide(batch, meta, rev, data, keeps, skip_review):
+    """Gate a FIRST acceptance on the workspace files; returns the review verdict (or None)."""
+    if meta['status'] != 'open':
+        raise WikiError(f'lesson batch {batch.ident} is {meta["status"]}')
+    if batch.draft()[1] != data:
+        raise WikiError(f'draft.md differs from {rev["revision"]}; run `pisar lesson check` first')
+    verdict = None
+    review_path = batch.file(f'{rev["revision"]}.review.json')
+    if review_path.is_file():
+        reviewed = read_json(review_path, 'review')
+        if reviewed.get('sha256') != rev['sha256']:
+            raise WikiError('stale review; review the current revision')
+        verdict = reviewed['verdict']
+    elif not skip_review:
+        raise WikiError(f'no review of the current revision {rev["revision"]}: attach one with '
+                        '`pisar lesson review`, or pass --skip-review (recorded)')
+    report = read_json(batch.file(f'{rev["revision"]}.report.json'), 'report')
+    ids = {f['id'] for f in report['findings']}
+    unknown = sorted(set(keeps) - ids)
+    if unknown:
+        raise WikiError(f'--keep ids not found in {rev["revision"]}: {", ".join(unknown)}')
+    open_findings = [f for f in report['findings'] if f['id'] not in keeps]
+    if open_findings:
+        lines = [f'{f["id"]} [{f["tier"]}] line {f["line"]} {f["category"]}: {f["excerpt"]}' for f in open_findings]
+        raise WikiError('findings without a decision in the current revision (edit the draft and '
+                        'run check, or list them in --keep): ' + '; '.join(lines))
+    return verdict
+
+
 def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False):
+    """Write the reviewed revision. Once an operation journal exists (resume or completed retry)
+    the outcome is a pure function of meta.json, the operation journal (which persists the decision
+    taken at the start) and the committed repository state: draft.md, revisions, reports and reviews
+    are never read again."""
     batch = Batch(wiki, state, ident)
     keeps = sorted({part.strip() for value in keep for part in value.split(',') if part.strip()})
     with batch.runtime.lock():
@@ -311,43 +344,26 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         target = wiki.space(meta['to'], {meta['to'].split('/')[0]})
         if target.status != 'active':
             raise WikiError(f'target space {target.address} is archived')
-        rev, data = batch.current(meta)
+        if not meta['revisions']:
+            raise WikiError('no revision yet; run `pisar lesson check` first')
+        rev = meta['revisions'][-1]
         doc_id = slug(meta['title'], ident)
         operation = concrete_id(ident, 'operation_id')
         payload = dict(batch=ident, revision=rev['revision'], sha256=rev['sha256'], to=target.address,
                        id=doc_id, keeps=keeps, mention_origin=bool(mention_origin), skip_review=bool(skip_review))
         journal = existing(batch.runtime, operation, payload)
-        journal_started = journal is not None  # Resuming: the persisted revision decides, not draft.md.
+        resumed = journal is not None
+        if journal is not None and 'decision' not in journal:
+            # Started but the decision was not persisted yet: nothing was written, so start over.
+            journal = None if journal['status'] != 'complete' and not journal['commits'] else journal
         if journal is not None and journal['status'] == 'complete':
             item = journal['artifacts'][0]
             path = safe_path(wiki.root, item['path'])
             if not path.is_file() or sha256(path.read_bytes()) != item['after']:
                 raise WikiError('accepted note changed or is missing; later edits are preserved')
-        else:
-            if meta['status'] != 'open':
-                raise WikiError(f'lesson batch {ident} is {meta["status"]}')
-            if journal is None and batch.draft()[1] != data:
-                raise WikiError(f'draft.md differs from {rev["revision"]}; run `pisar lesson check` first')
-            reviewed = None
-            review_path = batch.file(f'{rev["revision"]}.review.json')
-            if review_path.is_file():
-                reviewed = read_json(review_path, 'review')
-                if reviewed.get('sha256') != rev['sha256']:
-                    raise WikiError('stale review; review the current revision')
-            elif not skip_review:
-                raise WikiError(f'no review of the current revision {rev["revision"]}: attach one with '
-                                '`pisar lesson review`, or pass --skip-review (recorded)')
-            report = read_json(batch.file(f'{rev["revision"]}.report.json'), 'report')
-            ids = {f['id'] for f in report['findings']}
-            unknown = sorted(set(keeps) - ids)
-            if unknown:
-                raise WikiError(f'--keep ids not found in {rev["revision"]}: {", ".join(unknown)}')
-            open_findings = [f for f in report['findings'] if f['id'] not in keeps]
-            if open_findings:
-                lines = [f'{f["id"]} [{f["tier"]}] line {f["line"]} {f["category"]}: {f["excerpt"]}' for f in open_findings]
-                raise WikiError('findings without a decision in the current revision (edit the draft and '
-                                'run check, or list them in --keep): ' + '; '.join(lines))
         if journal is None:
+            _, data = batch.current(meta)
+            verdict = decide(batch, meta, rev, data, keeps, skip_review)
             title = wiki.domains[meta['from']['domain']].title if mention_origin else None
             relative = f'notes/{doc_id}.md'
             text = note_text(meta, doc_id, data, title)
@@ -366,6 +382,10 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
                 raise WikiError('the text would not pass `pisar check` (nothing was changed; edit the draft and '
                                 'run `pisar lesson check` again): ' + '; '.join(problems))
             journal = start_operation(wiki, batch.runtime, operation, payload, artifacts)
+            journal['decision'] = dict(keeps=keeps, skip_review=bool(skip_review),
+                                       mention_origin=bool(mention_origin), verdict=verdict)
+            batch.runtime.store(journal)
+        decision = journal.get('decision', {})
         try:
             if journal['status'] != 'complete':
                 apply_files(wiki, batch.runtime, journal)
@@ -378,10 +398,7 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
             batch.runtime.store(journal)
             raise
         item = journal['artifacts'][0]
-        verdict = None
-        review_path = batch.file(f'{rev["revision"]}.review.json')
-        if review_path.is_file():
-            verdict = read_json(review_path, 'review')['verdict']
+        verdict = decision.get('verdict')
         # Finalization is idempotent: a retry repairs a missing event, status or retained journal.
         if any(e['event'] == 'accept' for e in batch.journal()['events']):
             batch.sync_archive(meta)
@@ -393,16 +410,9 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
             meta['status'] = 'accepted'
             batch.save(meta)
         notes = []
-        if journal_started:
-            # Informational only: the draft never changes the outcome of a resumed acceptance.
-            try:
-                edited = batch.draft()[1] != data
-            except (WikiError, OSError):
-                notes.append('draft.md is unavailable; it was left untouched')
-            else:
-                if edited:
-                    notes.append(f'draft.md differs from the accepted revision {rev["revision"]} and was ignored: '
-                                 'the immutable revision was written; draft.md is untouched')
+        if resumed:
+            notes.append(f'resumed from the persisted revision {rev["revision"]}: draft.md was not read, is '
+                         'ignored and left untouched')
         return dict(batch=ident, revision=rev['revision'], path=item['path'], notes=notes,
                     reference=f'wiki:{target.address}:{doc_id}', keeps=keeps, skip_review=bool(skip_review),
                     mention_origin=bool(mention_origin), verdict=verdict, warnings=warnings(wiki, meta),

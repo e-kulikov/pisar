@@ -468,6 +468,31 @@ class AcceptTests(LessonCase):
         self.assertTrue(self.note(first).is_file())
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
+    def make_auxiliary_unreadable(self, batch):
+        ws = self.workspace(batch)
+        for path in [ws / 'draft.md', *ws.glob('revisions/*.md'), *ws.glob('r*.report.json'),
+                     *ws.glob('r*.review.json')]:
+            path.chmod(0)
+            self.addCleanup(path.chmod, 0o600)
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root ignores file permissions')
+    def test_finalized_and_resumed_acceptance_need_no_auxiliary_workspace_file(self):
+        batch, _, _ = self.prepared()
+        first = json.loads(self.accept(batch).stdout)
+        baseline = json.loads(self.accept(batch).stdout)
+        self.make_auxiliary_unreadable(batch)
+        self.assertEqual(json.loads(self.accept(batch).stdout), baseline)
+        self.assertEqual(baseline['verdict'], 'clear')
+        self.assertEqual(baseline['path'], first['path'])
+        # The same after an interruption: the verdict comes from the persisted decision.
+        resumed = self.interrupted_submodule_accept()
+        self.make_auxiliary_unreadable(resumed)
+        result = json.loads(self.accept(resumed).stdout)
+        self.assertEqual(result['verdict'], 'clear')
+        self.assertEqual(self.journal_events(resumed)[-1]['verdict'], 'clear')
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(json.loads(self.accept(resumed).stdout), result)
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)
