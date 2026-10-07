@@ -203,6 +203,21 @@ is supported. It is used instead of a command:
   or `pisar *` (git aliases and `-c`, or `pisar --ruwana BIN`, would run arbitrary
   programs) and no `mv`: files enter the repository with `pisar capture` and are
   renamed with `git mv`. `git push` and edits inside `.git` are denied.
+- The allowlist also covers `pisar domain|space|guard|config|research *` and the
+  `pisar lesson` steps `start`, `check`, `review`, `show` and `discard`.
+  `pisar lesson accept` is never allowed silently: it is in the permission `ask`
+  list (passed with `--settings`), so it always needs your confirmation. The
+  only place the agent may edit outside the root is the lesson workspace
+  `<state-dir>/lessons` (`--allowedTools Edit(//<state-dir>/lessons/**)`).
+- A bundled plugin is extracted to `<state-dir>/agents/claude/plugin/<pisar
+  version>/` and passed with `--plugin-dir`. Extraction is atomic and does
+  nothing when the tree is already current. It provides the skills `pisar` (the
+  text of `pisar --skill`), `lessons` and `research`; a hook that denies direct
+  `Write`/`Edit`/`MultiEdit` of `.wiki.toml` and `.domain.toml` (use `pisar domain`
+  and `pisar space`); and the `lesson-reviewer` subagent, generated with
+  `[agents.claude.reviewer]` model and effort (default `opus`, `high`) and the
+  JSON contract of `pisar lesson review`. Install any further plugins of your
+  own inside the isolated configuration directory.
 
 In an interactive session a command outside the allowlist asks for confirmation;
 non-interactively it is refused. The allowlist narrows what the agent may do, it
