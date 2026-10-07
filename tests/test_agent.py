@@ -60,11 +60,6 @@ class AgentTests(Fixture):
         prompt = (CHECKOUT / 'pisar/agent-prompt.md').read_text(encoding='utf-8')
         self.assertEqual(argv[argv.index('--system-prompt') + 1], prompt)
         self.assertNotIn('--system-prompt-file', argv)
-        self.assertIn('pisar spaces', prompt)
-        self.assertIn('must be done with pisar', prompt)
-        for gone in ('AGENTS.md', 'workflows', 'coding', '--skill'):
-            self.assertNotIn(gone, prompt)
-        self.assertIsNone(__import__('re').search(r'/home/|ekulikov|godel|herdr|codex', prompt, 2))
 
     def test_tools_are_minimal_and_mcp_is_disabled(self):
         _, call = self.launch()

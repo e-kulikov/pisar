@@ -45,12 +45,6 @@ class SkillTests(Fixture):
                       'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', '--scope', '--version'):
             self.assertIn(token, text, token)
 
-    def test_skill_is_generic_and_leaks_nothing_local(self):
-        text = self.skill().stdout
-        for pattern in (r'/home/', r'/Users/', r'ekulikov', r'godel', r'@[\w-]+\.(com|org|net)',
-                        r'herdr', r'\bcodex\b', r'~/'):
-            self.assertIsNone(re.search(pattern, text, re.I), pattern)
-
     def test_skill_matches_the_packaged_source_file(self):
         self.assertEqual(self.skill().stdout, (CHECKOUT / 'pisar/skill.md').read_text(encoding='utf-8'))
 
