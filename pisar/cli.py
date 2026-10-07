@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 from types import SimpleNamespace
-from . import __version__, agent, config_command, guard, settings
+from . import __version__, agent, config_command, guard, settings, spacecmd
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -71,6 +71,7 @@ def parser():
             sub.add_argument('--space', required=True, help='New destination space address (domain/id)')
     config_command.add_parser(commands)
     guard.add_parser(commands)
+    spacecmd.add_parser(commands)
     return p
 
 
@@ -109,6 +110,8 @@ def main(argv=None):
             domains = wiki.select(args.include, args.exclude)
         if args.command == 'check':
             result = check(wiki, domains)
+        elif args.command in spacecmd.COMMANDS:
+            result = spacecmd.run(args, SimpleNamespace(wiki=wiki, domains=domains, state_dir=args.state_dir))
         else:
             wiki.require_valid(domains)
             if args.command == 'spaces':

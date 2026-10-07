@@ -76,3 +76,13 @@ def commit(repo, paths, operation_id):
     run(repo, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
         'commit', '-qm', f'wiki: {operation_id}', '--', *paths)
     return run(repo, 'rev-parse', 'HEAD').strip()
+
+
+def commit_move(repo, old, new, operation_id):
+    """Commit a staged `git mv` of OLD to NEW (repo-relative) and nothing else."""
+    run(repo, 'add', '-A', '--', new)
+    if not run(repo, 'diff', '--cached', '--name-only', '--', old, new).strip():
+        return None
+    run(repo, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+        'commit', '-qm', f'wiki: {operation_id}', '--', old, new)
+    return run(repo, 'rev-parse', 'HEAD').strip()

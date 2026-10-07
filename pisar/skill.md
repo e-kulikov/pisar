@@ -178,6 +178,29 @@ pisar triage defer   --batch ID --item ITEM
 - Once an accept has started, `defer`/`reroute` are refused. Fix the cause and
   retry the same `accept`. Do not delete journals.
 
+### 4. Create and organise domains and spaces
+
+```sh
+pisar domain list
+pisar domain add --id acme --title 'Acme Corp' [--repo URL_OR_PATH] [--layout para|none]
+pisar space create --domain acme --kind project --title 'Launch Plan' [--id launch-plan]
+pisar space find launch [--include acme]
+pisar space move acme/launch-plan --to area
+pisar space archive acme/launch-plan
+pisar space restore acme/launch-plan
+```
+
+Each is one local commit, safe to retry with the same inputs (`"changed": false`
+means nothing was left to do). Ask the user before creating a domain or space;
+they choose the domain, kind and title. Derive nothing from the kind: ids never
+contain it. When `space create` refuses an id, it names the owner (archived
+spaces keep their ids) and suggests alternatives; offer them, do not invent a
+workaround. A title without ASCII letters needs an explicit `--id`.
+`domain add --repo` clones over the network by running `git` on explicit command
+only: confirm the location with the user first. `space move` stays inside the
+domain; it refuses a dirty tree, an existing target or an unfinished operation
+on that space, and `ruwana` tasks follow the directory.
+
 ## Guard: report possibly sensitive text
 
 ```sh
