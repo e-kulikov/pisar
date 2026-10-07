@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -453,6 +454,19 @@ class AcceptTests(LessonCase):
         self.assertTrue(any('draft' in note and 'ignored' in note for note in result['notes']))
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.data('lesson', 'discard', '--batch', batch)
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root ignores file permissions')
+    def test_unreadable_draft_does_not_fail_a_resumed_acceptance(self):
+        batch = self.interrupted_submodule_accept()
+        draft = self.workspace(batch) / 'draft.md'
+        draft.chmod(0)
+        self.addCleanup(draft.chmod, 0o600)
+        first = json.loads(self.accept(batch).stdout)
+        again = json.loads(self.accept(batch).stdout)
+        for result in (first, again):
+            self.assertTrue(any('draft' in note and 'untouched' in note for note in result['notes']))
+        self.assertTrue(self.note(first).is_file())
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()

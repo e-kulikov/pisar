@@ -393,13 +393,16 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
             meta['status'] = 'accepted'
             batch.save(meta)
         notes = []
-        try:
-            edited = batch.draft()[1] != data
-        except WikiError:
-            edited = True
-        if edited and journal_started:
-            notes.append(f'draft.md differs from the accepted revision {rev["revision"]} and was ignored: '
-                         'the immutable revision was written; draft.md is untouched')
+        if journal_started:
+            # Informational only: the draft never changes the outcome of a resumed acceptance.
+            try:
+                edited = batch.draft()[1] != data
+            except (WikiError, OSError):
+                notes.append('draft.md is unavailable; it was left untouched')
+            else:
+                if edited:
+                    notes.append(f'draft.md differs from the accepted revision {rev["revision"]} and was ignored: '
+                                 'the immutable revision was written; draft.md is untouched')
         return dict(batch=ident, revision=rev['revision'], path=item['path'], notes=notes,
                     reference=f'wiki:{target.address}:{doc_id}', keeps=keeps, skip_review=bool(skip_review),
                     mention_origin=bool(mention_origin), verdict=verdict, warnings=warnings(wiki, meta),
