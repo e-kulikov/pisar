@@ -440,6 +440,26 @@ class AcceptTests(LessonCase):
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.assertTrue(self.note(result).is_file())
 
+    def test_discard_waits_for_the_decision_record(self):
+        batch, draft = self.start()
+        self.check(batch, CLEAN, draft)
+        self.accept(batch, '--skip-review')
+        meta = self.workspace(batch) / 'meta.json'
+        value = json.loads(meta.read_text())
+        value['status'] = 'open'
+        meta.write_text(json.dumps(value))
+        journal = self.workspace(batch) / 'journal.json'
+        value = json.loads(journal.read_text())
+        value['events'] = [e for e in value['events'] if e['event'] != 'accept']
+        journal.write_text(json.dumps(value))
+        p = self.cli('lesson', 'discard', '--batch', batch, ok=False)
+        self.assertIn('accept', p.stderr)
+        self.assertTrue(self.workspace(batch).is_dir())
+        self.accept(batch, '--skip-review')
+        self.data('lesson', 'discard', '--batch', batch)
+        events = json.loads(self.archived(batch)[0].read_text())['events']
+        self.assertTrue(next(e for e in events if e['event'] == 'accept')['skip_review'])
+
     def test_accepted_batch_cannot_be_checked_or_reviewed_again(self):
         batch, draft, checked = self.prepared()
         self.accept(batch)
