@@ -14,7 +14,7 @@ research; the question leaves the machine, so it needs the user's explicit
 `--confirm-outbound`). **You** (the agent) read sources, understand them and
 write the summaries; pisar checks structure and applies what you prepared.
 
-All successful output is JSON on stdout. Errors go to stderr prefixed `pisar:`
+Successful output is JSON on stdout, except `pisar lesson show`, `--help`, `--version` and `--skill`, which print text. Errors go to stderr prefixed `pisar:`
 and exit 1; argument errors exit 2. `pisar check` prints JSON and exits 1 when
 validation fails.
 
