@@ -27,13 +27,16 @@ def parser():
                                 description='Offline knowledge repository CLI; lexical search, explicit Git writes.')
     p.add_argument('--version', action='version', version=f'pisar {__version__}')
     p.add_argument('--skill', action=_Skill)
-    p.add_argument('--agent', choices=agent.AGENTS,
-                   help='Start this AI agent confined to the knowledge root; '
-                        'arguments after -- are passed to the agent itself')
-    p.add_argument('--root', help='Knowledge root; default $PISAR_ROOT, else $XDG_DATA_HOME/wiki')
+    p.add_argument('--agent', nargs='?', const=agent.DEFAULT, metavar='{%s}' % ','.join(agent.AGENTS),
+                   help='Start this AI agent confined to the knowledge root (without a value: '
+                        'default_agent from the config file); arguments after -- go to the agent itself')
+    p.add_argument('--root', help='Knowledge root; default $PISAR_ROOT, else root in the config file, '
+                                   'else $XDG_DATA_HOME/wiki')
     p.add_argument('--state-dir', help='External runtime directory outside all Git repos and the root; '
-                                       'default $PISAR_STATE_DIR, else $XDG_DATA_HOME/pisar')
-    p.add_argument('--ruwana', help='Public ruwana binary; default $PISAR_RUWANA_BIN, else ruwana on PATH')
+                                       'default $PISAR_STATE_DIR, else state_dir in the config file, '
+                                       'else $XDG_DATA_HOME/pisar')
+    p.add_argument('--ruwana', help='Public ruwana binary; default $PISAR_RUWANA_BIN, else ruwana in the config file, '
+                                    'else ruwana on PATH')
     commands = p.add_subparsers(dest='command')
     for name in ('spaces', 'search', 'read', 'check', 'inventory'):
         sub = commands.add_parser(name)
@@ -76,14 +79,16 @@ def main(argv=None):
         argv, extra = argv[:split], argv[split + 1:]
     p = parser()
     args = p.parse_args(argv)
+    if args.agent not in (None, agent.DEFAULT, *agent.AGENTS):
+        p.error(f'argument --agent: invalid choice: {args.agent!r}')
     if args.agent and args.command:
         p.error('--agent cannot be combined with a command')
     if not args.agent and not args.command:
         p.error('a command is required (or --agent)')
     try:
         if args.agent:
-            agent.launch(args.agent, settings.root(args.root), settings.state_dir(args.state_dir),
-                         settings.ruwana(args.ruwana), extra)
+            agent.launch(agent.selected(args.agent), settings.root(args.root),
+                         settings.state_dir(args.state_dir), settings.ruwana(args.ruwana), extra)
         if args.command == 'config':
             ctx = SimpleNamespace(flags=dict(root=args.root, state_dir=args.state_dir, ruwana=args.ruwana))
             print(json.dumps(config_command.run(args, ctx), ensure_ascii=False, indent=2))

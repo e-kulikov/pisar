@@ -7,10 +7,13 @@ the user's global settings, hooks, plugins, skills or MCP servers apply.
 import os
 from pathlib import Path
 import shutil
+from . import settings
+from .config import AGENTS, path as config_path
 from .operations import Runtime, outside_git
 from .safety import WikiError
 
-AGENTS = ('claude',)
+# `--agent` given without a value: start the configured default_agent.
+DEFAULT = object()
 PROMPT = 'agent-prompt.md'
 MCP_CONFIG = '.mcp.json'
 
@@ -41,18 +44,41 @@ def mcp_config(root):
     return path if path.is_file() and not path.is_symlink() else None
 
 
-def claude_command(executable, prompt, extra=(), mcp=None):
+def session_options(agent, extra=()):
+    """--model/--effort for the main session from the config file, verbatim.
+
+    Nothing is passed when unset, or when the caller's own arguments already set it.
+    """
+    options = []
+    for key, value in settings.agent_options(agent).items():
+        flag = f'--{key}'
+        if value is not None and not any(a == flag or a.startswith(f'{flag}=') for a in extra):
+            options += [flag, value]
+    return options
+
+
+def claude_command(executable, prompt, extra=(), mcp=None, options=()):
     """Caller's own arguments come first, so variadic options cannot swallow them.
 
     MCP is strict: only servers from `mcp` (the root's .mcp.json) are loaded.
     """
-    return [executable, *extra,
+    return [executable, *extra, *options,
             '--system-prompt', prompt,
             f'--tools={CLAUDE_TOOLS}',
             '--allowedTools', *CLAUDE_ALLOWED,
             '--disallowedTools', *CLAUDE_DENIED,
             *(['--mcp-config', str(mcp)] if mcp else []),
             '--strict-mcp-config']
+
+
+def selected(agent):
+    """The agent to start: AGENT itself, or the configured default_agent for DEFAULT."""
+    if agent is DEFAULT:
+        agent, _ = settings.default_agent()
+        if agent is None:
+            raise WikiError('--agent without a value needs default_agent in the config file '
+                            f'({config_path()})')
+    return agent
 
 
 def launch(agent, root, state_dir, ruwana, extra=()):
@@ -74,5 +100,6 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     env.update(CLAUDE_CONFIG_DIR=str(config), PISAR_ROOT=str(root),
                PISAR_STATE_DIR=str(runtime.base), PISAR_RUWANA_BIN=str(ruwana))
     os.chdir(root)
-    command = claude_command(executable, prompt_text(), extra, mcp_config(root))
+    command = claude_command(executable, prompt_text(), extra, mcp_config(root),
+                             session_options(agent, extra))
     os.execve(executable, command, env)

@@ -148,6 +148,74 @@ class AgentTests(Fixture):
         self.assertEqual(p.returncode, 2)
         self.assertFalse(self.out.exists())
 
+    # Settings from the config file
+
+    def write_config(self, text):
+        path = self.base / 'config/pisar/config.toml'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def bare(self, *args, ok=True):
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state, '--agent', *args,
+                           env=self.agent_env, ok=ok)
+        return p, (json.loads(self.out.read_text()) if self.out.exists() else None)
+
+    def test_agent_without_a_value_uses_the_configured_default(self):
+        self.write_config('default_agent = "claude"\n')
+        _, call = self.bare()
+        self.assertIn('--system-prompt', call['argv'])
+        self.assertEqual(Path(call['cwd']).resolve(), self.root.resolve())
+
+    def test_agent_without_a_value_keeps_arguments_after_double_dash(self):
+        self.write_config('default_agent = "claude"\n')
+        _, call = self.bare('--', '-c', 'continue the review')
+        self.assertEqual(call['argv'][:2], ['-c', 'continue the review'])
+
+    def test_agent_without_a_value_or_a_default_is_an_error(self):
+        p, call = self.bare(ok=False)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertTrue(p.stderr.startswith('pisar: '), p.stderr)
+        self.assertIn('default_agent', p.stderr)
+        self.assertIsNone(call)
+
+    def test_model_and_effort_are_passed_only_when_configured(self):
+        _, call = self.launch()
+        self.assertNotIn('--model', call['argv'])
+        self.assertNotIn('--effort', call['argv'])
+        self.write_config('[agents.claude]\neffort = "low"\n')
+        _, call = self.launch()
+        self.assertNotIn('--model', call['argv'])
+        self.assertEqual(values(call['argv'], '--effort'), ['low'])
+        self.write_config('[agents.claude]\nmodel = "any-model[1m]"\neffort = "max"\n')
+        _, call = self.launch('--', '-p', 'hello')
+        argv = call['argv']
+        self.assertEqual(argv[:2], ['-p', 'hello'])
+        self.assertEqual(values(argv, '--model'), ['any-model[1m]'])
+        self.assertEqual(values(argv, '--effort'), ['max'])
+
+    def test_subagent_settings_do_not_reach_the_main_session(self):
+        self.write_config('[agents.claude.reviewer]\nmodel = "opus"\neffort = "high"\n'
+                          '[agents.claude.researcher]\nmodel = "sonnet"\n')
+        _, call = self.launch()
+        self.assertNotIn('--model', call['argv'])
+        self.assertNotIn('--effort', call['argv'])
+
+    def test_explicit_agent_arguments_beat_the_config_file(self):
+        self.write_config('[agents.claude]\nmodel = "config-model"\neffort = "low"\n')
+        _, call = self.launch('--', '--model', 'flag-model', '--effort=high')
+        argv = call['argv']
+        self.assertEqual(argv.count('--model'), 1)
+        self.assertEqual(values(argv, '--model'), ['flag-model'])
+        self.assertNotIn('--effort', argv)
+        self.assertIn('--effort=high', argv)
+        self.assertNotIn('config-model', argv)
+
+    def test_invalid_config_file_stops_the_launch(self):
+        self.write_config('[agents.claude]\nmodel = 3\n')
+        p, call = self.launch(ok=False)
+        self.assertIn('agents.claude.model', p.stderr)
+        self.assertIsNone(call)
+
     def test_without_agent_or_command_it_still_fails_with_usage(self):
         p = self.run_pisar(env=self.agent_env, ok=False)
         self.assertEqual(p.returncode, 2)
