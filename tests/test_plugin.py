@@ -18,6 +18,45 @@ def frontmatter(text):
     return dict(line.split(': ', 1) for line in head.splitlines())
 
 
+def parse_reviewer(text):
+    """(frontmatter dict, JSON example object) of a generated reviewer subagent file."""
+    if not text.startswith('---\n') or '\n---\n' not in text[4:]:
+        raise ValueError('missing frontmatter')
+    head, _, body = text[4:].partition('\n---\n')
+    meta = {}
+    for line in head.splitlines():
+        key, sep, value = line.partition(': ')
+        if not sep:
+            raise ValueError(f'bad frontmatter line: {line!r}')
+        meta[key] = value
+    start = body.find('{"schema_version"')
+    if start < 0:
+        raise ValueError('no JSON example')
+    example, _ = json.JSONDecoder().raw_decode(body[start:])
+    return meta, example
+
+
+def contract_problems(example, model):
+    """Differences between a reviewer JSON object and the agreed `lesson review` contract."""
+    if not isinstance(example, dict):
+        return ['not an object']
+    problems = []
+    if set(example) != {'schema_version', 'revision', 'sha256', 'verdict', 'findings', 'reviewer'}:
+        problems.append(f'keys: {sorted(example)}')
+    if example.get('schema_version') != 1:
+        problems.append('schema_version')
+    if example.get('verdict') != 'clear|concerns|block':
+        problems.append('verdict')
+    findings = example.get('findings')
+    if not isinstance(findings, list) or not findings or not all(
+            isinstance(f, dict) and set(f) == {'tier', 'category', 'excerpt', 'comment', 'suggestion'}
+            and f['tier'] == 'severe|ask|warn' for f in findings):
+        problems.append('findings')
+    if example.get('reviewer') != {'model': model}:
+        problems.append('reviewer')
+    return problems
+
+
 class ExtractionTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='pisar-plugin-test-')
@@ -60,12 +99,38 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.target / 'plugin' / __version__ / '.claude-plugin/plugin.json')
                                     .read_text())['version'], __version__)
 
-    def test_reviewer_prompt_states_the_exact_json_contract(self):
-        text = (self.extract() / 'agents' / 'lesson-reviewer.md').read_text()
-        for token in ('schema_version', 'revision', 'sha256', 'verdict', 'clear|concerns|block',
-                      'findings', 'severe|ask|warn', 'category', 'excerpt', 'comment', 'suggestion',
-                      'reviewer', 'model'):
-            self.assertIn(token, text, token)
+    def reviewer(self, **options):
+        return (self.extract(**options) / 'agents' / 'lesson-reviewer.md').read_text()
+
+    def test_reviewer_file_parses_as_a_subagent_with_the_configured_settings(self):
+        meta = parse_reviewer(self.reviewer(model='m-1', effort='low'))[0]
+        self.assertEqual({k: meta[k] for k in ('name', 'model', 'effort', 'tools')},
+                         {'name': 'lesson-reviewer', 'model': 'm-1', 'effort': 'low', 'tools': 'Read'})
+        self.assertGreater(len(meta['description']), 30)
+
+    def test_reviewer_example_is_valid_json_matching_the_contract(self):
+        example = parse_reviewer(self.reviewer(model='m-1'))[1]
+        self.assertEqual(contract_problems(example, 'm-1'), [])
+
+    def test_contract_validator_rejects_malformed_examples(self):
+        good = parse_reviewer(self.reviewer())[1]
+        broken = []
+        for key in good:
+            broken.append({k: v for k, v in good.items() if k != key})
+        broken += [{**good, 'extra': 1}, {**good, 'schema_version': 2},
+                   {**good, 'verdict': 'fine'}, {**good, 'findings': {}},
+                   {**good, 'findings': [{'tier': 'severe|ask|warn'}]},
+                   {**good, 'findings': [{**good['findings'][0], 'extra': 1}]},
+                   {**good, 'reviewer': {}}, {**good, 'reviewer': {'model': 'other'}}, []]
+        for example in broken:
+            with self.subTest(example=example):
+                self.assertTrue(contract_problems(example, 'opus'))
+
+    def test_reviewer_parser_rejects_a_file_without_frontmatter_or_json(self):
+        for text in ('no frontmatter', '---\nname: x\n---\nno json here', '---\nname x\n---\n{}'):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    parse_reviewer(text)
 
     def test_extraction_is_idempotent_and_leaves_files_untouched(self):
         path = self.extract()
