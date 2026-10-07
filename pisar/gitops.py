@@ -6,11 +6,24 @@ import tempfile
 from .safety import WikiError
 
 
+# Every Git call of the write paths runs with this configuration, centrally and for all callers:
+# no repository hook (writes cannot run publishing scripts), no signing prompt, no fsmonitor program.
+HARDENED = ('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'core.fsmonitor=false')
+
+
+def git_command(repo, *args):
+    return ['git', '-C', str(repo), *HARDENED, *args]
+
+
+def environment():
+    return {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+
+
 def run(repo, *args, check=True, input=None, index=None):
-    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    env = environment()
     if index is not None:
         env['GIT_INDEX_FILE'] = str(index)  # A private index: the shared one is never consulted.
-    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, env=env,
+    result = subprocess.run(git_command(repo, *args), capture_output=True, env=env,
                             **(dict(input=input) if input is not None else dict(text=True)))
     if input is not None:
         result.stdout, result.stderr = result.stdout.decode(), result.stderr.decode()
@@ -71,17 +84,15 @@ def clean_except(repo, allowed=()):
 
 def blob(repo, spec):
     """The exact bytes of a Git object, e.g. COMMIT:path (never filtered)."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-    result = subprocess.run(['git', '-C', str(repo), 'cat-file', 'blob', spec], capture_output=True, env=env)
+    result = subprocess.run(git_command(repo, 'cat-file', 'blob', spec), capture_output=True, env=environment())
     if result.returncode:
         raise WikiError(f'git cat-file failed in {repo}: {result.stderr.decode().strip()}')
     return result.stdout
 
 
 def is_ancestor(repo, ancestor, descendant):
-    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-    return subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', ancestor, descendant],
-                          capture_output=True, env=env).returncode == 0
+    return subprocess.run(git_command(repo, 'merge-base', '--is-ancestor', ancestor, descendant),
+                          capture_output=True, env=environment()).returncode == 0
 
 
 def attribute_problems(repo, relative):
@@ -158,7 +169,7 @@ def commit(repo, paths, operation_id, verified=None, pins=None):
         # Hooks and signing stay off: writes cannot run user publishing scripts. The 'wiki: OPERATION'
         # subject is a stable data protocol: retries recognize their own commits by it and the
         # documented rollback recipe selects commits with it.
-        new = run(repo, '-c', 'commit.gpgsign=false', 'commit-tree', tree, '-p', old,
+        new = run(repo, 'commit-tree', tree, '-p', old,
                   '-m', f'wiki: {operation_id}').strip()
         for relative, data in verified.items():
             if blob(repo, f'{new}:{relative}') != data:
@@ -173,6 +184,5 @@ def commit_move(repo, old, new, operation_id):
     run(repo, 'add', '-A', '--', new)
     if not run(repo, 'diff', '--cached', '--name-only', '--', old, new).strip():
         return None
-    run(repo, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
-        'commit', '-qm', f'wiki: {operation_id}', '--', old, new)
+    run(repo, 'commit', '-qm', f'wiki: {operation_id}', '--', old, new)
     return run(repo, 'rev-parse', 'HEAD').strip()
