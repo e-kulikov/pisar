@@ -134,6 +134,52 @@ class DomainTests(SpaceCommandFixture):
         self.assertEqual((git(self.root, 'rev-parse', 'HEAD'), git(acme, 'rev-parse', 'HEAD')), (head, child))
         self.assertTrue(self.data('check')['ok'])
 
+    def half_done_add(self):
+        """`domain add --repo` that crashed after the child commit, before the parent commit."""
+        bare = self.origin()
+        args = ('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', bare)
+        self.cli(*args)
+        git(self.root, 'reset', '-q', '--soft', 'HEAD~1')
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('domain-add-*.json'):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+        return args
+
+    def test_resumed_submodule_add_completes_when_nothing_else_changed(self):
+        args = self.half_done_add()
+        before = commits(self.root)
+        self.assertTrue(self.data(*args)['changed'])
+        self.assertEqual(commits(self.root), before + 1)
+        self.clean()
+
+    def test_resumed_submodule_add_refuses_an_edited_gitmodules(self):
+        args = self.half_done_add()
+        modules = self.root / '.gitmodules'
+        modules.write_text(modules.read_text() + '[submodule "other"]\n\tpath = other\n\turl = ../other\n')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.assertIn('.gitmodules', self.cli(*args, ok=False).stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertIn('other', modules.read_text())
+
+    def test_resumed_submodule_add_refuses_unrelated_commits_in_the_child(self):
+        args = self.half_done_add()
+        acme = self.root / 'acme'
+        (acme / 'stray.md').write_text('unrelated\n')
+        git(acme, 'add', 'stray.md')
+        git(acme, 'commit', '-qm', 'unrelated work')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.assertIn('acme', self.cli(*args, ok=False).stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_resumed_submodule_add_refuses_unexpected_files_in_the_child(self):
+        args = self.half_done_add()
+        (self.root / 'acme/stray.md').write_text('unrelated\n')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.assertIn('stray.md', self.cli(*args, ok=False).stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertTrue((self.root / 'acme/stray.md').exists())
+
     def test_add_repo_resumes_a_registered_submodule_without_a_marker(self):
         bare = self.origin()
         git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(bare), 'acme')

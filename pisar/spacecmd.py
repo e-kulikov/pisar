@@ -158,6 +158,20 @@ def _verify(wiki, op, journal, repos):
             rel = path.relative_to(root).as_posix()
             if rel not in expected:
                 raise WikiError(f'unexpected file {rel} in the space of the interrupted operation {op}')
+    if 'gitmodules' in journal:
+        modules = root / '.gitmodules'
+        if not modules.is_file() or modules.is_symlink() or _hash(modules) != journal['gitmodules']:
+            raise WikiError(f'.gitmodules changed since the interrupted operation {op}; resolve it by hand')
+    for child in journal.get('children', []):
+        repo = root / child['path']
+        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+        if head not in (child['base'], child.get('after')):
+            parent = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
+            subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
+            if parent != child['base'] or subject != f'wiki: {op}':
+                raise WikiError(f'Git HEAD of {child["path"]} changed since the interrupted operation {op}')
+        own = [(root / t).relative_to(repo).as_posix() for t in expected if (root / t).is_relative_to(repo)]
+        _ensure_clean(repo, own)
     for pair in journal.get('pairs', []):
         if not any((root / rel).exists() or (root / rel).is_symlink() for rel in pair):
             raise WikiError(f'{pair[0]} is missing since the interrupted operation {op}')
@@ -315,6 +329,10 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
                     _undo_submodule(root, ident, had_modules, storage if ours else None)
                     raise
             target = gitops.owner(base, root)
+            if location and 'children' not in journal:
+                journal['gitmodules'] = _hash(root / '.gitmodules')
+                journal['children'] = [dict(path=ident, base=gitops.run(target, 'rev-parse', 'HEAD').strip())]
+                runtime.store(journal)
             marker = base / '.domain.toml'
             # Decided once, after any clone and before anything is written; a retry commits
             # exactly these files, whether or not the interrupted run already wrote them.
@@ -342,6 +360,8 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
             inner = [(base / rel).relative_to(target).as_posix() for rel in journal['planned']]
             done = [(target, gitops.commit(target, inner, op))]
             if location:
+                journal['children'][0]['after'] = gitops.run(target, 'rev-parse', 'HEAD').strip()
+                runtime.store(journal)
                 done.append((root, gitops.commit(root, ['.gitmodules', ident], op)))
             return done
 
