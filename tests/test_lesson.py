@@ -426,6 +426,20 @@ class AcceptTests(LessonCase):
         self.assertTrue(self.note(result).is_file())
         self.data('lesson', 'discard', '--batch', batch)
 
+    def test_new_revisions_are_refused_once_acceptance_has_started(self):
+        batch = self.interrupted_submodule_accept()
+        draft = self.workspace(batch) / 'draft.md'
+        original = draft.read_text()
+        draft.write_text(original + 'edited after the interruption\n')
+        for args in (('check',), ('review', '--file', self.base / 'x.json')):
+            p = self.cli('lesson', *args, '--batch', batch, ok=False)
+            self.assertIn('accept', p.stderr)
+        self.assertFalse((self.workspace(batch) / 'revisions/r2.md').exists())
+        draft.write_text(original)
+        result = json.loads(self.accept(batch).stdout)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertTrue(self.note(result).is_file())
+
     def test_accepted_batch_cannot_be_checked_or_reviewed_again(self):
         batch, draft, checked = self.prepared()
         self.accept(batch)

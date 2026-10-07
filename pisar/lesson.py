@@ -101,6 +101,12 @@ class Batch:
         if meta['status'] != 'open':
             raise WikiError(f'lesson batch {self.ident} is {meta["status"]}; start a new batch')
 
+    def require_not_accepting(self):
+        """Once an acceptance has started its revision is fixed: only `accept` may continue."""
+        if self.runtime.load(self.ident) is not None:
+            raise WikiError(f'the acceptance of {self.ident} has started; finish it by rerunning the same '
+                            f'`pisar lesson accept --batch {self.ident}` (no new revision or review is possible)')
+
 
 def warnings(wiki, meta):
     origin, target = meta['from']['domain'], meta['to'].split('/')[0]
@@ -157,6 +163,7 @@ def check(wiki, state, ident):
     with batch.runtime.lock():
         meta = batch.load()
         batch.require_open(meta)
+        batch.require_not_accepting()
         path, data = batch.draft()
         try:
             text = data.decode('utf-8')
@@ -217,13 +224,14 @@ def validate_review(review, current):
 
 def review(wiki, state, ident, file):
     batch = Batch(wiki, state, ident)
-    path = external_path(file)
-    if not path.is_file():
-        raise WikiError(f'review file not found: {path}')
-    value = read_json(path, 'review file')
     with batch.runtime.lock():
         meta = batch.load()
         batch.require_open(meta)
+        batch.require_not_accepting()
+        path = external_path(file)
+        if not path.is_file():
+            raise WikiError(f'review file not found: {path}')
+        value = read_json(path, 'review file')
         current, _ = batch.current(meta)
         validate_review(value, current)
         write_json(batch.file(f'{current["revision"]}.review.json'), value)
