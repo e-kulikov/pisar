@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0](https://github.com/e-kulikov/pisar/compare/v0.2.0...v0.3.0) (2026-10-07)
+
+
+### Features
+
+* add pisar --agent claude ([4425c3a](https://github.com/e-kulikov/pisar/commit/4425c3aa2d0a7a6fec6b07dae78e5149ab01dcfb))
+* add pisar --agent claude ([a4e7f9a](https://github.com/e-kulikov/pisar/commit/a4e7f9a6da28a670a89ddfc3004fddaae693e8d4))
+* load the root's .mcp.json and simplify the agent prompt ([922ab60](https://github.com/e-kulikov/pisar/commit/922ab608e559f25c582c97c150e8a379fa28b538))
+
 ## [0.2.0](https://github.com/e-kulikov/pisar/compare/v0.1.0...v0.2.0) (2026-10-06)
 
 
