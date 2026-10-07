@@ -154,7 +154,27 @@ class AddressTests(Fixture):
         self.data('capture', '--space', 'acme/alpha', '--id', 'acme-capture', '--source', self.external())
         meta = self.data('read', 'wiki:acme/alpha:acme-capture')['metadata']
         self.assertEqual(meta['space_ids'], ['acme/alpha'])
-        self.assertTrue(list(self.state.rglob('operations/capture-acme-alpha-acme-capture.json')))
+        self.assertTrue(list(self.state.rglob('operations/capture-acme-alpha-acme-capture*.json')))
+
+    def test_captures_into_addresses_with_equal_dash_joins_do_not_collide(self):
+        first = space(self.root, 'acme/10-projects/alpha-beta', 'alpha-beta')
+        second = space(self.root, 'acme-alpha/10-projects/beta', 'beta')
+        commit_all(self.root)
+        sources = {'acme/alpha-beta': self.base / 'first.txt', 'acme-alpha/beta': self.base / 'second.txt'}
+        for address, source in sources.items():
+            source.write_text(f'Synthetic original for {address}')
+            self.assertEqual(self.data('capture', '--space', address, '--id', 'call', '--source', source)['status'],
+                             'complete')
+        self.assertEqual((first / 'sources/captures/call/original').read_text(), 'Synthetic original for acme/alpha-beta')
+        self.assertEqual((second / 'sources/captures/call/original').read_text(), 'Synthetic original for acme-alpha/beta')
+        self.assertEqual(len(list(self.state.rglob('operations/*.json'))), 2)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        for address, source in sources.items():
+            with self.subTest(retry=address):
+                self.assertEqual(self.data('capture', '--space', address, '--id', 'call', '--source', source)['status'],
+                                 'complete')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
 
 class SelectionTests(Fixture):

@@ -178,5 +178,5 @@ class CaptureTests(Fixture):
         meta = self.data('read', 'wiki:work/alpha:capture-one')['metadata']
         self.assertEqual(meta['original_name'], 'transcript.txt')
         self.assertEqual(meta['source_sha256'], hashlib.sha256(source.read_bytes()).hexdigest())
-        journal = next(self.state.rglob('operations/capture-work-alpha-capture-one.json'))
+        journal = next(self.state.rglob('operations/capture-work-alpha-capture-one-*.json'))
         self.assertEqual(json.loads(journal.read_text())['source_path'], str(source))

@@ -257,7 +257,10 @@ def result(journal):
 
 
 def capture_operation(space, ident):
-    return f'capture-{space.domain}-{space.id}-{ident}'
+    # Dash-joined kebab ids are ambiguous (acme/alpha-beta vs acme-alpha/beta);
+    # a hash of the exact triple keeps distinct captures apart.
+    digest = sha256(json.dumps([space.domain, space.id, ident]).encode())[:12]
+    return f'capture-{space.domain}-{space.id}-{ident}-{digest}'
 
 
 def verify_capture(wiki, runtime, space, ident, source, digest):

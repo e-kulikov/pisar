@@ -351,8 +351,9 @@ untracked, modified, or staged path still blocks the write. Staged/modified
 tracked sources are not silently adopted. Finish or preserve that work first.
 
 Rerunning the same space/id/source/hash uses the external operation journal
-(`capture-DOMAIN-SPACE-ID`) and
-does not create another commit. Reusing an operation ID with changed inputs is
+(`capture-DOMAIN-SPACE-ID-HASH`, where the short hash of the exact address and
+capture ID keeps captures with equal dash-joined names apart) and does not create
+another commit. Reusing an operation ID with changed inputs is
 a conflict. Repeating capture after successful ingest retains the descriptor's
 processed status. Capture IDs and meeting document IDs must be distinct.
 
