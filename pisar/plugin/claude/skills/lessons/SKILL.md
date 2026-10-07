@@ -39,7 +39,7 @@ generally, show the user what was found, and edit only what the user decided.
    generalisation. Apply only the edits the user chooses, then run
    `pisar lesson check --batch ID` again. A finding counts as decided when the
    text changed in a later revision or when the user chose `--keep`.
-5. Review is mandatory: start the `lesson-reviewer` subagent on the current
+5. Review is mandatory: start the `pisar:lesson-reviewer` subagent on the current
    revision. Give it the revision id, its text and its sha256 (shown by
    `pisar lesson show --batch ID`). It answers with JSON only. Save that JSON
    to a file in the batch directory and run
