@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import unittest
 
 from .support import Fixture
@@ -166,8 +167,10 @@ class ResearchTests(Fixture):
         self.assertEqual(self.stored(), [])
 
     def test_missing_binary_is_a_clear_error(self):
-        env = {**self.fake_env, 'PATH': str(self.base / 'empty')}
+        # Only a python3 (for the zipapp's shebang), no claude.
         (self.base / 'empty').mkdir()
+        (self.base / 'empty' / 'python3').symlink_to(sys.executable)
+        env = {**self.fake_env, 'PATH': str(self.base / 'empty')}
         p = self.research(QUESTION, env=env, ok=False)
         self.assertIn('claude is not on PATH', p.stderr)
         self.assertEqual(self.stored(), [])
