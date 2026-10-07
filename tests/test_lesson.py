@@ -640,6 +640,16 @@ class AcceptTests(LessonCase):
         self.assertEqual(again, first | {'notes': again['notes']})
         self.assertEqual(archive.read_bytes(), before)
 
+    def test_show_points_a_started_acceptance_at_accept(self):
+        batch = self.interrupted_submodule_accept()
+        (self.workspace(batch) / 'draft.md').write_text('edited after the interruption\n')
+        out = self.cli('lesson', 'show', '--batch', batch).stdout
+        self.assertIn(f'pisar lesson accept --batch {batch}', out)
+        self.assertIn('resumes', out)
+        self.assertNotIn('lesson check', out)
+        self.assertNotIn('lesson review', out)
+        self.assertNotIn('--keep', out)
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)

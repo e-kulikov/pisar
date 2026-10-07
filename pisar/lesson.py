@@ -309,8 +309,12 @@ def show(wiki, state, ident):
     report = read_json(batch.file(f'{revision}.report.json'), 'report')
     review_path = batch.file(f'{revision}.review.json')
     reviewed = read_json(review_path, 'review') if review_path.is_file() else None
+    started = batch.accepting() if meta['status'] == 'open' else None
     out += ['', f'revision: {revision}', f'sha256: {rev["sha256"]}']
-    if meta['status'] == 'open' and batch.draft()[1] != data:
+    if started is not None:
+        out.append(f'Acceptance in progress: rerun `pisar lesson accept --batch {ident}`; it resumes the persisted '
+                   f'revision {revision} and draft.md is preserved, never written.' + batch.conflict_hint(started))
+    elif meta['status'] == 'open' and batch.draft()[1] != data:
         out.append('The draft has unchecked changes: run `pisar lesson check`.')
     out += ['', '--- text ---', data.decode('utf-8').rstrip('\n'), '--- end ---', '', 'Findings by tier:']
     for tier in TIERS:
@@ -327,14 +331,18 @@ def show(wiki, state, ident):
     if reviewed:
         out.append(f'  verdict {reviewed["verdict"]} by {reviewed["reviewer"]["model"]} (advisory)')
         out += [f'  [{f["tier"]}] {f["category"]}: {f["excerpt"]} - {f["comment"]}' for f in reviewed['findings']]
+    elif started is not None:
+        out.append(f'  as decided when the acceptance started: verdict {started["decision"].get("verdict") or "none"}')
     else:
         out.append(f'  no review of {revision}: attach one with `pisar lesson review`')
     out += ['', 'Open decisions:']
-    if not reviewed and meta['status'] == 'open':
+    if started is not None:
+        out.append('  - none to take: the acceptance already started and its decisions are recorded')
+    if not reviewed and meta['status'] == 'open' and started is None:
         out.append('  - no review of the current revision (or accept with --skip-review)')
     kept = {i for e in batch.journal()['events'] if e['event'] == 'accept' for i in e['keeps']}
     open_ids = [f['id'] for f in report['findings'] if f['id'] not in kept]
-    if open_ids and meta['status'] == 'open':
+    if open_ids and meta['status'] == 'open' and started is None:
         out.append(f'  - edit the draft or keep each finding: --keep {",".join(open_ids)}')
     if out[-1] == 'Open decisions:':
         out.append('  none')
