@@ -45,7 +45,11 @@ TOOLS = ('WebSearch', 'WebFetch')
 # Names are listed one by one: a prefix such as ANTHROPIC_ or CLAUDE_CODE_ would also admit
 # unrelated variables (a session token of a parent Claude Code, for one).
 ENV_NAMES = frozenset((
-    'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'TERM',
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'TERM',
+    # Locale: every name is listed, so no LC_* prefix match can admit an unrelated variable.
+    'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_NUMERIC', 'LC_TIME', 'LC_COLLATE', 'LC_MONETARY',
+    'LC_MESSAGES', 'LC_PAPER', 'LC_NAME', 'LC_ADDRESS', 'LC_TELEPHONE', 'LC_MEASUREMENT',
+    'LC_IDENTIFICATION',
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
     'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
     # Anthropic API: credentials, endpoint, custom headers and model selection.
@@ -55,7 +59,6 @@ ENV_NAMES = frozenset((
     # Subscription login through a token, and provider selectors.
     'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
     'CLAUDE_CODE_USE_FOUNDRY'))
-ENV_PREFIXES = ('LC_',)  # locale categories
 # Cloud credentials are passed only when their provider is selected with CLAUDE_CODE_USE_*.
 PROVIDER_ENV = {
     'CLAUDE_CODE_USE_BEDROCK': ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
@@ -190,7 +193,7 @@ def child_environment(config):
     for selector, extra in PROVIDER_ENV.items():
         if os.environ.get(selector, '').strip().lower() in ('1', 'true', 'yes', 'on'):
             names.update(extra)
-    env = {k: v for k, v in os.environ.items() if k in names or k.startswith(ENV_PREFIXES)}
+    env = {k: v for k, v in os.environ.items() if k in names}
     env['CLAUDE_CONFIG_DIR'] = str(config)
     return env
 

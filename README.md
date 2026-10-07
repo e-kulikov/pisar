@@ -822,7 +822,10 @@ so the question leaves the machine. pisar never contacts a service itself.
 - **Environment allowlist.** The subprocess receives only these variables, by
   exact name (no `ANTHROPIC_*`/`CLAUDE_CODE_*` prefix match, so unrelated or
   session variables of a parent Claude Code never pass): `PATH`, `HOME`,
-  `USER`, `LOGNAME`, `LANG`, `LC_*` (locale), `TERM`; the proxy variables
+  `USER`, `LOGNAME`, `TERM`, and the locale variables `LANG`, `LANGUAGE`,
+  `LC_ALL`, `LC_CTYPE`, `LC_NUMERIC`, `LC_TIME`, `LC_COLLATE`, `LC_MONETARY`,
+  `LC_MESSAGES`, `LC_PAPER`, `LC_NAME`, `LC_ADDRESS`, `LC_TELEPHONE`,
+  `LC_MEASUREMENT`, `LC_IDENTIFICATION` (named one by one, no prefix match); the proxy variables
   (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and lowercase forms); the certificate
   variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`,
   `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`); Anthropic credentials, endpoint and

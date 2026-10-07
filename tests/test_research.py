@@ -502,6 +502,24 @@ class ResearchTests(Fixture):
                 run()
         self.assertEqual(self.stored(), [])
 
+    LOCALE = ('LC_ALL', 'LC_CTYPE', 'LC_NUMERIC', 'LC_TIME', 'LC_COLLATE', 'LC_MONETARY', 'LC_MESSAGES',
+              'LC_PAPER', 'LC_NAME', 'LC_ADDRESS', 'LC_TELEPHONE', 'LC_MEASUREMENT', 'LC_IDENTIFICATION',
+              'LANG', 'LANGUAGE')
+
+    def test_only_the_named_locale_variables_pass_and_no_prefix_is_matched(self):
+        listed = {name: 'C.UTF-8' for name in self.LOCALE}
+        unrelated = {'LC_PRIVATE_CLIENT_NOTE': 'synthetic-client-secret', 'LC_X': 'x',
+                     'ANTHROPIC_INTERNAL_CLIENT_NOTE': 'n', 'CLAUDE_CODE_PRIVATE_NOTE': 'n'}
+        self.research(QUESTION, env={**self.fake_env, **listed, **unrelated})
+        child = self.call()['env']
+        for name, value in listed.items():
+            self.assertEqual(child.get(name), value, name)
+        for name in unrelated:
+            self.assertNotIn(name, child)
+
+    def test_no_prefix_rule_remains_in_the_environment_allowlist(self):
+        self.assertFalse(hasattr(research, 'ENV_PREFIXES'))
+
     def tmpdir_case(self, tmp, via_environment):
         tmp.mkdir(exist_ok=True)
         env = {**self.fake_env, 'TMPDIR': str(tmp)}
