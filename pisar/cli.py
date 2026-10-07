@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 from types import SimpleNamespace
-from . import __version__, agent, config_command, settings
+from . import __version__, agent, config_command, guard, settings
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -68,6 +68,7 @@ def parser():
         if name == 'reroute':
             sub.add_argument('--space', required=True)
     config_command.add_parser(commands)
+    guard.add_parser(commands)
     return p
 
 
@@ -96,6 +97,10 @@ def main(argv=None):
         args.root = settings.root(args.root)
         args.state_dir = settings.state_dir(args.state_dir)
         args.ruwana = settings.ruwana(args.ruwana)
+        if args.command == 'guard':
+            result = guard.run(args, args)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         wiki = Wiki(args.root)
         if args.command == 'check':
             result = check(wiki, args.scope)

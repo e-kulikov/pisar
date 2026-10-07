@@ -1,5 +1,11 @@
 import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from .support import CHECKOUT, EXECUTABLE, clean_environ, pisar_command, space
 from pisar import guard
 
 
@@ -206,6 +212,118 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(set(f), {'id', 'tier', 'category', 'line', 'excerpt', 'hint'})
             self.assertRegex(f['id'], r'^[0-9a-f]{10}$')
             self.assertTrue(f['hint'])
+
+
+def domain(root, ident, title, aliases=(), terms=()):
+    path = root / ident
+    path.mkdir(parents=True, exist_ok=True)
+    (path / '.domain.toml').write_text(
+        f'schema_version = 1\nid = "{ident}"\ntitle = {json.dumps(title)}\n'
+        f'[sensitive]\naliases = {json.dumps(list(aliases))}\nterms = {json.dumps(list(terms))}\n',
+        encoding='utf-8')
+    return path
+
+
+class CommandTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='pisar-guard-')
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.root = self.base / 'wiki'
+        acme = domain(self.root, 'acme', 'Acme Corp', aliases=['ACM Industries'], terms=['Bluebird'])
+        launch = space(acme, '10-projects/launch-plan', 'launch-plan')
+        (launch / 'README.md').write_text('+++\n# not a title\n+++\n# Orion Rollout\n\nText\n')
+        space(acme, '40-archives/old-thing', 'old-thing')
+        home = domain(self.root, 'home', 'Household')
+        space(home, '20-areas/garden', 'garden', kind='area')
+        (self.root / 'templates').mkdir()
+        space(self.root, 'templates/sample', 'sample-space')
+        self.env = clean_environ(XDG_DATA_HOME=str(self.base / 'data'), XDG_CONFIG_HOME=str(self.base / 'config'))
+
+    def run_guard(self, *args, code=0):
+        p = subprocess.run([*pisar_command(), '--root', str(self.root), '--state-dir', str(self.base / 'state'),
+                            'guard', *map(str, args)], cwd=self.base if EXECUTABLE else CHECKOUT,
+                           env=self.env, text=True, capture_output=True)
+        self.assertEqual(p.returncode, code, p.stdout + p.stderr)
+        return p
+
+    def check(self, *args):
+        return json.loads(self.run_guard('check', *args).stdout)
+
+    def excerpts(self, result, category='term'):
+        return [f['excerpt'] for f in result['findings'] if f['category'] == category]
+
+    def test_json_shape_and_exit_zero_with_findings(self):
+        result = self.check('--text', 'Acme mail ops@example.com', '--from', 'acme', '--to', 'home')
+        self.assertEqual(set(result), {'findings', 'limits'})
+        self.assertIn('best effort', result['limits'].lower())
+        self.assertEqual([f['category'] for f in result['findings']], ['term', 'email'])
+        self.assertEqual(self.check('--text', 'Plain words only.', '--from', 'acme')['findings'], [])
+
+    def test_source_domain_terms_only_unless_outbound(self):
+        text = ('Acme Corp, ACM Industries, bluebird, launch-plan, Orion Rollout, old-thing; '
+                'Household garden; sample-space; templates.')
+        own = self.check('--text', text, '--from', 'acme')
+        self.assertEqual(self.excerpts(own), ['Acme Corp', 'ACM Industries', 'bluebird', 'launch-plan',
+                                              'Orion Rollout', 'old-thing'])
+        other = self.check('--text', text, '--from', 'home')
+        self.assertEqual(self.excerpts(other), ['Household', 'garden'])
+        outbound = self.check('--text', text, '--outbound')
+        self.assertEqual(self.excerpts(outbound), ['Acme Corp', 'ACM Industries', 'bluebird', 'launch-plan',
+                                                   'Orion Rollout', 'old-thing', 'Household', 'garden'])
+        self.assertEqual(self.check('--text', text, '--outbound', '--from', 'home'), outbound)
+
+    def test_file_input_is_read_and_never_modified(self):
+        draft = self.base / 'draft.md'
+        original = '# Lesson\r\n\r\nAt Acme we learnt to wait.\r\n```sh\r\nrm -rf build\r\n```\r\n'.encode()
+        draft.write_bytes(original)
+        before = draft.stat().st_mtime_ns
+        result = self.check('--file', draft, '--from', 'acme')
+        self.assertEqual([(f['category'], f['line']) for f in result['findings']],
+                         [('term', 3), ('code-block', 4)])
+        self.assertEqual(draft.read_bytes(), original)
+        self.assertEqual(draft.stat().st_mtime_ns, before)
+
+    def test_text_starting_with_dashes_and_ids_stable_between_runs(self):
+        text = '--text=-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n'
+        first, second = self.check(text, '--from', 'acme'), self.check(text, '--from', 'acme')
+        self.assertEqual(first, second)
+        self.assertEqual([f['category'] for f in first['findings']], ['private-key'])
+
+    def test_errors_exit_nonzero(self):
+        self.assertIn('unknown domain', self.run_guard('check', '--text', 'x', '--from', 'nope', code=1).stderr)
+        self.run_guard('check', '--text', 'x', '--from', 'acme', '--to', 'nope', code=1)
+        self.run_guard('check', '--text', 'x', code=1)
+        self.run_guard('check', '--file', self.base / 'missing.md', '--from', 'acme', code=1)
+        (self.base / 'binary.md').write_bytes(b'\xff\xfe\x00')
+        self.run_guard('check', '--file', self.base / 'binary.md', '--from', 'acme', code=1)
+        self.run_guard('check', '--from', 'acme', code=2)
+        self.run_guard('check', '--text', 'x', '--file', self.base / 'x', '--from', 'acme', code=2)
+
+    def test_invalid_domain_markers_are_errors(self):
+        marker = self.root / 'home/.domain.toml'
+        marker.write_text('schema_version = 1\nid = "other"\n')
+        self.assertIn('home', self.run_guard('check', '--text', 'x', '--from', 'acme', code=1).stderr)
+        marker.write_text('schema_version = 1\nid = "home"\n[sensitive]\nterms = "garden"\n')
+        self.run_guard('check', '--text', 'x', '--from', 'acme', code=1)
+        marker.write_text('schema_version = [\n')
+        self.run_guard('check', '--text', 'x', '--from', 'acme', code=1)
+
+    def test_symlinked_domains_are_refused(self):
+        real = self.base / 'elsewhere'
+        domain(self.base, 'elsewhere', 'Elsewhere')
+        os.symlink(real, self.root / 'linked')
+        self.run_guard('check', '--text', 'x', '--from', 'acme', code=1)
+        (self.root / 'linked').unlink()
+        (self.root / 'home/.domain.toml').rename(self.base / 'marker.toml')
+        os.symlink(self.base / 'marker.toml', self.root / 'home/.domain.toml')
+        self.run_guard('check', '--text', 'x', '--from', 'acme', code=1)
+
+    def test_help_states_best_effort_limits(self):
+        text = ' '.join(self.run_guard('check', '--help').stdout.split()).lower()
+        self.assertIn('best effort', text)
+        self.assertIn('never edits', text)
+        self.assertIn('amounts and metrics are not reported', text)
 
 
 if __name__ == '__main__':

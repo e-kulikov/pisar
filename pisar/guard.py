@@ -4,8 +4,13 @@ Used by lesson operations and before outbound research queries. Ordinary
 capture/save/writes never call it. Domain terms come straight from the
 `.domain.toml` markers, the `.wiki.toml` ids and README H1 titles below them.
 """
+from dataclasses import dataclass
 import hashlib
+import os
+from pathlib import Path
 import re
+import tomllib
+from .safety import WikiError
 
 
 LIMITS = ('Best effort: a deterministic lexical scan, not a guarantee. It reports only what its '
@@ -18,6 +23,8 @@ MIN_TERM = 3
 MIN_QUOTE = 30
 MIN_QUOTE_WORDS = 4
 EXCERPT = 80
+SKIP = {'.git', '.ruwana', '__pycache__'}
+DOMAIN_ID = re.compile(r'[a-z0-9][a-z0-9-]*')
 
 # Overlapping matches of these categories are reported once, by the first in this order.
 _EXCLUSIVE = ('private-key', 'jwt', 'api-token', 'credential', 'url', 'email', 'ip', 'phone',
@@ -238,3 +245,124 @@ def scan(text, terms=()):
             excerpt=excerpt if len(excerpt) <= EXCERPT else excerpt[:EXCERPT - 1] + '…',
             hint=hints[start] if category == 'term' else _HINT[category]))
     return findings
+
+
+@dataclass(frozen=True)
+class Domain:
+    id: str
+    path: Path
+    terms: tuple
+
+
+def _toml(path, root):
+    if path.is_symlink() or not path.is_file():
+        raise WikiError(f'{path.relative_to(root)}: must be a regular file')
+    try:
+        return tomllib.loads(path.read_text(encoding='utf-8'))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
+        raise WikiError(f'{path.relative_to(root)}: {error}') from None
+
+
+def _strings(value, where):
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise WikiError(f'{where}: expected a list of strings')
+    return value
+
+
+def _title(readme):
+    """First ATX H1 of a README, skipping a +++ or --- front matter block."""
+    if readme.is_symlink() or not readme.is_file():
+        return None
+    lines = readme.read_text(encoding='utf-8', errors='replace').splitlines()
+    if lines and lines[0].strip() in ('+++', '---'):
+        close = next((i for i, l in enumerate(lines[1:], 1) if l.strip() == lines[0].strip()), None)
+        lines = lines[close + 1:] if close else lines
+    for line in lines:
+        heading = re.match(r' {0,3}#[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$', line)
+        if heading:
+            return heading.group(1)
+    return None
+
+
+def _spaces(base, root, ident):
+    for directory, dirs, names in os.walk(base, followlinks=False):
+        here = Path(directory)
+        dirs[:] = sorted(d for d in dirs if d not in SKIP and not (here / d).is_symlink())
+        if '.wiki.toml' not in names or (here / '.wiki.toml').is_symlink():
+            continue
+        meta = _toml(here / '.wiki.toml', root)
+        if isinstance(meta.get('id'), str):
+            yield meta['id'], f'{ident}: space id'
+        title = _title(here / 'README.md')
+        if title:
+            yield title, f'{ident}: space title'
+
+
+def domains(root):
+    """Domains are top-level directories holding a regular `.domain.toml` file."""
+    root = Path(root).resolve()
+    if not root.is_dir():
+        raise WikiError(f'wiki root is not a directory: {root}')
+    found = []
+    for entry in sorted(root.iterdir()):
+        marker = entry / '.domain.toml'
+        if entry.is_symlink():
+            if os.path.lexists(marker):
+                raise WikiError(f'{entry.name}: symlinked domain refused')
+            continue
+        if not entry.is_dir() or not os.path.lexists(marker):
+            continue
+        meta = _toml(marker, root)
+        where = f'{entry.name}/.domain.toml'
+        if type(meta.get('schema_version')) is not int or meta['schema_version'] != 1:
+            raise WikiError(f'{where}: schema_version must be 1')
+        ident = meta.get('id')
+        if not isinstance(ident, str) or not DOMAIN_ID.fullmatch(ident) or ident != entry.name:
+            raise WikiError(f'{where}: id must be a lowercase kebab id equal to the directory name')
+        title = meta.get('title', '')
+        sensitive = meta.get('sensitive', {})
+        if not isinstance(title, str) or not isinstance(sensitive, dict):
+            raise WikiError(f'{where}: title must be a string and [sensitive] a table')
+        terms = [(ident, f'{ident}: domain id'), (title, f'{ident}: domain title')]
+        terms += [(a, f'{ident}: alias') for a in _strings(sensitive.get('aliases', []), f'{where} aliases')]
+        terms += [(t, f'{ident}: sensitive term') for t in _strings(sensitive.get('terms', []), f'{where} terms')]
+        terms += _spaces(entry, root, ident)
+        found.append(Domain(ident, entry, tuple(terms)))
+    return found
+
+
+def check(root, text, source=None, target=None, outbound=False):
+    """Findings for text: terms of the source domain, or of every domain when outbound."""
+    known = {d.id: d for d in domains(root)}
+    for name in (source, target):
+        if name is not None and name not in known:
+            raise WikiError(f'unknown domain: {name}')
+    if source is None and not outbound:
+        raise WikiError('--from DOMAIN is required unless --outbound')
+    selected = known.values() if outbound else [known[source]]
+    terms = [term for d in selected for term in d.terms]
+    return {'findings': scan(text, terms), 'limits': LIMITS}
+
+
+def add_parser(commands):
+    guard = commands.add_parser('guard', help='Report possibly sensitive text (best effort; never edits)')
+    actions = guard.add_subparsers(dest='action', required=True)
+    sub = actions.add_parser(
+        'check', help='Print findings for a file or text as JSON',
+        description='Lexically scan text for secrets, client data, code, quotes, meeting content, '
+                    'URLs/hosts/IPs, dates and the source domain terms. Findings are information: '
+                    'the exit status is 0 whenever the scan ran. Pass text that starts with a dash '
+                    'as --text=VALUE.',
+        epilog=LIMITS)
+    given = sub.add_mutually_exclusive_group(required=True)
+    given.add_argument('--file', help='UTF-8 file to scan; it is only read')
+    given.add_argument('--text', help='Text to scan')
+    sub.add_argument('--from', dest='source', metavar='DOMAIN', help='Domain the text comes from; its terms are reported')
+    sub.add_argument('--to', dest='target', metavar='DOMAIN', help='Destination domain (validated)')
+    sub.add_argument('--outbound', action='store_true',
+                     help='Text leaves the machine (research query): report the terms of all domains')
+
+
+def run(args, ctx):
+    text = args.text if args.file is None else Path(args.file).read_bytes().decode('utf-8')
+    return check(ctx.root, text, args.source, args.target, args.outbound)

@@ -161,6 +161,20 @@ pisar triage defer   --batch ID --item ITEM
 - Once an accept has started, `defer`/`reroute` are refused. Fix the cause and
   retry the same `accept`. Do not delete journals.
 
+## Guard: report possibly sensitive text
+
+```sh
+pisar guard check (--file F | --text=T) --from DOMAIN [--to DOMAIN] [--outbound]
+```
+
+Prints `{findings: [{id, tier, category, line, excerpt, hint}], limits}` and
+exits 0 whenever the scan ran; findings are information. Tiers: `severe`
+(secrets, emails, phone numbers, fenced code), `ask` (quotes, meeting markers,
+URLs, hostnames, IPs), `warn` (terms of the `--from` domain, day-precise dates).
+`--outbound` reports the terms of every domain. It is a best-effort lexical
+scan: it misses paraphrases and unlisted names and never edits text. Show the
+findings to the user and change the text only with their agreement.
+
 ## Recovery and rollback
 
 - Every write has a journal in the state directory. If an operation stops
