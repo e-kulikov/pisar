@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from . import __version__
+from .operations import outside_git
 
 SOURCE = 'plugin/claude'
 SKILL = 'skill.md'
@@ -111,8 +112,8 @@ def extract(config, reviewer=None):
     Atomic and idempotent: an identical tree is left alone, anything else (missing,
     damaged, or generated for other reviewer settings) is replaced as a whole.
     """
-    parent = Path(config) / 'plugin'
-    target = parent / __version__
+    parent = outside_git(Path(config) / 'plugin')
+    target = outside_git(parent / __version__)
     files = tree(reviewer)
     existing = _current(target)
     if existing is not None and _digest(existing) == _digest(files):

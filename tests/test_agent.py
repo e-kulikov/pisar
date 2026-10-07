@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import unittest
 
@@ -171,6 +172,43 @@ class AgentTests(Fixture):
             self.assertIn(f'Agent({agent})', denied)
         self.assertNotIn('Agent', denied)
         self.assertNotIn('Agent(pisar:lesson-reviewer)', denied)
+
+    def other_repo(self):
+        repo = self.base / 'other-repo'
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    def test_plugin_directory_symlinked_into_a_git_repo_is_refused_before_any_write(self):
+        repo = self.other_repo()
+        config = self.state / 'agents' / 'claude'
+        config.mkdir(parents=True)
+        (config / 'plugin').symlink_to(repo)
+        p, call = self.launch(ok=False)
+        self.assertIn('pisar:', p.stderr)
+        self.assertIsNone(call)
+        self.assertEqual([x.name for x in repo.iterdir()], ['.git'])
+
+    def test_version_directory_symlink_is_refused(self):
+        from pisar import __version__
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        plugin = self.state / 'agents' / 'claude' / 'plugin'
+        plugin.mkdir(parents=True)
+        (plugin / __version__).symlink_to(target)
+        p, call = self.launch(ok=False)
+        self.assertIn('symlink', p.stderr)
+        self.assertIsNone(call)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_lessons_workspace_symlink_is_refused_and_gets_no_edit_permission(self):
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'lessons').symlink_to(target)
+        p, call = self.launch(ok=False)
+        self.assertIn('symlink', p.stderr)
+        self.assertIsNone(call)
 
     def test_push_and_git_internals_are_denied(self):
         _, call = self.launch()

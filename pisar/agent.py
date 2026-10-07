@@ -124,8 +124,8 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     env = {k: v for k, v in os.environ.items() if k != 'WIKI_ROOT'}
     env.update(CLAUDE_CONFIG_DIR=str(config), PISAR_ROOT=str(root),
                PISAR_STATE_DIR=str(runtime.base), PISAR_RUWANA_BIN=str(ruwana))
+    lessons = outside_git(runtime.base / 'lessons')
     plugin = claude_plugin.extract(config, settings.agent_options(agent, 'reviewer'))
-    lessons = runtime.base / 'lessons'
     lessons.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chdir(root)
     command = claude_command(executable, prompt_text(), extra, mcp_config(root),
