@@ -322,6 +322,19 @@ class RelocateTests(SpaceCommandFixture):
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.clean()
 
+    def test_space_containing_a_submodule_is_refused_before_anything_moves(self):
+        bare = self.origin()
+        git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(bare),
+            'work/10-projects/launch-plan/vendor')
+        git(self.root, 'commit', '-qm', 'vendor')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        for args in (('move', 'work/launch-plan', '--to', 'area'), ('archive', 'work/launch-plan')):
+            failed = self.cli('space', *args, ok=False)
+            self.assertIn('submodule', failed.stderr)
+        self.assertTrue((self.root / 'work/10-projects/launch-plan').is_dir())
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.clean()
+
     def test_move_refuses_while_an_incomplete_operation_touches_the_space(self):
         self.block('save-1', artifacts=[dict(path='work/10-projects/launch-plan/meetings/a.md')])
         failed = self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)

@@ -396,6 +396,13 @@ def relocate(wiki, state_dir, action, value, to=None):
         else:
             if (space.path / '.git').exists():
                 raise WikiError(f'{value} is itself a Git submodule; move it by hand')
+            nested = [line.split('\t')[-1] for line in gitops.run(
+                gitops.owner(space.path, root), 'ls-files', '--stage', '--',
+                space.path.relative_to(gitops.owner(space.path, root)).as_posix()).splitlines()
+                if line.startswith('160000 ')]
+            if nested:
+                raise WikiError(f'{value} contains Git submodules ({", ".join(nested)}); a move would '
+                                'have to rewrite .gitmodules, so move it by hand')
             kind, status = space.kind, space.status
             if action == 'move':
                 if status == 'archived':
