@@ -131,6 +131,8 @@ def _hash(path):
 def _files(directory):
     for parent, dirs, names in os.walk(directory, followlinks=False):
         dirs[:] = sorted(d for d in dirs if d != '.git')
+        # A symlink to a directory is listed with the directories but is an entry like any file.
+        names = [*names, *(d for d in dirs if (Path(parent) / d).is_symlink())]
         for name in sorted(names):
             yield Path(parent) / name
 

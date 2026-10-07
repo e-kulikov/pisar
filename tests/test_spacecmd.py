@@ -480,6 +480,26 @@ class RelocateTests(SpaceCommandFixture):
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertNotIn('draft.md', git(self.root, 'ls-files'))
 
+    def test_resumed_move_refuses_a_directory_symlink_added_after_the_crash(self):
+        self.data('space', 'move', 'work/launch-plan', '--to', 'area')
+        git(self.root, 'reset', '-q', '--hard', 'HEAD~1')
+        (self.root / 'work/20-areas').mkdir(exist_ok=True)
+        git(self.root, 'mv', 'work/10-projects/launch-plan', 'work/20-areas/launch-plan')
+        marker = self.root / 'work/20-areas/launch-plan/.wiki.toml'
+        marker.write_text(marker.read_text().replace('"project"', '"area"'))
+        draft = self.root / 'work/20-areas/launch-plan/elsewhere'
+        draft.symlink_to(self.base)
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-move-*.json'):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+        head = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)
+        self.assertIn('elsewhere', failed.stderr)
+        self.assertTrue(draft.is_symlink())
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertNotIn('elsewhere', git(self.root, 'ls-files'))
+
     def test_move_inside_a_submodule_domain_commits_child_then_parent(self):
         bare = self.origin()
         self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', bare)
