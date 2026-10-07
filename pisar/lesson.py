@@ -74,10 +74,13 @@ class Batch:
         journal = self.journal()
         journal['events'].append(dict(at=now(), event=event, **fields))
         write_json(self.file('journal.json'), journal)
-        # The retained copy survives discarding the workspace.
-        write_json(self.archive, {**journal, 'root': meta['root'], 'from': meta['from'], 'to': meta['to'],
-                                  'title': meta['title']})
+        self.sync_archive(meta, journal)
         return journal
+
+    def sync_archive(self, meta, journal=None):
+        # The retained copy survives discarding the workspace.
+        write_json(self.archive, {**(journal or self.journal()), 'root': meta['root'], 'from': meta['from'],
+                                  'to': meta['to'], 'title': meta['title']})
 
     def current(self, meta):
         if not meta['revisions']:
@@ -370,12 +373,16 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         review_path = batch.file(f'{rev["revision"]}.review.json')
         if review_path.is_file():
             verdict = read_json(review_path, 'review')['verdict']
-        if meta['status'] != 'accepted':
-            meta['status'] = 'accepted'
-            batch.save(meta)
+        # Finalization is idempotent: a retry repairs a missing event, status or retained journal.
+        if any(e['event'] == 'accept' for e in batch.journal()['events']):
+            batch.sync_archive(meta)
+        else:
             batch.record(meta, 'accept', revision=rev['revision'], sha256=rev['sha256'], keeps=keeps,
                          skip_review=bool(skip_review), mention_origin=bool(mention_origin), verdict=verdict,
                          path=item['path'], operation_id=operation, commits=journal['commits'])
+        if meta['status'] != 'accepted':
+            meta['status'] = 'accepted'
+            batch.save(meta)
         return dict(batch=ident, revision=rev['revision'], path=item['path'],
                     reference=f'wiki:{target.address}:{doc_id}', keeps=keeps, skip_review=bool(skip_review),
                     mention_origin=bool(mention_origin), verdict=verdict, warnings=warnings(wiki, meta),

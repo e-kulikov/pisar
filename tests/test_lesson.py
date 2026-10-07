@@ -386,6 +386,23 @@ class AcceptTests(LessonCase):
         self.accept(batch, '--keep', ','.join(f['id'] for f in checked['findings']))
         self.assertEqual(self.data('check')['ok'], True)
 
+    def test_finalization_is_repaired_on_a_completed_retry(self):
+        batch, draft = self.start()
+        self.check(batch, CLEAN, draft)
+        first = json.loads(self.accept(batch, '--skip-review').stdout)
+        journal = self.workspace(batch) / 'journal.json'
+        value = json.loads(journal.read_text())
+        value['events'] = [e for e in value['events'] if e['event'] != 'accept']
+        journal.write_text(json.dumps(value))
+        self.archived(batch)[0].unlink()
+        again = json.loads(self.accept(batch, '--skip-review').stdout)
+        self.assertEqual(again['path'], first['path'])
+        event = self.journal_events(batch)[-1]
+        self.assertEqual((event['event'], event['skip_review']), ('accept', True))
+        self.assertIn('accept', [e['event'] for e in json.loads(self.archived(batch)[0].read_text())['events']])
+        self.accept(batch, '--skip-review')
+        self.assertEqual([e['event'] for e in self.journal_events(batch)].count('accept'), 1)
+
     def interrupted_submodule_accept(self):
         self.add_submodule()
         batch, _, _ = self.prepared(source='personal', to='work/module')
