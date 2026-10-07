@@ -1,8 +1,10 @@
 """Configuration file and precedence: flag > environment > config file > default."""
 import hashlib
 import json
-from pathlib import Path
+import os
+from unittest import mock
 
+from pisar import settings
 from .support import Fixture, commit_all, init_repo, space
 from .test_save import BODY
 
@@ -222,3 +224,13 @@ effort = "max"
         self.write_config('rot = 1\n')
         self.run_pisar('--version')
         self.run_pisar('--skill')
+
+    # The accessor later commands use for subagents
+
+    def test_agent_options_apply_role_defaults_and_file_values(self):
+        self.write_config('[agents.claude]\nmodel = "main"\n[agents.claude.reviewer]\neffort = "max"\n')
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.base / 'config')}):
+            self.assertEqual(settings.agent_options('claude'), {'model': 'main', 'effort': None})
+            self.assertEqual(settings.agent_options('claude', 'reviewer'), {'model': 'opus', 'effort': 'max'})
+            self.assertEqual(settings.agent_options('claude', 'researcher'),
+                             {'model': 'sonnet', 'effort': 'medium'})
