@@ -243,7 +243,10 @@ class CommandTests(unittest.TestCase):
         home = domain(self.root, 'home', 'Household')
         space(home, '20-areas/garden', 'garden', kind='area')
         (self.root / 'templates').mkdir()
-        space(self.root, 'templates/sample', 'sample-space')
+        sample = self.root / 'templates/sample'          # unmarked top-level dir: not a domain
+        sample.mkdir()
+        (sample / '.wiki.toml').write_text(
+            'schema_version = 1\nid = "sample-space"\nkind = "project"\nstatus = "active"\n')
         self.env = clean_environ(XDG_DATA_HOME=str(self.base / 'data'), XDG_CONFIG_HOME=str(self.base / 'config'))
 
     def run_guard(self, *args, code=0):

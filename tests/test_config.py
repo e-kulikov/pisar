@@ -141,7 +141,7 @@ effort = "max"
     def test_state_dir_from_the_file_receives_the_journal(self):
         state = self.base / 'config-state'
         self.write_config(f'state_dir = "{state}"\n')
-        self.run_pisar('--root', self.root, 'capture', '--space', 'alpha', '--id', 'from-config',
+        self.run_pisar('--root', self.root, 'capture', '--space', 'work/alpha', '--id', 'from-config',
                        '--source', self.external())
         self.assertEqual(len(list(state.glob('roots/*/operations/*.json'))), 1)
         self.assertFalse((self.base / 'data/pisar').exists())
@@ -154,10 +154,10 @@ effort = "max"
         fake.chmod(0o755)
         self.write_config(f'ruwana = "{fake}"\n')
         source = self.external()
-        plan = dict(schema_version=1, operation_id='config-save', space_id='alpha',
+        plan = dict(schema_version=1, operation_id='config-save', space_id='work/alpha',
                     source=dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()),
                     meeting=dict(id='config-meeting', title='Config meeting', body=BODY),
-                    tasks=[dict(id='prepare', space_id='alpha', title='Prepare', agreed=True)])
+                    tasks=[dict(id='prepare', space_id='work/alpha', title='Prepare', agreed=True)])
         path = self.base / 'config-plan.json'
         path.write_text(json.dumps(plan))
         log = self.base / 'ruwana.log'
