@@ -14,6 +14,13 @@ def concrete_id(value, field='id'):
     return value
 
 
+def address(value, field='space'):
+    """A space address `domain/id`; returns the canonical string."""
+    if not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*', value):
+        raise WikiError(f'{field}: expected a domain/id space address, got {value!r}')
+    return value
+
+
 def safe_path(root, relative):
     """Reject traversal, symlinks (including internal ones), Git internals."""
     if not isinstance(relative, str) or not relative or '\\' in relative or '\0' in relative:

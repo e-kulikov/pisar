@@ -4,11 +4,13 @@ from datetime import datetime
 from pathlib import Path
 import re
 import tomllib
-from .safety import WikiError, concrete_id, safe_path, sha256
+from .safety import WikiError, address, concrete_id, safe_path, sha256
 
 
 TYPES = {'source', 'meeting', 'overview', 'decision', 'note', 'recipe', 'movie', 'series', 'book'}
-REF = re.compile(r'wiki:([a-z0-9][a-z0-9-]*):([a-z0-9][a-z0-9-]*)(?:#[\w:.-]+)?')
+REF = re.compile(r'wiki:([a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*):([a-z0-9][a-z0-9-]*)(?:#[\w:.-]+)?')
+# The pre-domain form wiki:SPACE:DOCUMENT no longer resolves; check reports it.
+LEGACY_REF = re.compile(r'wiki:[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*')
 DATE = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)')
 
 
@@ -37,10 +39,10 @@ def validate_meta(meta, owner, wiki):
     if '{{' in repr(meta) or '}}' in repr(meta):
         raise WikiError('unresolved template placeholder')
     ids = meta.get('space_ids')
-    if not isinstance(ids, list) or not ids or ids[0] != owner.id:
-        raise WikiError('space_ids must start with actual owner')
+    if not isinstance(ids, list) or not ids or ids[0] != owner.address:
+        raise WikiError('space_ids must start with actual owner address')
     for ident in ids:
-        concrete_id(ident, 'space_ids')
+        address(ident, 'space_ids')
         related = wiki.space(ident)
         if related.domain != owner.domain:
             raise WikiError('cross-domain related space')
@@ -68,7 +70,7 @@ class Document:
 
     @property
     def reference(self):
-        return f'wiki:{self.owner.id}:{self.meta["id"]}'
+        return f'wiki:{self.owner.address}:{self.meta["id"]}'
 
     def record(self, root):
         return dict(reference=self.reference, path=self.path.relative_to(root).as_posix(),
@@ -104,12 +106,12 @@ def scan(wiki, scope='all'):
 def resolve(wiki, reference, scope='all'):
     match = REF.fullmatch(reference)
     if not match:
-        raise WikiError('expected wiki:<space-id>:<document-id>')
+        raise WikiError('expected wiki:<domain>/<space-id>:<document-id> (a domain/id space address)')
     owner = wiki.space(match[1], scope)
     docs, errors = scan(wiki, owner.domain)
     if errors:
         raise WikiError('; '.join(errors))
-    matches = [d for d in docs if d.owner.id == owner.id and d.meta['id'] == match[2]]
+    matches = [d for d in docs if d.owner == owner and d.meta['id'] == match[2]]
     if len(matches) != 1:
         raise WikiError(f'unknown or ambiguous reference: {reference}')
     return matches[0]
@@ -125,6 +127,8 @@ def check_references(wiki, doc, docs, available=()):
             errors.append(f'{doc.reference}: unresolved reference {ref}')
         elif target.owner.domain != doc.owner.domain:
             errors.append(f'{doc.reference}: cross-domain reference {ref}')
+    for ref in sorted(set(m.group(0) for m in LEGACY_REF.finditer(doc.content))):
+        errors.append(f'{doc.reference}: legacy reference {ref}; use wiki:<domain>/<space-id>:<document-id>')
     for source in doc.meta['sources']:
         if source.startswith('wiki:'):
             if not REF.fullmatch(source):

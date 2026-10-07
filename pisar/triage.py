@@ -214,7 +214,7 @@ def accept(wiki, directory, batch, ident, binary='ruwana'):
         persist(dest, manifest)
         try:
             if source.exists():
-                capture(wiki, directory, target.id, ident, source, digest)
+                capture(wiki, directory, target.address, ident, source, digest)
             elif entry.get('archive_inbox'):
                 verify_capture(wiki, runtime, target, ident, source, digest)
             else:

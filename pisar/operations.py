@@ -117,12 +117,12 @@ def source_bytes(path, expected=None):
     return path, data, digest
 
 
-def check_source_scope(wiki, space, path):
+def check_source_domain(wiki, space, path):
     path = external_path(path)
     if path.is_relative_to(wiki.root):
         relative = path.relative_to(wiki.root)
         if not relative.parts or relative.parts[0] != space.domain:
-            raise WikiError(f'source scope violation: in-root source must be in {space.domain}/')
+            raise WikiError(f'source domain violation: in-root source must be in {space.domain}/')
     return path
 
 
@@ -256,9 +256,13 @@ def result(journal):
     return {key: journal[key] for key in ('operation_id', 'status', 'commits', 'tasks')}
 
 
+def capture_operation(space, ident):
+    return f'capture-{space.domain}-{space.id}-{ident}'
+
+
 def verify_capture(wiki, runtime, space, ident, source, digest):
-    operation = f'capture-{space.id}-{ident}'
-    payload = dict(space=space.id, id=ident, source=str(external_path(source)), sha256=digest)
+    operation = capture_operation(space, ident)
+    payload = dict(space=space.address, id=ident, source=str(external_path(source)), sha256=digest)
     journal = existing(runtime, operation, payload)
     if journal is None or journal['status'] != 'complete':
         raise WikiError('capture is not durably complete')
@@ -273,13 +277,13 @@ def verify_capture(wiki, runtime, space, ident, source, digest):
     return journal
 
 
-def capture(wiki, directory, space_id, ident, source, expected=None):
-    space = wiki.space(space_id)
+def capture(wiki, directory, space_address, ident, source, expected=None):
+    space = wiki.space(space_address)
     concrete_id(ident)
-    source = check_source_scope(wiki, space, source)
+    source = check_source_domain(wiki, space, source)
     source, data, digest = source_bytes(source, expected)
-    operation = f'capture-{space_id}-{ident}'
-    payload = dict(space=space_id, id=ident, source=str(source), sha256=digest)
+    operation = capture_operation(space, ident)
+    payload = dict(space=space.address, id=ident, source=str(source), sha256=digest)
     runtime = Runtime(directory, wiki.root)
     with runtime.lock():
         journal = existing(runtime, operation, payload)
@@ -290,13 +294,13 @@ def capture(wiki, directory, space_id, ident, source, expected=None):
             docs, errors = scan(wiki)
             if errors:
                 raise WikiError('; '.join(errors))
-            if any(d.reference == f'wiki:{space_id}:{ident}' for d in docs):
+            if any(d.reference == f'wiki:{space.address}:{ident}' for d in docs):
                 raise WikiError('duplicate document id')
             relative = f'sources/captures/{ident}/original'
             now = datetime.now(timezone.utc).isoformat()
             text = ('+++\nschema_version = 1\n'
                     f'id = {json.dumps(ident)}\ntype = "source"\ntitle = {json.dumps(ident)}\n'
-                    f'space_ids = {json.dumps([space_id])}\nsources = {json.dumps([relative])}\n'
+                    f'space_ids = {json.dumps([space.address])}\nsources = {json.dumps([relative])}\n'
                     f'imported_at = {json.dumps(now)}\nsource_sha256 = {json.dumps(digest)}\n'
                     'ingest_status = "pending"\n'
                     f'original_name = {json.dumps(source.name)}\n+++\n\n'
@@ -361,7 +365,7 @@ def validate_plan(wiki, plan):
     for ident in related:
         if wiki.space(ident).domain != owner.domain:
             raise WikiError('cross-domain meeting relation')
-    if owner.id in related or len(set(related)) != len(related):
+    if owner.address in related or len(set(related)) != len(related):
         raise WikiError('duplicate owner/related space ids')
     if 'occurred_at' in meeting:
         value = meeting['occurred_at']
@@ -373,7 +377,7 @@ def validate_plan(wiki, plan):
         raise WikiError('source.path must be absolute explicit file')
     if not isinstance(source.get('sha256'), str) or len(source['sha256']) != 64:
         raise WikiError('source.sha256 required')
-    check_source_scope(wiki, owner, source['path'])
+    check_source_domain(wiki, owner, source['path'])
     tasks = plan.get('tasks', [])
     pages = plan.get('pages', [])
     if not isinstance(tasks, list) or not isinstance(pages, list):
@@ -389,7 +393,7 @@ def validate_plan(wiki, plan):
         target = wiki.space(task.get('space_id'))
         if target.domain != owner.domain or target.kind != 'project':
             raise WikiError('task target must be a project in the meeting domain')
-        if target.id not in [owner.id, *related]:
+        if target.address not in [owner.address, *related]:
             raise WikiError('task target must be owner or related project')
         if task.get('agreed') is not True:
             raise WikiError('task requires agreed=true; proposals must not create tasks')
@@ -476,7 +480,7 @@ def save(wiki, directory, plan_path, binary='ruwana'):
     source, data, digest = source_bytes(plan['source']['path'], plan['source']['sha256'])
     runtime = Runtime(directory, wiki.root)
     operation = plan['operation_id']
-    reference = f'wiki:{owner.id}:{plan["meeting"]["id"]}'
+    reference = f'wiki:{owner.address}:{plan["meeting"]["id"]}'
     with runtime.lock():
         journal = existing(runtime, operation, plan)
         if journal is not None and journal['status'] == 'complete':

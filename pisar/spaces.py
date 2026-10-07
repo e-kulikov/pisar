@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import tomllib
-from .safety import WikiError, concrete_id, safe_path
+from .safety import WikiError, address, concrete_id, safe_path
 
 
 SKIP = {'.git', '.ruwana', '__pycache__'}
@@ -147,22 +147,24 @@ class Wiki:
                     self.errors.append(f'{path.relative_to(self.root)}: {error}')
         seen = set()
         for s in self.spaces:
-            if s.id in seen:
-                self.errors.append(f'duplicate space id: {s.id}')
-            seen.add(s.id)
+            if s.address in seen:
+                self.errors.append(f'duplicate space id: {s.address}')
+            seen.add(s.address)
 
     def require_valid(self):
         if self.errors:
             raise WikiError('; '.join(self.errors))
 
-    def space(self, ident, scope='all'):
+    def space(self, value, scope='all'):
+        """Resolve a `domain/id` address; ids are unique within their domain."""
         self.require_valid()
-        matches = [s for s in self.spaces if s.id == ident]
+        address(value)
+        matches = [s for s in self.spaces if s.address == value]
         if len(matches) != 1:
-            raise WikiError(f'unknown or ambiguous space: {ident}')
+            raise WikiError(f'unknown space: {value}')
         s = matches[0]
         if scope != 'all' and s.domain != scope:
-            raise WikiError(f'scope violation: {ident}')
+            raise WikiError(f'scope violation: {value}')
         return s
 
     def owner(self, path):

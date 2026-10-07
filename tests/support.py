@@ -80,7 +80,7 @@ def space(root, relative, ident, kind='project', status='active'):
     return path
 
 
-def document(ident='call-one', owner='alpha', related=(), sources=(), body='Discussed русский launch.'):
+def document(ident='call-one', owner='work/alpha', related=(), sources=(), body='Discussed русский launch.'):
     return ('+++\nschema_version = 1\n'
             f'id = {json.dumps(ident)}\ntype = "meeting"\ntitle = "Launch call"\n'
             f'space_ids = {json.dumps([owner, *related])}\n'
@@ -97,8 +97,8 @@ class Fixture(unittest.TestCase):
         self.alpha = space(self.root, 'work/team/alpha', 'alpha')
         self.beta = space(self.root, 'work/team/beta', 'beta')
         self.personal = space(self.root, 'personal/10-projects/home', 'home')
-        (self.alpha / 'call.md').write_text(document(related=('beta',)))
-        (self.personal / 'note.md').write_text(document('private-note', 'home', body='Private launch data.'))
+        (self.alpha / 'call.md').write_text(document(related=('work/beta',)))
+        (self.personal / 'note.md').write_text(document('private-note', 'personal/home', body='Private launch data.'))
         commit_all(self.root)
         self.state = self.base / 'runtime'
         self.env = clean_environ(XDG_DATA_HOME=str(self.base / 'data'),
@@ -141,7 +141,7 @@ class Fixture(unittest.TestCase):
         remote = self.base / 'module-origin'
         init_repo(remote)
         space(remote, '.', 'module')
-        (remote / 'note.md').write_text(document('module-note', 'module', body='Module evidence.'))
+        (remote / 'note.md').write_text(document('module-note', 'work/module', body='Module evidence.'))
         commit_all(remote)
         git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
             str(remote), 'work/module')

@@ -42,13 +42,13 @@ def parser():
         sub = commands.add_parser(name)
         sub.add_argument('--scope', choices=('all', 'personal', 'work'), default='all')
         if name in ('search', 'inventory'):
-            sub.add_argument('--space', help='Owner or related space id')
+            sub.add_argument('--space', help='Owner or related space address (domain/id)')
         if name == 'search':
             sub.add_argument('query')
         if name == 'read':
-            sub.add_argument('reference', help='wiki:space:document or root-relative path')
+            sub.add_argument('reference', help='wiki:domain/space:document or root-relative path')
     capture = commands.add_parser('capture', help='Commit an unchanged source to its known space')
-    capture.add_argument('--space', required=True)
+    capture.add_argument('--space', required=True, help='Destination space address (domain/id)')
     capture.add_argument('--id', required=True)
     capture.add_argument('--source', required=True)
     capture.add_argument('--sha256', help='Expected original hash')
@@ -66,7 +66,7 @@ def parser():
         if name in ('accept', 'reroute', 'defer'):
             sub.add_argument('--item', required=True)
         if name == 'reroute':
-            sub.add_argument('--space', required=True)
+            sub.add_argument('--space', required=True, help='New destination space address (domain/id)')
     config_command.add_parser(commands)
     guard.add_parser(commands)
     return p

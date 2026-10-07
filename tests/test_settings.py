@@ -31,7 +31,7 @@ class SettingsTests(Fixture):
         return sorted(s['id'] for s in result['spaces'])
 
     def capture(self, *flags, env=None, ok=True, ident='settings-capture'):
-        return self.run_pisar(*flags, 'capture', '--space', 'alpha', '--id', ident,
+        return self.run_pisar(*flags, 'capture', '--space', 'work/alpha', '--id', ident,
                               '--source', self.external(), env=env, ok=ok)
 
     def journals(self, base):
@@ -58,10 +58,10 @@ class SettingsTests(Fixture):
 
     def save_with_tasks(self, *flags, env, cwd=None):
         source = self.external()
-        plan = dict(schema_version=1, operation_id='settings-save', space_id='alpha',
+        plan = dict(schema_version=1, operation_id='settings-save', space_id='work/alpha',
                     source=dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()),
                     meeting=dict(id='settings-meeting', title='Settings meeting', body=BODY),
-                    tasks=[dict(id='prepare', space_id='alpha', title='Prepare', agreed=True)])
+                    tasks=[dict(id='prepare', space_id='work/alpha', title='Prepare', agreed=True)])
         path = self.base / 'settings-plan.json'
         path.write_text(json.dumps(plan))
         log = self.base / 'ruwana.log'

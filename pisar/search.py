@@ -8,7 +8,7 @@ def selected(wiki, scope='all', space_id=None):
     docs, errors = scan(wiki, scope)
     if errors:
         raise WikiError('; '.join(errors))
-    return [d for d in docs if not target or target.id in d.meta['space_ids']]
+    return [d for d in docs if not target or target.address in d.meta['space_ids']]
 
 
 def inventory(wiki, scope='all', space_id=None):

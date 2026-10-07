@@ -1,6 +1,6 @@
 """Domains: top-level directories marked by .domain.toml, nothing hardcoded."""
 import json
-from .support import Fixture, commit_all, domain, space
+from .support import Fixture, commit_all, document, domain, space
 
 
 class DomainDiscoveryTests(Fixture):
@@ -91,3 +91,67 @@ class DomainDiscoveryTests(Fixture):
     def test_domain_directory_cannot_itself_be_a_space(self):
         space(self.root, 'work', 'work')
         self.assertIn('work/.wiki.toml', self.cli('spaces', ok=False).stderr)
+
+
+class AddressTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        domain(self.root, 'acme', 'Acme Corp')
+        self.acme = space(self.root, 'acme/10-projects/alpha', 'alpha')
+        (self.acme / 'call.md').write_text(document(owner='acme/alpha', body='Acme-only words.'))
+        commit_all(self.root)
+
+    def test_space_ids_are_unique_per_domain_only(self):
+        self.assertEqual(sorted(s['address'] for s in self.data('spaces')['spaces'] if s['id'] == 'alpha'),
+                         ['acme/alpha', 'work/alpha'])
+        self.assertTrue(self.data('check')['ok'])
+        work = self.data('read', 'wiki:work/alpha:call-one')
+        acme = self.data('read', 'wiki:acme/alpha:call-one')
+        self.assertEqual((work['path'], acme['path']), ('work/team/alpha/call.md', 'acme/10-projects/alpha/call.md'))
+        self.assertEqual(acme['reference'], 'wiki:acme/alpha:call-one')
+        self.assertEqual([r['reference'] for r in self.data('search', 'words', '--space', 'acme/alpha')['results']],
+                         ['wiki:acme/alpha:call-one'])
+        self.assertEqual([d['reference'] for d in self.data('inventory', '--space', 'work/alpha')['documents']],
+                         ['wiki:work/alpha:call-one'])
+
+    def test_duplicate_id_within_a_domain_is_an_error_even_when_archived(self):
+        space(self.root, 'acme/40-archives/old-alpha', 'alpha', status='archived')
+        self.assertIn('duplicate space id: acme/alpha', self.cli('spaces', ok=False).stderr)
+
+    def test_bare_space_ids_are_refused_where_addresses_are_expected(self):
+        self.assertIn('domain/id', self.cli('read', 'wiki:alpha:call-one', ok=False).stderr)
+        self.cli('search', 'words', '--space', 'alpha', ok=False)
+        self.cli('inventory', '--space', 'alpha', ok=False)
+        self.cli('capture', '--space', 'alpha', '--id', 'bare', '--source', self.external(), ok=False)
+        self.cli('capture', '--space', 'nowhere/alpha', '--id', 'bare', '--source', self.external(), ok=False)
+        self.assertFalse(list(self.root.rglob('bare.md')))
+
+    def test_front_matter_space_ids_are_addresses(self):
+        (self.acme / 'call.md').write_text(document(owner='alpha'))
+        self.cli('check', ok=False)
+        (self.acme / 'call.md').write_text(document(owner='work/alpha'))
+        self.cli('check', ok=False)
+
+    def test_legacy_references_are_reported_by_check(self):
+        (self.acme / 'call.md').write_text(document(owner='acme/alpha', body='See wiki:alpha:call-one.'))
+        result = json.loads(self.cli('check', ok=False).stdout)
+        self.assertTrue(any('wiki:alpha:call-one' in e for e in result['errors']), result)
+
+    def test_domain_is_the_confidentiality_boundary(self):
+        for content in (document(owner='acme/alpha', related=('work/beta',)),
+                        document(owner='acme/alpha', body='See wiki:work/alpha:call-one.'),
+                        document(owner='acme/alpha', sources=('wiki:work/alpha:call-one',))):
+            with self.subTest(content=content):
+                (self.acme / 'call.md').write_text(content)
+                result = json.loads(self.cli('check', ok=False).stdout)
+                self.assertTrue(any('cross-domain' in e for e in result['errors']), result)
+        failed = self.cli('capture', '--space', 'work/alpha', '--id', 'leak',
+                          '--source', self.acme / 'call.md', ok=False)
+        self.assertIn('source domain', failed.stderr)
+        self.assertFalse(list(self.root.rglob('leak.md')))
+
+    def test_capture_writes_address_metadata_and_a_domain_qualified_journal(self):
+        self.data('capture', '--space', 'acme/alpha', '--id', 'acme-capture', '--source', self.external())
+        meta = self.data('read', 'wiki:acme/alpha:acme-capture')['metadata']
+        self.assertEqual(meta['space_ids'], ['acme/alpha'])
+        self.assertTrue(list(self.state.rglob('operations/capture-acme-alpha-acme-capture.json')))

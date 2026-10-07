@@ -15,25 +15,25 @@ class ReadTests(Fixture):
         self.assertEqual(git(module, 'status', '--porcelain'), '')
 
     def test_scoped_lexical_search_and_related_inventory(self):
-        result = self.data('search', 'русский', '--scope', 'work', '--space', 'beta')
+        result = self.data('search', 'русский', '--scope', 'work', '--space', 'work/beta')
         self.assertEqual(result['backend'], 'lexical')
-        self.assertEqual([r['reference'] for r in result['results']], ['wiki:alpha:call-one'])
-        inventory = self.data('inventory', '--space', 'beta', '--scope', 'work')
-        self.assertEqual([d['reference'] for d in inventory['documents']], ['wiki:alpha:call-one'])
+        self.assertEqual([r['reference'] for r in result['results']], ['wiki:work/alpha:call-one'])
+        inventory = self.data('inventory', '--space', 'work/beta', '--scope', 'work')
+        self.assertEqual([d['reference'] for d in inventory['documents']], ['wiki:work/alpha:call-one'])
         self.assertEqual(self.data('search', 'Private', '--scope', 'work')['results'], [])
 
     def test_read_rereads_actual_file_and_survives_move(self):
-        self.cli('read', 'wiki:alpha:call-one', '--scope', 'work')
+        self.cli('read', 'wiki:work/alpha:call-one', '--scope', 'work')
         (self.alpha / 'call.md').write_text(document(body='New current evidence.'))
         target = self.root / 'work/40-archives/renamed'
         target.parent.mkdir(parents=True)
         shutil.move(str(self.alpha), target)
-        read = self.data('read', 'wiki:alpha:call-one', '--scope', 'work')
+        read = self.data('read', 'wiki:work/alpha:call-one', '--scope', 'work')
         self.assertIn('New current evidence.', read['content'])
         self.assertEqual(read['path'], 'work/40-archives/renamed/call.md')
 
     def test_read_rejects_scope_violation_and_traversal(self):
-        self.cli('read', 'wiki:home:private-note', '--scope', 'work', ok=False)
+        self.cli('read', 'wiki:personal/home:private-note', '--scope', 'work', ok=False)
         for path in ('../transcript.txt', '/etc/passwd', 'work/../personal/10-projects/home/note.md'):
             with self.subTest(path=path):
                 self.cli('read', path, ok=False)
@@ -44,7 +44,7 @@ class ReadTests(Fixture):
 
     def test_duplicate_document_ids_are_ambiguous(self):
         (self.alpha / 'duplicate.md').write_text(document())
-        self.assertIn('duplicate', self.cli('read', 'wiki:alpha:call-one', ok=False).stderr.lower())
+        self.assertIn('duplicate', self.cli('read', 'wiki:work/alpha:call-one', ok=False).stderr.lower())
         self.cli('check', ok=False)
 
     def test_check_validates_actual_documents_not_only_spaces(self):
@@ -54,8 +54,8 @@ class ReadTests(Fixture):
         self.assertTrue(any('schema_version' in e for e in result['errors']))
 
     def test_metadata_owner_related_ids_dates_and_placeholders(self):
-        bad = [document(owner='beta'), document(ident='BAD:id'),
-               document(related=('missing',)),
+        bad = [document(owner='work/beta'), document(ident='BAD:id'),
+               document(related=('work/missing',)),
                document().replace('title = "Launch call"', 'title = "{{ title }}"'),
                document().replace('type = "meeting"', 'type = "meeting"\noccurred_at = "2026-10-04"'),
                document().replace('type = "meeting"', 'type = "meeting"\noccurred_at = 2026-10-04T11:00:00Z')]
@@ -75,9 +75,9 @@ class ReadTests(Fixture):
         self.cli('check', ok=False)
 
     def test_cross_domain_refs_and_missing_local_evidence_fail_check(self):
-        for content in (document(related=('home',)),
-                        document(sources=('wiki:home:private-note',)),
-                        document(body='See wiki:home:private-note.'),
+        for content in (document(related=('personal/home',)),
+                        document(sources=('wiki:personal/home:private-note',)),
+                        document(body='See wiki:personal/home:private-note.'),
                         document(sources=('sources/absent.txt#00:12',))):
             with self.subTest(content=content):
                 (self.alpha / 'call.md').write_text(content)
@@ -87,7 +87,7 @@ class ReadTests(Fixture):
         (self.alpha / 'sources').mkdir()
         for i in range(30):
             (self.alpha / 'sources' / f'raw-{i}.txt').write_text(f'Synthetic {i}')
-        inv = self.data('inventory', '--space', 'alpha')
+        inv = self.data('inventory', '--space', 'work/alpha')
         self.assertEqual(len(inv['files']), 32)  # .wiki.toml, call, 30 sources
 
     def test_symlinks_never_expose_evidence(self):
