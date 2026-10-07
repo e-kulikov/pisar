@@ -3,7 +3,7 @@ from .safety import WikiError
 
 
 def selected(wiki, domains=None, space_id=None):
-    wiki.require_valid()
+    wiki.require_valid(domains)
     target = wiki.space(space_id, domains) if space_id else None
     docs, errors = scan(wiki, domains)
     if errors:

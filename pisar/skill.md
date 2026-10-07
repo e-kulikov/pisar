@@ -80,7 +80,8 @@ pisar read <root-relative-path>
 - `--include` keeps only the listed domains, `--exclude` drops them (after
   `--include`). Both are comma separated and repeatable; neither means all
   domains; an unknown domain is an error. Restrict reads to the domain you work
-  in so other domains' content does not reach you.
+  in so other domains' content does not reach you. Errors in a domain you did not
+  select do not block reads; writes need every domain valid.
 - `pisar search` is **lexical**: a case-insensitive substring match, one matching
   line per document, no ranking, no semantics. It cannot prove that something is
   absent. Try several phrasings, synonyms and spellings, then read candidates.

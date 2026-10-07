@@ -227,6 +227,41 @@ class SelectionTests(Fixture):
         self.cli('check', '--include', 'acme', ok=False)
         self.cli('check', ok=False)
 
+    def assert_work_is_usable(self, *flags):
+        self.assertEqual(self.addresses(*flags), ['work/alpha', 'work/beta'])
+        self.assertTrue(self.data('check', *flags)['ok'])
+        self.assertIn('русский', self.data('read', 'wiki:work/alpha:call-one', *flags)['content'])
+        self.assertEqual([r['reference'] for r in self.data('search', 'русский', *flags)['results']],
+                         ['wiki:work/alpha:call-one'])
+        self.assertEqual([d['reference'] for d in self.data('inventory', '--space', 'work/beta', *flags)['documents']],
+                         ['wiki:work/alpha:call-one'])
+
+    def test_invalid_space_in_an_unselected_domain_does_not_block(self):
+        (self.personal / '.wiki.toml').write_text('schema_version = 1\nid = "home"\nkind = "bogus"\nstatus = "active"\n')
+        space(self.root, 'acme/40-archives/rocket', 'rocket', status='archived')  # duplicate id in acme
+        commit_all(self.root)
+        self.assert_work_is_usable('--include', 'work')
+        self.assert_work_is_usable('--exclude', 'personal,acme')
+        for flags in ((), ('--include', 'personal'), ('--include', 'acme')):
+            with self.subTest(flags=flags):
+                self.cli('spaces', *flags, ok=False)
+                self.assertFalse(json.loads(self.cli('check', *flags, ok=False).stdout)['ok'])
+
+    def test_marked_directory_with_invalid_marker_can_be_excluded(self):
+        (self.root / 'acme/.domain.toml').write_text('schema_version = 1\nid = "other"\ntitle = "Acme"\n')
+        outside = self.base / 'linked-domain'
+        outside.mkdir()
+        (outside / '.domain.toml').write_text('schema_version = 1\nid = "linked"\ntitle = "Linked"\n')
+        (self.root / 'linked').symlink_to(outside, target_is_directory=True)
+        self.assert_work_is_usable('--include', 'work')
+        self.assert_work_is_usable('--exclude', 'acme,linked,personal')
+        for name in ('acme', 'linked'):
+            with self.subTest(name=name):
+                failed = self.cli('spaces', '--include', name, ok=False)
+                self.assertNotIn('unknown domain', failed.stderr)
+                self.assertIn(name, failed.stderr)
+                self.cli('spaces', '--exclude', name, ok=False)  # the other one is still selected
+
     def test_scope_flag_is_gone(self):
         self.assertEqual(self.cli('spaces', '--scope', 'work', ok=False).returncode, 2)
 

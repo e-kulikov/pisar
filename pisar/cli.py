@@ -110,7 +110,7 @@ def main(argv=None):
         if args.command == 'check':
             result = check(wiki, domains)
         else:
-            wiki.require_valid()
+            wiki.require_valid(domains)
             if args.command == 'spaces':
                 result = {'spaces': [s.record(wiki.root) for s in wiki.spaces
                                      if domains is None or s.domain in domains]}

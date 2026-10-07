@@ -42,10 +42,10 @@ def validate_meta(meta, owner, wiki):
     if not isinstance(ids, list) or not ids or ids[0] != owner.address:
         raise WikiError('space_ids must start with actual owner address')
     for ident in ids:
-        address(ident, 'space_ids')
-        related = wiki.space(ident)
-        if related.domain != owner.domain:
+        # Judge the boundary from the address alone, so another domain's state never matters.
+        if address(ident, 'space_ids').split('/')[0] != owner.domain:
             raise WikiError('cross-domain related space')
+        wiki.space(ident, {owner.domain})
     if len(set(ids)) != len(ids):
         raise WikiError('duplicate space_ids')
     if not isinstance(meta.get('sources'), list) or not all(isinstance(s, str) and s for s in meta['sources']):
@@ -151,7 +151,7 @@ def check_references(wiki, doc, docs, available=()):
 
 def check(wiki, domains=None):
     docs, errors = scan(wiki, domains)
-    errors = [*wiki.errors, *errors]
+    errors = [*wiki.errors_in(domains), *errors]
     # Read other domain only when requested; domain-crossing references remain unresolved errors.
     for doc in docs:
         errors.extend(check_references(wiki, doc, docs))
@@ -162,5 +162,6 @@ def check(wiki, domains=None):
             for name in [*dirs, *files]:
                 if (Path(parent) / name).is_symlink():
                     errors.append(f'{Path(parent, name).relative_to(wiki.root)}: symlink refused')
-    return dict(ok=not errors, errors=errors, documents=len(docs), spaces=len(wiki.spaces),
+    spaces = [s for s in wiki.spaces if domains is None or s.domain in domains]
+    return dict(ok=not errors, errors=errors, documents=len(docs), spaces=len(spaces),
                 limitations=['External source identifiers are not verified; no semantic analysis.'])

@@ -224,6 +224,9 @@ with `spaces`. Every read command (`spaces`, `check`, `inventory`, `search`,
 `read`) selects domains with `--include a,b` (only these) and `--exclude x,y`
 (all except these). Both are comma separated and repeatable; neither means all
 domains; `--exclude` applies after `--include`; an unknown domain id is an error.
+A directory with a broken marker still counts as a domain for selection. Invalid
+markers and spaces block only the read commands whose selection includes their
+domain; writes (`capture`, `save`, `triage`) require every domain to be valid.
 `search` and `inventory` support optional `--space DOMAIN/ID`. Related meetings
 appear for each related space but retain their owner's single canonical reference.
 

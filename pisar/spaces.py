@@ -104,7 +104,9 @@ class Wiki:
         self.root = Path(root).resolve()
         if not self.root.is_dir():
             raise WikiError(f'wiki root is not a directory: {self.root}')
-        self.errors = []
+        # Problems are kept per top-level directory so a selection can skip them.
+        self.problems = {}
+        self.marked = set()  # Every directory carrying a marker, valid or not.
         self.domains = {}
         self.spaces = []
         for base in sorted(self.root.iterdir()):
@@ -112,21 +114,21 @@ class Wiki:
                 continue
             marker = base / '.domain.toml'
             name = marker.relative_to(self.root).as_posix()
+            if not (marker.exists() or marker.is_symlink()):
+                continue  # Not a domain: docs, schemas, templates, ...
+            self.marked.add(base.name)
             if base.is_symlink():
-                if marker.exists():
-                    self.errors.append(f'{base.name}: symlink domain refused')
+                self.report(base.name, f'{base.name}: symlink domain refused')
                 continue
             if marker.is_symlink():
-                self.errors.append(f'{name}: symlink refused')
+                self.report(base.name, f'{name}: symlink refused')
                 continue
-            if not marker.exists():
-                continue  # Not a domain: docs, schemas, templates, ...
             try:
                 if not marker.is_file():
                     raise WikiError('marker must be a regular file')
                 self.domains[base.name] = load_domain(base)
             except (WikiError, ValueError, OSError) as error:
-                self.errors.append(f'{name}: {error}')
+                self.report(base.name, f'{name}: {error}')
         for domain in self.domains.values():
             for path in walk_files(domain.path):
                 if path.name != '.wiki.toml':
@@ -144,16 +146,29 @@ class Wiki:
                         raise WikiError('status must be active/archived')
                     self.spaces.append(Space(ident, path.parent, domain.id, meta['kind'], meta['status']))
                 except (WikiError, ValueError, OSError) as error:
-                    self.errors.append(f'{path.relative_to(self.root)}: {error}')
+                    self.report(domain.id, f'{path.relative_to(self.root)}: {error}')
         seen = set()
         for s in self.spaces:
             if s.address in seen:
-                self.errors.append(f'duplicate space id: {s.address}')
+                self.report(s.domain, f'duplicate space id: {s.address}')
             seen.add(s.address)
 
-    def require_valid(self):
-        if self.errors:
-            raise WikiError('; '.join(self.errors))
+    def report(self, name, message):
+        self.problems.setdefault(name, []).append(message)
+
+    def errors_in(self, domains=None):
+        """Marker and space problems of the selected domains (all when None)."""
+        return [m for name, messages in sorted(self.problems.items())
+                if domains is None or name in domains for m in messages]
+
+    @property
+    def errors(self):
+        return self.errors_in()
+
+    def require_valid(self, domains=None):
+        errors = self.errors_in(domains)
+        if errors:
+            raise WikiError('; '.join(errors))
 
     def select(self, include=None, exclude=None):
         """Domain ids chosen by comma-separated, repeatable --include/--exclude.
@@ -162,15 +177,15 @@ class Wiki:
         def ids(values):
             chosen = [part.strip() for value in values for part in value.split(',')]
             for ident in chosen:
-                if ident not in self.domains:
+                if ident not in self.marked:
                     raise WikiError(f'unknown domain: {ident}')
             return set(chosen)
-        selected = ids(include) if include else set(self.domains)
+        selected = ids(include) if include else set(self.marked)
         return frozenset(selected - ids(exclude or ()))
 
     def space(self, value, domains=None):
         """Resolve a `domain/id` address; ids are unique within their domain."""
-        self.require_valid()
+        self.require_valid(domains)
         address(value)
         matches = [s for s in self.spaces if s.address == value]
         if len(matches) != 1:
