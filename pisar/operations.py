@@ -174,7 +174,7 @@ def validate_artifacts(wiki, journal):
             raise WikiError('journal artifact hash mismatch')
 
 
-def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=()):
+def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), extra=None):
     journal = dict(schema_version=1, root=str(wiki.root), operation_id=ident,
                    fingerprint=fingerprint(payload), status='incomplete',
                    artifacts=artifacts, commits=[], tasks={}, heads={})
@@ -188,6 +188,7 @@ def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=()):
             if relative in allowed and status != '??':
                 raise WikiError('only an untracked intended inbox source may be adopted')
         journal['heads'][str(repo)] = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+    journal.update(extra or {})  # Extra records join the first write: one atomic replace.
     runtime.store(journal)
     return journal
 

@@ -493,6 +493,74 @@ class AcceptTests(LessonCase):
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.assertEqual(json.loads(self.accept(resumed).stdout), result)
 
+    def crash(self, batch, patched, *args):
+        """Run accept in-process with PATCHED failing, as a process killed at that point would."""
+        with patched, self.assertRaises(gitops.WikiError):
+            lesson.accept(Wiki(self.root), self.state, batch, *args)
+
+    def operation_record(self, batch):
+        return json.loads(next(self.state.glob(f'roots/*/operations/{batch}.json')).read_text())
+
+    def test_crash_before_any_repository_change_counts_as_not_started(self):
+        batch, draft, _ = self.prepared()
+        stores = []
+        real_store = lesson.Runtime.store
+
+        def store(runtime, journal):
+            stores.append(json.loads(json.dumps(journal)))
+            return real_store(runtime, journal)
+        with mock.patch.object(lesson.Runtime, 'store', store):
+            self.crash(batch, mock.patch.object(lesson, 'apply_files', side_effect=gitops.WikiError('crash')))
+        self.assertIn('decision', stores[0])  # operation record and decision are ONE write
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        draft.write_text(CLEAN + 'edited after the crash\n')
+        checked = self.check(batch)
+        self.assertEqual(checked['revision'], 'r2')
+        self.attach(batch, checked)
+        result = json.loads(self.accept(batch).stdout)
+        self.assertTrue(self.note(result).read_bytes().endswith(draft.read_bytes()))
+        self.assertIn('restart', [e['event'] for e in self.journal_events(batch)])
+        self.assertEqual(self.operation_record(batch)['status'], 'complete')
+
+    def test_not_started_acceptance_can_be_edited_or_discarded(self):
+        batch, draft, _ = self.prepared()
+        self.crash(batch, mock.patch.object(lesson, 'apply_files', side_effect=gitops.WikiError('crash')))
+        draft.write_text('A new direction.\n')
+        self.accept(batch, ok=False)  # the draft is not the reviewed revision: asks for check, which works
+        self.check(batch)
+        self.data('lesson', 'discard', '--batch', batch)
+        other, _, _ = self.prepared()
+        self.crash(other, mock.patch.object(lesson, 'apply_files', side_effect=gitops.WikiError('crash')))
+        self.data('lesson', 'discard', '--batch', other)
+
+    def test_written_but_uncommitted_note_counts_as_started(self):
+        batch, draft, _ = self.prepared()
+        self.crash(batch, mock.patch.object(gitops, 'commit', side_effect=gitops.WikiError('crash')))
+        self.assertTrue((self.personal / 'notes').is_dir())
+        draft.write_text('edited\n')
+        for args in (('check',), ('discard',)):
+            self.assertIn('accept', self.cli('lesson', *args, '--batch', batch, ok=False).stderr)
+        result = json.loads(self.accept(batch).stdout)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertTrue(self.note(result).is_file())
+
+    def test_committed_but_unrecorded_acceptance_counts_as_started(self):
+        batch, draft, _ = self.prepared()
+        first = json.loads(self.accept(batch).stdout)
+        record = next(self.state.glob(f'roots/*/operations/{batch}.json'))
+        value = json.loads(record.read_text())
+        value.update(status='incomplete', commits=[], heads={
+            k: git(self.root, 'rev-parse', 'HEAD~1') for k in value['heads']})
+        record.write_text(json.dumps(value))
+        meta = self.workspace(batch) / 'meta.json'
+        info = json.loads(meta.read_text())
+        info['status'] = 'open'
+        meta.write_text(json.dumps(info))
+        draft.write_text('edited\n')
+        for args in (('check',), ('discard',)):
+            self.assertIn('accept', self.cli('lesson', *args, '--batch', batch, ok=False).stderr)
+        self.assertEqual(json.loads(self.accept(batch).stdout)['path'], first['path'])
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)

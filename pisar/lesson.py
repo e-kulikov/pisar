@@ -13,7 +13,7 @@ import re
 import shutil
 import unicodedata
 import uuid
-from . import guard
+from . import gitops, guard
 from .documents import Document, check_references, metadata, scan, validate_meta
 from .operations import (Runtime, apply_files, artifact, atomic_bytes, existing, external_path,
                          outside_git, result as operation_result, start as start_operation, write_json)
@@ -101,11 +101,35 @@ class Batch:
         if meta['status'] != 'open':
             raise WikiError(f'lesson batch {self.ident} is {meta["status"]}; start a new batch')
 
+    def accepting(self):
+        """The operation record once the acceptance has passed its commit point, else None."""
+        journal = self.runtime.load(self.ident)
+        return journal if journal is not None and acceptance_started(self.wiki, journal) else None
+
     def require_not_accepting(self):
         """Once an acceptance has started its revision is fixed: only `accept` may continue."""
-        if self.runtime.load(self.ident) is not None:
+        if self.accepting() is not None:
             raise WikiError(f'the acceptance of {self.ident} has started; finish it by rerunning the same '
                             f'`pisar lesson accept --batch {self.ident}` (no new revision or review is possible)')
+
+
+def acceptance_started(wiki, journal):
+    """True once this acceptance changed any repository: the COMMIT POINT.
+
+    Before it nothing outside the lesson workspace has changed, so the operation record is stale
+    and the acceptance counts as not started. Started means: a commit was journaled, a repository
+    HEAD moved to this operation's own commit, or the note file written by it is on disk."""
+    if journal['status'] == 'complete' or journal['commits']:
+        return True
+    for repo, head in journal['heads'].items():
+        if gitops.run(repo, 'rev-parse', 'HEAD').strip() != head and \
+                gitops.run(repo, 'log', '-1', '--format=%s').strip() == f'wiki: {journal["operation_id"]}':
+            return True
+    for item in journal['artifacts']:
+        path = safe_path(wiki.root, item['path'])
+        if path.is_file() and sha256(path.read_bytes()) == item['after']:
+            return True
+    return False
 
 
 def warnings(wiki, meta):
@@ -351,11 +375,14 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         operation = concrete_id(ident, 'operation_id')
         payload = dict(batch=ident, revision=rev['revision'], sha256=rev['sha256'], to=target.address,
                        id=doc_id, keeps=keeps, mention_origin=bool(mention_origin), skip_review=bool(skip_review))
-        journal = existing(batch.runtime, operation, payload)
+        stale = batch.runtime.load(operation)
+        if stale is not None and not acceptance_started(wiki, stale):
+            # Before the commit point nothing outside the workspace changed: start over, and keep a trace.
+            batch.record(meta, 'restart', reason='stale operation record without any repository change',
+                         previous_status=stale['status'], error=stale.get('error'))
+            stale = None
+        journal = existing(batch.runtime, operation, payload) if stale is not None else None
         resumed = journal is not None
-        if journal is not None and 'decision' not in journal:
-            # Started but the decision was not persisted yet: nothing was written, so start over.
-            journal = None if journal['status'] != 'complete' and not journal['commits'] else journal
         if journal is not None and journal['status'] == 'complete':
             item = journal['artifacts'][0]
             path = safe_path(wiki.root, item['path'])
@@ -381,10 +408,10 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
             if problems:
                 raise WikiError('the text would not pass `pisar check` (nothing was changed; edit the draft and '
                                 'run `pisar lesson check` again): ' + '; '.join(problems))
-            journal = start_operation(wiki, batch.runtime, operation, payload, artifacts)
-            journal['decision'] = dict(keeps=keeps, skip_review=bool(skip_review),
-                                       mention_origin=bool(mention_origin), verdict=verdict)
-            batch.runtime.store(journal)
+            decision = dict(keeps=keeps, skip_review=bool(skip_review),
+                            mention_origin=bool(mention_origin), verdict=verdict)
+            journal = start_operation(wiki, batch.runtime, operation, payload, artifacts,
+                                      extra=dict(decision=decision))
         decision = journal.get('decision', {})
         try:
             if journal['status'] != 'complete':
@@ -423,7 +450,7 @@ def discard(wiki, state, ident):
     batch = Batch(wiki, state, ident)
     with batch.runtime.lock():
         meta = batch.load()
-        pending = batch.runtime.load(batch.ident)
+        pending = batch.accepting()
         recorded = any(e['event'] == 'accept' for e in batch.journal()['events'])
         if pending is not None and (pending['status'] != 'complete' or meta['status'] != 'accepted' or not recorded):
             raise WikiError(f'the acceptance of {ident} is not finalized; finish it by rerunning the same '
