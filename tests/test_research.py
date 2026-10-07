@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -31,6 +32,12 @@ if "--safe-mode" not in sys.argv and os.path.isfile(settings):
         for group in json.load(stream).get("hooks", {}).get("SessionStart", []):
             for hook in group["hooks"]:
                 subprocess.run(hook["command"], shell=True)
+if mode == "orphan":
+    import subprocess
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    print(json.dumps({"type": "result", "result": "done", "structured_output": RESULT}))
+    sys.stdout.flush()
+    sys.exit(0)
 if mode == "sleep":
     import time
     time.sleep(60)
@@ -426,6 +433,56 @@ class ResearchTests(Fixture):
         child = self.call()['env']
         self.assertEqual(child['GOOGLE_APPLICATION_CREDENTIALS'], '/g')
         self.assertNotIn('AWS_SECRET_ACCESS_KEY', child)
+
+    # --- one deadline for the whole subprocess ------------------------------
+
+    def bounded(self, code, question='q', timeout=0.5):
+        with mock.patch.object(research, 'TIMEOUT', timeout):
+            started = time.monotonic()
+            done = research.run_bounded([sys.executable, '-c', code], question, str(self.base), dict(os.environ))
+        return done, time.monotonic() - started
+
+    def test_the_deadline_covers_writing_a_question_the_child_does_not_read(self):
+        done, took = self.bounded('import time; time.sleep(30)', question='я' * (4 * 1024 * 1024))
+        self.assertEqual(done.state, 'timeout')
+        self.assertLess(took, 5)
+
+    def test_a_descendant_holding_the_pipes_is_never_reported_as_ok(self):
+        code = ('import subprocess, sys; '
+                'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]); '
+                'print(p.pid, flush=True)')
+        done, took = self.bounded(code, timeout=60)
+        self.assertEqual(done.state, 'orphan')
+        self.assertLess(took, 15)
+        self.assertGone(int(done.stdout.split()[0]))
+
+    def test_a_quiet_descendant_is_stopped_but_the_run_is_ok(self):
+        code = ('import subprocess, sys; '
+                'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], '
+                'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); '
+                'print(p.pid, flush=True)')
+        done, took = self.bounded(code, timeout=60)
+        self.assertEqual(done.state, 'ok')
+        self.assertLess(took, 5)
+        self.assertGone(int(done.stdout.split()[0]))
+
+    def assertGone(self, pid):
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.kill(pid, 9)
+        self.fail('a descendant of the child is still alive')
+
+    def test_an_orphaned_run_is_a_failure_with_diagnostics(self):
+        run = self.in_process(TIMEOUT=60)
+        self.fake('orphan')
+        with self.assertRaisesRegex(research.WikiError, 'background process') as caught:
+            run()
+        self.assertIn('diagnostics kept', str(caught.exception))
+        self.assertEqual(self.stored(), [])
 
     def tmpdir_case(self, tmp, via_environment):
         tmp.mkdir(exist_ok=True)

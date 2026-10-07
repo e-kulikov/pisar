@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import tempfile
 from . import guard, settings
 from .operations import Runtime, outside_git, write_json
@@ -22,7 +23,8 @@ from .safety import WikiError
 
 SCHEMA_VERSION = 1
 QUOTE_LIMIT = 300  # characters; longer quotes are cut to this length
-TIMEOUT = 1800     # seconds
+TIMEOUT = 1800     # seconds, one deadline for stdin, the run and the output
+PIPE_GRACE = 2     # seconds the output may stay open after the child exited
 # Bounds: the subprocess output that is read, each string, the item counts and the
 # stored record (UTF-8 bytes). Anything above them is rejected, never stored.
 STDOUT_LIMIT = 1024 * 1024
@@ -212,12 +214,28 @@ def _drain(stream, limit, sink, overflow, stop):
             return
 
 
+def _feed(stream, data):
+    """Write DATA to the child's stdin and close it; a vanished child is not an error."""
+    try:
+        stream.write(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
 def run_bounded(argv, question, cwd, env):
     """Run ARGV with QUESTION on stdin, reading at most STDOUT_LIMIT/STDERR_LIMIT bytes.
 
-    The child leads its own process group, which is killed on timeout or overflow.
-    state is 'ok', 'timeout' or 'overflow'.
+    One deadline (TIMEOUT) covers delivering stdin, running and draining the output. The
+    child leads its own process group, which is always killed at the end, so nothing it
+    started outlives the call. state is 'ok', 'timeout', 'overflow', or 'orphan' when the
+    child exited but a descendant kept the output pipes open.
     """
+    deadline = time.monotonic() + TIMEOUT
     process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                cwd=cwd, env=env, start_new_session=True)
 
@@ -228,24 +246,32 @@ def run_bounded(argv, question, cwd, env):
             pass
 
     out, err, overflow = bytearray(), bytearray(), threading.Event()
-    readers = [threading.Thread(target=_drain, args=(stream, limit, sink, overflow, stop), daemon=True)
+    threads = [threading.Thread(target=_drain, args=(stream, limit, sink, overflow, stop), daemon=True)
                for stream, limit, sink in ((process.stdout, STDOUT_LIMIT, out), (process.stderr, STDERR_LIMIT, err))]
-    for reader in readers:
-        reader.start()
-    try:
-        process.stdin.write(question.encode('utf-8'))
-        process.stdin.close()
-    except BrokenPipeError:
-        pass
+    threads.append(threading.Thread(target=_feed, args=(process.stdin, question.encode('utf-8')), daemon=True))
+    for thread in threads:
+        thread.start()
     state = 'ok'
     try:
-        process.wait(timeout=TIMEOUT)
+        process.wait(timeout=max(deadline - time.monotonic(), 0))
+        # The child is gone; its output must reach EOF at once unless a descendant holds the pipes.
+        grace = time.monotonic() + min(PIPE_GRACE, max(deadline - time.monotonic(), 0))
+        for thread in threads[:2]:
+            thread.join(timeout=max(grace - time.monotonic(), 0))
+        if any(thread.is_alive() for thread in threads[:2]):
+            state = 'orphan'
     except subprocess.TimeoutExpired:
         state = 'timeout'
+    finally:
         stop()
         process.wait()
-    for reader in readers:
-        reader.join(timeout=5)
+        for thread, stream in zip(threads, (process.stdout, process.stderr, process.stdin)):
+            thread.join(timeout=2)
+            if not thread.is_alive():
+                try:
+                    stream.close()
+                except OSError:
+                    pass
     if overflow.is_set():
         state = 'overflow'
     return Completed(process.returncode, bytes(out), bytes(err), state)
@@ -324,6 +350,8 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
         # Messages below are fixed text: nothing the model or claude printed is echoed.
         if done.state == 'timeout':
             raise WikiError(f'claude did not finish within {TIMEOUT} seconds')
+        if done.state == 'orphan':
+            raise WikiError('claude left background processes holding its output; they were stopped')
         if done.state == 'overflow':
             raise WikiError(f'claude output is too large (more than {STDOUT_LIMIT} bytes)')
         if done.returncode != 0:
