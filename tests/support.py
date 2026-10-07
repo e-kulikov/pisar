@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 from pathlib import Path
@@ -19,12 +20,16 @@ REQUIRE_RUWANA = os.environ.get('PISAR_TEST_REQUIRE_RUWANA') == '1'
 # from outside the checkout instead of `python -m pisar`.
 EXECUTABLE = os.environ.get('PISAR_TEST_EXECUTABLE')
 # Settings inherited from the developer's shell must never reach live data.
-ISOLATED = ('PISAR_ROOT', 'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', 'WIKI_ROOT')
+ISOLATED = ('PISAR_ROOT', 'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', 'WIKI_ROOT', 'XDG_CONFIG_HOME')
+# The developer's own config file must not apply either: default to an empty one.
+NO_CONFIG = tempfile.mkdtemp(prefix='pisar-test-no-config-')
+atexit.register(shutil.rmtree, NO_CONFIG, ignore_errors=True)
 
 
 def clean_environ(**extra):
     env = {k: v for k, v in os.environ.items() if k not in ISOLATED}
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env['XDG_CONFIG_HOME'] = NO_CONFIG
     env.update(extra)
     return env
 
@@ -84,7 +89,8 @@ class Fixture(unittest.TestCase):
         commit_all(self.root)
         self.state = self.base / 'runtime'
         self.env = clean_environ(XDG_DATA_HOME=str(self.base / 'data'),
-                                 XDG_CACHE_HOME=str(self.base / 'cache'))
+                                 XDG_CACHE_HOME=str(self.base / 'cache'),
+                                 XDG_CONFIG_HOME=str(self.base / 'config'))
 
     def require_ruwana(self):
         if not RUWANA_AVAILABLE:
