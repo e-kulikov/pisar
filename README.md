@@ -80,17 +80,71 @@ From a source checkout, run `./bin/pisar` or `python3 -m pisar`.
 
 ## Configuration
 
-Global options go **before** the command. An explicit option always overrides
-its environment variable, which overrides the default. Empty variables count as
-unset.
+Global options go **before** the command. Each setting is taken from the first
+of: the explicit option, its environment variable, the config file, the built-in
+default. Empty variables count as unset.
 
-| Option | Environment | Default | Purpose |
-| --- | --- | --- | --- |
-| `--root PATH` | `PISAR_ROOT` | `$XDG_DATA_HOME/wiki` | Knowledge repository root |
-| `--state-dir PATH` | `PISAR_STATE_DIR` | `$XDG_DATA_HOME/pisar` | External runtime: journals, locks, global inbox, triage |
-| `--ruwana PATH` | `PISAR_RUWANA_BIN` | `ruwana` on `PATH` | Task tracker binary |
+| Option | Environment | Config key | Default | Purpose |
+| --- | --- | --- | --- | --- |
+| `--root PATH` | `PISAR_ROOT` | `root` | `$XDG_DATA_HOME/wiki` | Knowledge repository root |
+| `--state-dir PATH` | `PISAR_STATE_DIR` | `state_dir` | `$XDG_DATA_HOME/pisar` | External runtime: journals, locks, global inbox, triage |
+| `--ruwana PATH` | `PISAR_RUWANA_BIN` | `ruwana` | `ruwana` on `PATH` | Task tracker binary |
 
 `$XDG_DATA_HOME` falls back to `~/.local/share` when it is unset or not absolute.
+
+### Config file
+
+The optional file `$XDG_CONFIG_HOME/pisar/config.toml` (`~/.config/pisar/config.toml`
+when `XDG_CONFIG_HOME` is unset or not absolute) holds the same settings plus the
+agent options. Every key is optional:
+
+```toml
+default_agent = "claude"        # used by `pisar --agent` without a value
+root = "/abs/path/wiki"         # like PISAR_ROOT; must be absolute
+state_dir = "/abs/path/pisar"   # like PISAR_STATE_DIR; must be absolute
+ruwana = "ruwana"               # like PISAR_RUWANA_BIN; a command name or an absolute path
+
+[agents.claude]                 # the main `pisar --agent` session
+model = "sonnet"
+effort = "medium"
+
+[agents.claude.reviewer]        # lesson reviewer subagent (default opus, high)
+model = "opus"
+effort = "high"
+
+[agents.claude.researcher]      # research subagent (default sonnet, medium)
+model = "sonnet"
+effort = "medium"
+```
+
+A missing file is fine. Unknown keys, wrong types, empty strings, a relative
+`root` or `state_dir` and a relative `ruwana` path are errors naming the file and
+the key, and stop every command that reads settings (`--version` and `--skill`
+do not). `model` and `effort` are passed to the agent verbatim, with no list of
+allowed values; when the main session leaves them unset, nothing is passed.
+
+`pisar config show` prints every effective value with its source, one of `flag`,
+`env`, `config` or `default`. It needs no existing root:
+
+```sh
+pisar config show
+pisar --root /tmp/other config show   # root now reports "source": "flag"
+```
+
+```json
+{
+  "file": {"path": "/home/me/.config/pisar/config.toml", "exists": true},
+  "settings": {
+    "root": {"value": "/home/me/.local/share/wiki", "source": "default"},
+    "default_agent": {"value": "claude", "source": "config"},
+    "agents.claude.reviewer.model": {"value": "opus", "source": "default"}
+  }
+}
+```
+
+The example is shortened; the output lists `root`, `state_dir`, `ruwana`,
+`default_agent` and `model`/`effort` for the main session, `reviewer` and
+`researcher`.
 The runtime directory must be outside every Git repository, must not be inside
 the root, and must not contain the root; overlapping combinations are refused
 before any runtime file is written. Read-only commands do not touch the runtime.
@@ -121,6 +175,7 @@ rollback procedure below selects commits with it.
 
 ```sh
 pisar --agent claude                 # start Claude Code in the knowledge root
+pisar --agent                        # start default_agent from the config file
 pisar --agent claude -- -c           # arguments after -- go to the agent itself
 ```
 
@@ -133,6 +188,9 @@ is supported. It is used instead of a command:
   once there; none of your global Claude settings, hooks, plugins, skills or MCP
   servers apply. The child gets `PISAR_ROOT`, `PISAR_STATE_DIR` and
   `PISAR_RUWANA_BIN` for the same selection and never inherits `WIKI_ROOT`.
+- `--model` and `--effort` come from `[agents.claude]` in the config file
+  (verbatim, only when set). Your own `--model` or `--effort` after `--` wins
+  and the configured value is then not passed.
 - Its system prompt is replaced by a short built-in one: start with
   `pisar spaces`, and do with pisar everything pisar can do, so the repository,
   its journals and the task tracker stay in sync.
