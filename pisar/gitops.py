@@ -1,12 +1,15 @@
-"""Explicit local Git ownership and commits; no hooks, remotes or reset."""
+"""Explicit local Git ownership and commits; no hooks, remotes or history rewriting."""
 from pathlib import Path
 import os
 import subprocess
+import tempfile
 from .safety import WikiError
 
 
-def run(repo, *args, check=True, input=None):
+def run(repo, *args, check=True, input=None, index=None):
     env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    if index is not None:
+        env['GIT_INDEX_FILE'] = str(index)  # A private index: the shared one is never consulted.
     result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, env=env,
                             **(dict(input=input) if input is not None else dict(text=True)))
     if input is not None:
@@ -75,41 +78,59 @@ def blob(repo, spec):
     return result.stdout
 
 
-def stage_verified(repo, relative, data):
-    """Stage exactly DATA at RELATIVE, never rereading the working file."""
+def entry_mode(repo, relative, index=None):
+    entry = run(repo, 'ls-files', '--stage', '--', relative, index=index).split()
+    return entry[0] if entry and entry[0] in ('100644', '100755') else '100644'
+
+
+def stage_entry(repo, index, relative, data):
+    """Put exactly DATA at RELATIVE into the private INDEX (blob written without any Git filter)."""
     oid = run(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=data).strip()
-    entry = run(repo, 'ls-files', '--stage', '--', relative).split()
-    mode = entry[0] if entry and entry[0] in ('100644', '100755') else '100644'
-    run(repo, 'update-index', '--add', '--cacheinfo', f'{mode},{oid},{relative}')
+    run(repo, 'update-index', '--add', '--cacheinfo', f'{entry_mode(repo, relative, index)},{oid},{relative}',
+        index=index)
 
 
 def commit(repo, paths, operation_id, verified=None):
-    """Commit PATHS. VERIFIED maps a path to the exact bytes to commit for it (journaled, hash-checked):
-    those are staged from the bytes, so a later edit of the working file cannot enter the commit; it
-    stays a local modification."""
+    """Commit PATHS without ever using the shared index.
+
+    The tree is built in a private index read from HEAD; VERIFIED maps a path to the exact journaled
+    bytes for it, other files are taken from the working tree and submodules as their current HEAD
+    (gitlink). A concurrent `git add` or an edit of the working file can therefore never enter the
+    commit. The branch then advances by compare-and-swap, and the real index is made to agree for
+    ONLY these paths: every other staged or unstaged change of the user is left as it was."""
     paths = sorted(set(paths))
     verified = verified or {}
     if not paths:
         return None
-    for relative, data in verified.items():
-        stage_verified(repo, relative, data)
-    rest = [p for p in paths if p not in verified]
-    if rest:
-        run(repo, 'add', '--', *rest)
-    if not run(repo, 'diff', '--cached', '--name-only', '--', *paths).strip():
-        return None
-    # Suppress repository hooks and signing: writes cannot run user publishing scripts.
-    # The 'wiki: OPERATION' subject is a stable data protocol: retries recognize their
-    # own commits by it and the documented rollback recipe selects commits with it.
-    # The index was verified clean apart from these paths, so commit the index itself
-    # (a pathspec commit would reread the working files).
-    run(repo, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
-        'commit', '-qm', f'wiki: {operation_id}')
-    head = run(repo, 'rev-parse', 'HEAD').strip()
-    for relative, data in verified.items():
-        if blob(repo, f'{head}:{relative}') != data:
-            raise WikiError(f'committed bytes of {relative} differ from the journal in {repo} (Git filters?)')
-    return head
+    old = run(repo, 'rev-parse', 'HEAD').strip()
+    with tempfile.TemporaryDirectory(prefix='pisar-index-') as scratch:
+        index = Path(scratch) / 'index'
+        run(repo, 'read-tree', old, index=index)
+        for relative in paths:
+            target = repo / relative
+            if relative in verified:
+                stage_entry(repo, index, relative, verified[relative])
+            elif (target / '.git').exists():
+                child = run(target, 'rev-parse', 'HEAD').strip()
+                run(repo, 'update-index', '--add', '--cacheinfo', f'160000,{child},{relative}', index=index)
+            elif target.is_file() and not target.is_symlink():
+                stage_entry(repo, index, relative, target.read_bytes())
+            else:
+                run(repo, 'update-index', '--force-remove', '--', relative, index=index)
+        tree = run(repo, 'write-tree', index=index).strip()
+        if tree == run(repo, 'rev-parse', f'{old}^{{tree}}').strip():
+            return None
+        # Hooks and signing stay off: writes cannot run user publishing scripts. The 'wiki: OPERATION'
+        # subject is a stable data protocol: retries recognize their own commits by it and the
+        # documented rollback recipe selects commits with it.
+        new = run(repo, '-c', 'commit.gpgsign=false', 'commit-tree', tree, '-p', old,
+                  '-m', f'wiki: {operation_id}').strip()
+        for relative, data in verified.items():
+            if blob(repo, f'{new}:{relative}') != data:
+                raise WikiError(f'committed bytes of {relative} differ from the journal in {repo}')
+        run(repo, 'update-ref', '-m', f'wiki: {operation_id}', 'HEAD', new, old)
+    run(repo, 'reset', '-q', '--', *paths, check=False)
+    return new
 
 
 def commit_move(repo, old, new, operation_id):

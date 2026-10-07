@@ -678,6 +678,27 @@ class AcceptTests(LessonCase):
         self.assertEqual(self.committed_bytes(result), self.journaled_bytes(batch))
         self.assertNotIn(b'UNREVIEWED', self.committed_bytes(result))
 
+    def test_a_concurrent_git_add_never_changes_the_acceptance_commit(self):
+        batch, _, _ = self.prepared()
+        real = gitops.commit
+
+        def commit(repo, paths, operation, **kwargs):
+            note = next((self.personal / 'notes').glob('*.md'))
+            note.write_bytes(b'UNREVIEWED REPLACEMENT\n')
+            (self.personal / 'unrelated.txt').write_text('staged by someone else\n')
+            git(self.root, 'add', '--', note.relative_to(self.root).as_posix(),
+                'personal/10-projects/home/unrelated.txt')
+            return real(repo, paths, operation, **kwargs)
+        with mock.patch.object(gitops, 'commit', commit):
+            result = lesson.accept(Wiki(self.root), self.state, batch)
+        self.assertEqual(self.committed_bytes(result), self.journaled_bytes(batch))
+        self.assertEqual(git(self.root, 'show', '--name-only', '--format=', 'HEAD'), result['path'])
+        # The user's unrelated staged change survives untouched; the note's index entry agrees with HEAD.
+        self.assertEqual(git(self.root, 'diff', '--cached', '--name-only'),
+                         'personal/10-projects/home/unrelated.txt')
+        self.assertEqual(self.note(result).read_bytes(), b'UNREVIEWED REPLACEMENT\n')
+        self.assertIn(result['operation_id'], git(self.root, 'log', '-1', '--format=%s'))
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)
