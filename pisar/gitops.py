@@ -102,9 +102,11 @@ def attribute_problems(repo, relative):
         problems.append('ident')
     if found.get('working-tree-encoding', 'unspecified') != 'unspecified':
         problems.append(f'working-tree-encoding={found["working-tree-encoding"]}')
-    autocrlf = run(repo, 'config', '--get', 'core.autocrlf', check=False).strip().lower()
-    if found.get('text') == 'unspecified' and autocrlf in ('true', 'input'):
-        problems.append(f'core.autocrlf={autocrlf}')
+    if found.get('text') == 'unspecified':
+        # `input` is not a boolean; every true spelling (yes, on, 1, true) is normalised by Git itself.
+        raw = run(repo, 'config', '--get', 'core.autocrlf', check=False).strip().lower()
+        if raw == 'input' or run(repo, 'config', '--type=bool', '--get', 'core.autocrlf', check=False).strip() == 'true':
+            problems.append(f'core.autocrlf={raw}')
     return problems
 
 

@@ -695,6 +695,16 @@ class AcceptTests(LessonCase):
         batch, _, _ = self.prepared()
         self.assert_refused_up_front(batch, 'autocrlf')
 
+    def test_every_spelling_of_autocrlf_is_recognised(self):
+        for value in ('yes', 'on', '1', 'true', 'TRUE', 'input'):
+            with self.subTest(autocrlf=value):
+                git(self.root, 'config', 'core.autocrlf', value)
+                batch, _, _ = self.prepared()
+                self.assert_refused_up_front(batch, 'autocrlf')
+        git(self.root, 'config', 'core.autocrlf', 'false')
+        batch, _, _ = self.prepared()
+        self.assertTrue(self.note(json.loads(self.accept(batch).stdout)).is_file())
+
     def test_gitops_commit_preserves_bytes_under_conversion(self):
         self.attributes('* text eol=crlf\n')
         relative = 'personal/10-projects/home/raw.md'
