@@ -64,7 +64,7 @@ class AgentTests(Fixture):
     def test_tools_are_minimal_and_mcp_is_disabled(self):
         _, call = self.launch()
         argv = call['argv']
-        self.assertIn('--tools=Read,Write,Edit,Glob,Grep,Bash', argv)
+        self.assertIn('--tools=Read,Write,Edit,Glob,Grep,Bash,Agent,Skill', argv)
         self.assertIn('--strict-mcp-config', argv)
 
     def test_mcp_config_is_passed_only_when_the_root_has_one(self):
@@ -93,7 +93,7 @@ class AgentTests(Fixture):
                      'Bash(pisar spaces*)', 'Bash(pisar save *)', 'Bash(pisar triage *)'):
             self.assertIn(rule, allowed)
         for rule in allowed:
-            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ', 'Edit(//')), rule)
+            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ', 'Edit(//', 'Agent(', 'Skill(')), rule)
             self.assertNotIn(rule, ('Bash(git *)', 'Bash(pisar *)', 'Bash(mv *)', 'Bash(*)', 'Bash'))
             self.assertFalse(rule.startswith('Bash(mv'), rule)
         self.assertFalse([r for r in allowed if 'pisar --' in r], 'global flags would allow --ruwana')
@@ -155,6 +155,23 @@ class AgentTests(Fixture):
         self.assertEqual(argv[:2], ['-p', 'hi'])
         self.assertLess(argv.index('--plugin-dir'), argv.index('--system-prompt'))
 
+    def test_reviewer_subagent_and_skills_are_usable_but_other_agents_are_denied(self):
+        _, call = self.launch()
+        argv = call['argv']
+        tools = argv[[a.startswith('--tools=') for a in argv].index(True)].split('=', 1)[1].split(',')
+        self.assertIn('Agent', tools)
+        self.assertIn('Skill', tools)
+        allowed = values(argv, '--allowedTools')
+        self.assertIn('Agent(pisar:lesson-reviewer)', allowed)
+        self.assertNotIn('Agent', allowed)
+        for skill in ('pisar', 'lessons', 'research'):
+            self.assertIn(f'Skill(pisar:{skill})', allowed)
+        denied = values(argv, '--disallowedTools')
+        for agent in ('Explore', 'general-purpose', 'Plan', 'claude', 'statusline-setup'):
+            self.assertIn(f'Agent({agent})', denied)
+        self.assertNotIn('Agent', denied)
+        self.assertNotIn('Agent(pisar:lesson-reviewer)', denied)
+
     def test_push_and_git_internals_are_denied(self):
         _, call = self.launch()
         denied = values(call['argv'], '--disallowedTools')
@@ -165,7 +182,7 @@ class AgentTests(Fixture):
         _, call = self.launch('--', '-c', 'continue the review')
         argv = call['argv']
         self.assertEqual(argv[:2], ['-c', 'continue the review'])
-        self.assertLess(argv.index('--system-prompt'), argv.index('--tools=Read,Write,Edit,Glob,Grep,Bash'))
+        self.assertLess(argv.index('--system-prompt'), argv.index('--tools=Read,Write,Edit,Glob,Grep,Bash,Agent,Skill'))
 
     def test_config_dir_is_reused_and_state_overrides_come_from_the_flag(self):
         self.launch()

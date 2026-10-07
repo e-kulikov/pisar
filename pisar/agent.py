@@ -20,7 +20,7 @@ MCP_CONFIG = '.mcp.json'
 
 # Variadic option lists must each be followed by another option, never by an
 # argument meant for the agent.
-CLAUDE_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash'
+CLAUDE_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,Agent,Skill'
 # Only read-only git, staging, commit, rename of tracked files, and the pisar
 # subcommands. No bare `git *`/`pisar *` (git aliases and `-c` run arbitrary
 # code; `pisar --ruwana BIN` runs any binary) and no `mv`.
@@ -36,8 +36,16 @@ CLAUDE_ALLOWED = (
     'Bash(pisar lesson start *)', 'Bash(pisar lesson check *)',
     'Bash(pisar lesson review *)', 'Bash(pisar lesson show *)',
     'Bash(pisar lesson discard *)',
+    # The mandatory lesson review and the plugin's own skills.
+    'Agent(pisar:lesson-reviewer)', 'Skill(pisar:pisar)', 'Skill(pisar:lessons)',
+    'Skill(pisar:research)',
 )
-CLAUDE_DENIED = ('Bash(git push*)', 'Edit(.git/**)')
+# Deny rules win over allow rules. The Agent tool cannot be limited to one subagent
+# by an allowlist, so every built-in subagent type (which also covers a call without
+# subagent_type, the general-purpose default) is denied by name.
+CLAUDE_DENIED = ('Bash(git push*)', 'Edit(.git/**)',
+                 'Agent(Explore)', 'Agent(general-purpose)', 'Agent(Plan)', 'Agent(claude)',
+                 'Agent(statusline-setup)', 'Agent(claude-code-guide)')
 # `ask` overrides `allow`, so accepting a lesson stays a user decision.
 CLAUDE_ASK = ('Bash(pisar lesson accept *)',)
 
