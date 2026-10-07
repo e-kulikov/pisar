@@ -182,6 +182,37 @@ class DomainTests(SpaceCommandFixture):
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertTrue((self.root / 'acme/stray.md').exists())
 
+    def clone_only_add(self):
+        """`domain add --repo` that crashed right after `git submodule add`: nothing recorded yet."""
+        args = self.half_done_add()
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('domain-add-*.json'):
+            data = json.loads(journal.read_text())
+            for key in ('children', 'gitmodules', 'planned', 'expected'):
+                data.pop(key, None)
+            journal.write_text(json.dumps(data))
+        return args
+
+    def test_resume_without_a_recorded_baseline_refuses_an_edited_gitmodules(self):
+        args = self.clone_only_add()
+        modules = self.root / '.gitmodules'
+        modules.write_text(modules.read_text() + '[submodule "other"]\n\tpath = other\n\turl = ../other\n')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli(*args, ok=False)
+        self.assertIn('baseline', failed.stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_resume_without_a_recorded_baseline_refuses_unrelated_child_commits(self):
+        args = self.clone_only_add()
+        acme = self.root / 'acme'
+        git(acme, 'config', 'user.email', 'synthetic@example.invalid')
+        git(acme, 'config', 'user.name', 'Synthetic fixture')
+        (acme / 'stray.md').write_text('unrelated\n')
+        git(acme, 'add', 'stray.md')
+        git(acme, 'commit', '-qm', 'unrelated work')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.assertIn('baseline', self.cli(*args, ok=False).stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
     def test_add_repo_resumes_a_registered_submodule_without_a_marker(self):
         bare = self.origin()
         git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(bare), 'acme')

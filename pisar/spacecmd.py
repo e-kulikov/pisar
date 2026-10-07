@@ -316,12 +316,20 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
         touched = [ident, '.gitmodules'] if location else [ident]
 
         def apply(journal):
+            if location and resumed and 'children' not in journal and _registered(wiki, ident):
+                raise WikiError(f'the interrupted clone of {ident} has no recorded baseline, so its current '
+                                'contents cannot be trusted; inspect it, then remove the submodule '
+                                f'(git rm -f {ident}) and retry')
             if location and not _registered(wiki, ident):
                 options = ['-c', 'protocol.file.allow=always'] if location[1] else []
                 had_modules = bool(gitops.run(root, 'ls-files', '--', '.gitmodules').strip())
                 storage = _module_storage(root, ident)
                 ours = not storage.exists()  # Only storage this very clone creates may be removed.
                 gitops.run(root, *options, 'submodule', 'add', '-q', '--', location[0], ident)
+                # Persist the baseline at once: the smaller this window, the less a retry must refuse.
+                journal['gitmodules'] = _hash(root / '.gitmodules')
+                journal['children'] = [dict(path=ident, base=gitops.run(base, 'rev-parse', 'HEAD').strip())]
+                runtime.store(journal)
                 try:
                     if (base / '.domain.toml').exists() or (base / '.domain.toml').is_symlink():
                         _check_marker(base, ident, title)
