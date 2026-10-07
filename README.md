@@ -617,9 +617,49 @@ meeting, so reconcile their source context deliberately in ruwana. External
 journals remain historical records. Rollback is not replay of a completed plan;
 Git is not a backup of submodules or external inbox originals.
 
+## Guard: report possibly sensitive text
+
+```sh
+pisar guard check --file /abs/draft.md --from acme --to personal
+pisar guard check --text 'How do others size a launch team?' --outbound
+```
+
+`guard check` scans a UTF-8 file or a text and prints
+`{"findings": [{id, tier, category, line, excerpt, hint}], "limits": "..."}`.
+It exits 0 whenever the scan ran: findings are information, not errors. Unknown
+domains, unreadable input and malformed `.domain.toml` files exit 1. Pass text
+that starts with a dash as `--text=VALUE`. Lesson operations and outbound
+research queries use the guard; capture, save and other writes never call it.
+
+| Tier | Categories |
+| --- | --- |
+| `severe` | `private-key` (PEM blocks), `api-token` (cloud/API token patterns), `jwt`, `credential` (`password`/`secret`/`token`/`api_key` `=` or `:` value), `email`, `phone`, `code-block` (fenced code: possible code or architecture) |
+| `ask` | `quote` (blockquotes, quoted strings of 30+ characters and 4+ words), `meeting` (line-leading timestamps, `Speaker:` lines), `url`, `hostname`, `ip` |
+| `warn` | `term` (terms of the source domain), `date` (dates and times with day or finer precision) |
+
+Amounts and metrics are not reported. Terms are the domain `id` and `title`,
+`[sensitive] aliases` and `terms` from `.domain.toml`, and the `.wiki.toml` ids
+and README H1 titles of the spaces under the domain. They match
+case-insensitively on word boundaries, ignoring terms shorter than three
+characters. Only the `--from` domain is used; `--outbound` (research queries
+leaving the machine) uses every domain. `--to` names the destination domain
+and must exist.
+
+A finding `id` is the first 10 hex digits of
+`sha256(category|normalized-match|occurrence)`, where the normalized match is the
+matched text case-folded with whitespace collapsed and the occurrence counts equal
+matches from the top. It stays the same across runs and across edits elsewhere in
+the text. The `excerpt` is the first line of the match, at most 80 characters.
+
+The guard is deterministic, lexical and **best effort**. It misses paraphrases,
+misspellings, inflected or unlisted names, images and encoded content, and it can
+flag harmless text. It only reports; it never edits, strips or redacts anything,
+and the input file is only read. Decide on each finding with the user.
+
 ## Limitations
 
 - Search is lexical only; there is no semantic index or ranking.
+- The guard is a best-effort lexical scan, not a confidentiality guarantee.
 - Agent-written meeting narratives are checked for metadata and references, not
   for semantic accuracy.
 - There is no scheduled runner, migration command, or atomicity across
