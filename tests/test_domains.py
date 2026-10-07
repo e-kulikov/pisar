@@ -155,3 +155,57 @@ class AddressTests(Fixture):
         meta = self.data('read', 'wiki:acme/alpha:acme-capture')['metadata']
         self.assertEqual(meta['space_ids'], ['acme/alpha'])
         self.assertTrue(list(self.state.rglob('operations/capture-acme-alpha-acme-capture.json')))
+
+
+class SelectionTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.acme = space(self.root, 'acme/10-projects/rocket', 'rocket')
+        (self.acme / 'call.md').write_text(document(owner='acme/rocket', body='Acme launch notes.'))
+        commit_all(self.root)
+
+    def addresses(self, *args):
+        return sorted(s['address'] for s in self.data('spaces', *args)['spaces'])
+
+    def test_neither_flag_selects_all_domains(self):
+        self.assertEqual(self.addresses(), ['acme/rocket', 'personal/home', 'work/alpha', 'work/beta'])
+
+    def test_include_and_exclude_are_comma_separated_and_repeatable(self):
+        self.assertEqual(self.addresses('--include', 'personal'), ['personal/home'])
+        self.assertEqual(self.addresses('--include', 'personal,acme'), ['acme/rocket', 'personal/home'])
+        self.assertEqual(self.addresses('--include', 'personal', '--include', 'acme'),
+                         ['acme/rocket', 'personal/home'])
+        self.assertEqual(self.addresses('--exclude', 'work,personal'), ['acme/rocket'])
+        self.assertEqual(self.addresses('--exclude', 'work', '--exclude', 'acme'), ['personal/home'])
+        self.assertEqual(self.addresses('--include', 'work,acme', '--exclude', 'acme'), ['work/alpha', 'work/beta'])
+
+    def test_unknown_domain_is_an_error(self):
+        for flag in ('--include', '--exclude'):
+            for command in (('spaces',), ('check',), ('inventory',), ('search', 'launch'),
+                            ('read', 'wiki:work/alpha:call-one')):
+                with self.subTest(flag=flag, command=command):
+                    self.assertIn('unknown domain: nowhere', self.cli(*command, flag, 'work,nowhere', ok=False).stderr)
+
+    def test_search_inventory_and_read_respect_the_selection(self):
+        refs = lambda result, key: sorted(d['reference'] for d in result[key])
+        self.assertEqual(refs(self.data('search', 'launch', '--include', 'acme'), 'results'),
+                         ['wiki:acme/rocket:call-one'])
+        self.assertEqual(refs(self.data('search', 'launch', '--exclude', 'acme,personal'), 'results'),
+                         ['wiki:work/alpha:call-one'])
+        files = self.data('inventory', '--exclude', 'work,acme')['files']
+        self.assertTrue(files and all(f.startswith('personal/') for f in files), files)
+        self.cli('inventory', '--space', 'work/alpha', '--include', 'acme', ok=False)
+        self.cli('search', 'launch', '--space', 'work/alpha', '--exclude', 'work', ok=False)
+        self.cli('read', 'wiki:personal/home:private-note', '--include', 'work', ok=False)
+        self.cli('read', 'personal/10-projects/home/note.md', '--exclude', 'personal', ok=False)
+        self.assertIn('Private', self.data('read', 'personal/10-projects/home/note.md',
+                                           '--include', 'personal')['content'])
+
+    def test_check_validates_only_selected_domains_documents(self):
+        (self.acme / 'call.md').write_text(document(owner='acme/rocket').replace('schema_version = 1', 'schema_version = 9'))
+        self.assertTrue(self.data('check', '--exclude', 'acme')['ok'])
+        self.cli('check', '--include', 'acme', ok=False)
+        self.cli('check', ok=False)
+
+    def test_scope_flag_is_gone(self):
+        self.assertEqual(self.cli('spaces', '--scope', 'work', ok=False).returncode, 2)

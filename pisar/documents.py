@@ -77,10 +77,10 @@ class Document:
                     metadata=self.meta, sha256=sha256(self.path.read_bytes()))
 
 
-def scan(wiki, scope='all'):
+def scan(wiki, domains=None):
     docs, errors = [], []
     seen = set()
-    for path in wiki.files(scope):
+    for path in wiki.files(domains):
         owner = wiki.owner(path)
         if path.suffix.lower() != '.md' or owner is None:
             continue
@@ -103,12 +103,12 @@ def scan(wiki, scope='all'):
     return docs, errors
 
 
-def resolve(wiki, reference, scope='all'):
+def resolve(wiki, reference, domains=None):
     match = REF.fullmatch(reference)
     if not match:
         raise WikiError('expected wiki:<domain>/<space-id>:<document-id> (a domain/id space address)')
-    owner = wiki.space(match[1], scope)
-    docs, errors = scan(wiki, owner.domain)
+    owner = wiki.space(match[1], domains)
+    docs, errors = scan(wiki, {owner.domain})
     if errors:
         raise WikiError('; '.join(errors))
     matches = [d for d in docs if d.owner == owner and d.meta['id'] == match[2]]
@@ -149,16 +149,14 @@ def check_references(wiki, doc, docs, available=()):
     return errors
 
 
-def check(wiki, scope='all'):
-    docs, errors = scan(wiki, scope)
+def check(wiki, domains=None):
+    docs, errors = scan(wiki, domains)
     errors = [*wiki.errors, *errors]
     # Read other domain only when requested; domain-crossing references remain unresolved errors.
     for doc in docs:
         errors.extend(check_references(wiki, doc, docs))
     import os
-    for domain in wiki.domains.values():
-        if scope not in ('all', domain.id):
-            continue
+    for domain in wiki.selected(domains):
         for parent, dirs, files in os.walk(domain.path, followlinks=False):
             dirs[:] = [d for d in dirs if d not in ('.git', '.ruwana')]
             for name in [*dirs, *files]:

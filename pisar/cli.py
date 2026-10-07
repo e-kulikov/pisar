@@ -40,7 +40,9 @@ def parser():
     commands = p.add_subparsers(dest='command')
     for name in ('spaces', 'search', 'read', 'check', 'inventory'):
         sub = commands.add_parser(name)
-        sub.add_argument('--scope', choices=('all', 'personal', 'work'), default='all')
+        for flag, verb in (('--include', 'Only these domains'), ('--exclude', 'All domains except these')):
+            sub.add_argument(flag, action='append', metavar='DOMAINS',
+                             help=f'{verb}; comma separated, repeatable. --exclude applies after --include')
         if name in ('search', 'inventory'):
             sub.add_argument('--space', help='Owner or related space address (domain/id)')
         if name == 'search':
@@ -102,23 +104,26 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         wiki = Wiki(args.root)
+        domains = None
+        if getattr(args, 'include', None) or getattr(args, 'exclude', None):
+            domains = wiki.select(args.include, args.exclude)
         if args.command == 'check':
-            result = check(wiki, args.scope)
+            result = check(wiki, domains)
         else:
             wiki.require_valid()
             if args.command == 'spaces':
                 result = {'spaces': [s.record(wiki.root) for s in wiki.spaces
-                                     if args.scope in ('all', s.domain)]}
+                                     if domains is None or s.domain in domains]}
             elif args.command == 'search':
-                result = search(wiki, args.query, args.scope, args.space)
+                result = search(wiki, args.query, domains, args.space)
             elif args.command == 'inventory':
-                result = inventory(wiki, args.scope, args.space)
+                result = inventory(wiki, domains, args.space)
             elif args.command == 'read':
                 if args.reference.startswith('wiki:'):
-                    doc = resolve(wiki, args.reference, args.scope)
+                    doc = resolve(wiki, args.reference, domains)
                     result = {**doc.record(wiki.root), 'content': doc.path.read_text(encoding='utf-8')}
                 else:
-                    path = wiki.path(args.reference, args.scope)
+                    path = wiki.path(args.reference, domains)
                     result = dict(path=path.relative_to(wiki.root).as_posix(),
                                   content=path.read_text(encoding='utf-8'), sha256=sha256(path.read_bytes()))
             elif args.command == 'capture':

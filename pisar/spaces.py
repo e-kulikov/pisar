@@ -155,7 +155,20 @@ class Wiki:
         if self.errors:
             raise WikiError('; '.join(self.errors))
 
-    def space(self, value, scope='all'):
+    def select(self, include=None, exclude=None):
+        """Domain ids chosen by comma-separated, repeatable --include/--exclude.
+
+        Neither means all domains; exclude applies after include."""
+        def ids(values):
+            chosen = [part.strip() for value in values for part in value.split(',')]
+            for ident in chosen:
+                if ident not in self.domains:
+                    raise WikiError(f'unknown domain: {ident}')
+            return set(chosen)
+        selected = ids(include) if include else set(self.domains)
+        return frozenset(selected - ids(exclude or ()))
+
+    def space(self, value, domains=None):
         """Resolve a `domain/id` address; ids are unique within their domain."""
         self.require_valid()
         address(value)
@@ -163,24 +176,26 @@ class Wiki:
         if len(matches) != 1:
             raise WikiError(f'unknown space: {value}')
         s = matches[0]
-        if scope != 'all' and s.domain != scope:
-            raise WikiError(f'scope violation: {value}')
+        if domains is not None and s.domain not in domains:
+            raise WikiError(f'space {value} is outside the selected domains')
         return s
 
     def owner(self, path):
         matches = [s for s in self.spaces if path.is_relative_to(s.path)]
         return max(matches, key=lambda s: len(s.path.parts)) if matches else None
 
-    def files(self, scope='all'):
-        for domain in self.domains.values():
-            if scope in ('all', domain.id):
-                yield from walk_files(domain.path)
+    def selected(self, domains=None):
+        return [d for d in self.domains.values() if domains is None or d.id in domains]
 
-    def path(self, relative, scope='all'):
+    def files(self, domains=None):
+        for domain in self.selected(domains):
+            yield from walk_files(domain.path)
+
+    def path(self, relative, domains=None):
         path = safe_path(self.root, relative)
         parts = Path(relative).parts
-        if parts[0] not in self.domains or (scope != 'all' and parts[0] != scope):
-            raise WikiError('path outside requested domains')
+        if parts[0] not in self.domains or (domains is not None and parts[0] not in domains):
+            raise WikiError('path outside the selected domains')
         if not self.owner(path):
             raise WikiError('path is not in a discovered space')
         return path

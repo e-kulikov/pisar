@@ -9,31 +9,31 @@ class ReadTests(Fixture):
 
     def test_discovery_includes_plain_and_local_submodule_spaces(self):
         module = self.add_submodule()
-        found = self.data('spaces', '--scope', 'work')['spaces']
+        found = self.data('spaces', '--include', 'work')['spaces']
         self.assertEqual({s['id'] for s in found}, {'alpha', 'beta', 'module'})
         self.assertEqual(next(s['path'] for s in found if s['id'] == 'module'), 'work/module')
         self.assertEqual(git(module, 'status', '--porcelain'), '')
 
-    def test_scoped_lexical_search_and_related_inventory(self):
-        result = self.data('search', 'русский', '--scope', 'work', '--space', 'work/beta')
+    def test_selected_lexical_search_and_related_inventory(self):
+        result = self.data('search', 'русский', '--include', 'work', '--space', 'work/beta')
         self.assertEqual(result['backend'], 'lexical')
         self.assertEqual([r['reference'] for r in result['results']], ['wiki:work/alpha:call-one'])
-        inventory = self.data('inventory', '--space', 'work/beta', '--scope', 'work')
+        inventory = self.data('inventory', '--space', 'work/beta', '--include', 'work')
         self.assertEqual([d['reference'] for d in inventory['documents']], ['wiki:work/alpha:call-one'])
-        self.assertEqual(self.data('search', 'Private', '--scope', 'work')['results'], [])
+        self.assertEqual(self.data('search', 'Private', '--include', 'work')['results'], [])
 
     def test_read_rereads_actual_file_and_survives_move(self):
-        self.cli('read', 'wiki:work/alpha:call-one', '--scope', 'work')
+        self.cli('read', 'wiki:work/alpha:call-one', '--include', 'work')
         (self.alpha / 'call.md').write_text(document(body='New current evidence.'))
         target = self.root / 'work/40-archives/renamed'
         target.parent.mkdir(parents=True)
         shutil.move(str(self.alpha), target)
-        read = self.data('read', 'wiki:work/alpha:call-one', '--scope', 'work')
+        read = self.data('read', 'wiki:work/alpha:call-one', '--include', 'work')
         self.assertIn('New current evidence.', read['content'])
         self.assertEqual(read['path'], 'work/40-archives/renamed/call.md')
 
-    def test_read_rejects_scope_violation_and_traversal(self):
-        self.cli('read', 'wiki:personal/home:private-note', '--scope', 'work', ok=False)
+    def test_read_rejects_unselected_domain_and_traversal(self):
+        self.cli('read', 'wiki:personal/home:private-note', '--include', 'work', ok=False)
         for path in ('../transcript.txt', '/etc/passwd', 'work/../personal/10-projects/home/note.md'):
             with self.subTest(path=path):
                 self.cli('read', path, ok=False)
@@ -94,7 +94,7 @@ class ReadTests(Fixture):
         outside = self.external('Private escaped evidence')
         (self.alpha / 'escape.md').symlink_to(outside)
         self.cli('read', 'work/team/alpha/escape.md', ok=False)
-        self.assertNotIn('Private escaped evidence', self.cli('search', 'Private', '--scope', 'work').stdout)
+        self.assertNotIn('Private escaped evidence', self.cli('search', 'Private', '--include', 'work').stdout)
         self.cli('check', ok=False)
 
     def test_roots_are_not_mixed_and_deleted_space_is_not_cached(self):
