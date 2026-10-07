@@ -119,6 +119,9 @@ def command(executable, model, effort):
     """The question itself goes on stdin, so it can never be read as an option."""
     return [executable, '-p', '--output-format', 'json', '--json-schema', json.dumps(SCHEMA),
             *(['--model', model] if model else []), *(['--effort', effort] if effort else []),
+            # Hooks, installed plugins, skills, CLAUDE.md and memory of the shared configuration
+            # directory must not run or load (verified: authentication still works).
+            '--safe-mode',
             '--system-prompt', PROMPT, f'--tools={",".join(TOOLS)}',
             '--allowedTools', *TOOLS, '--strict-mcp-config', '--no-session-persistence']
 

@@ -4,6 +4,9 @@ from pathlib import Path
 import stat
 import sys
 import unittest
+from unittest import mock
+
+from pisar import research
 
 from .support import Fixture
 
@@ -16,6 +19,27 @@ call = {"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ), "stdi
 with open(os.environ["FAKE_CLAUDE_OUT"], "w") as stream:
     json.dump(call, stream)
 RESULT = json.loads(os.environ.get("FAKE_CLAUDE_RESULT", "null"))
+# Like the real claude (verified live), hooks of the configuration directory
+# run at session start unless --safe-mode disables all customisations.
+settings = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", ""), "settings.json")
+if "--safe-mode" not in sys.argv and os.path.isfile(settings):
+    import subprocess
+    with open(settings) as stream:
+        for group in json.load(stream).get("hooks", {}).get("SessionStart", []):
+            for hook in group["hooks"]:
+                subprocess.run(hook["command"], shell=True)
+if mode == "sleep":
+    import time
+    time.sleep(60)
+if mode == "huge":
+    sys.stdout.write("x" * (3 * 1024 * 1024))
+    sys.exit(0)
+if mode == "noisy":
+    sys.stderr.write("e" * (1024 * 1024))
+    sys.exit(4)
+if mode == "iserror":
+    print(json.dumps({"type": "result", "is_error": True, "result": "SECRET-RAW-RESPONSE"}))
+    sys.exit(0)
 if mode == "exit":
     sys.stderr.write("boom: not logged in\\n")
     sys.exit(3)
@@ -312,6 +336,41 @@ class ResearchTests(Fixture):
         call = self.call()
         self.assertEqual(call['stdin'], '--model evil how do teams plan?')
         self.assertNotIn('evil', call['argv'])
+
+    # --- review fixes -------------------------------------------------------
+
+    def diagnostics(self, kind):
+        name = {'stdout': '*.raw.txt', 'stderr': '*.stderr.txt'}[kind]
+        found = list((self.state / 'research').glob(name))
+        self.assertEqual(len(found), 1, found)
+        self.assertEqual(stat.S_IMODE(found[0].stat().st_mode), 0o600)
+        return found[0]
+
+    def in_process(self, **patches):
+        """research.run in this process with the fake claude on PATH (for patched limits)."""
+        self.enterContext(mock.patch.dict(os.environ, {**self.fake_env, 'FAKE_CLAUDE_MODE': 'ok'}, clear=True))
+        for name, value in patches.items():
+            self.enterContext(mock.patch.object(research, name, value))
+        return lambda **kw: research.run(self.root, self.state, QUESTION, **kw)
+
+    def test_hooks_and_customisations_of_the_shared_config_do_not_run(self):
+        config = self.state / 'agents' / 'claude'
+        config.mkdir(parents=True)
+        marker = self.base / 'hook-ran'
+        (config / 'settings.json').write_text(json.dumps({'hooks': {'SessionStart': [
+            {'hooks': [{'type': 'command', 'command': f'touch {marker}'}]}]}}))
+        self.research(QUESTION)
+        self.assertIn('--safe-mode', self.call()['argv'])
+        self.assertFalse(marker.exists(), 'a SessionStart hook of the shared config ran')
+
+    PRIVATE = {'GITHUB_TOKEN': 'x1', 'AWS_SECRET_ACCESS_KEY': 'x2', 'MY_PASSWORD': 'x3', 'SSH_AUTH_SOCK': '/s',
+               'OPENAI_API_KEY': 'x4', 'XDG_DATA_HOME_SECRET': 'x5', 'PISAR_ROOT': '/r', 'WIKI_ROOT': '/w'}
+    PASSED = {'HTTP_PROXY': 'p1', 'HTTPS_PROXY': 'p2', 'NO_PROXY': 'p3', 'http_proxy': 'p4',
+              'https_proxy': 'p5', 'no_proxy': 'p6', 'SSL_CERT_FILE': 'c1', 'SSL_CERT_DIR': 'c2',
+              'NODE_EXTRA_CA_CERTS': 'c3', 'REQUESTS_CA_BUNDLE': 'c4', 'CURL_CA_BUNDLE': 'c5',
+              'ANTHROPIC_API_KEY': 'a1', 'ANTHROPIC_BASE_URL': 'a2', 'CLAUDE_CODE_USE_BEDROCK': '1',
+              'LANG': 'en_US.UTF-8', 'LC_ALL': 'C.UTF-8', 'LC_TIME': 'C', 'TERM': 'xterm',
+              'HOME': '/home/someone', 'USER': 'someone', 'LOGNAME': 'someone'}
 
 
 if __name__ == '__main__':
