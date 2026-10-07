@@ -99,7 +99,7 @@ _PATTERNS = (
         r'(?<![\w:.+])(?:\d{1,2}:\d{2}(?::\d{2})?(?:[ \t]?(?i:[ap]\.?m\.?))?|\d{1,2}[ \t]?(?i:[ap]\.?m\.?))'
         r'(?![\w:]|\.\d)')),
     ('hostname', re.compile(
-        r'(?<![\w@/.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[a-z]{2,24}(?![\w(-]|\.[A-Za-z0-9])')),
+        r'(?<![\w@/.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}(?![\w(@-]|\.[A-Za-z0-9])')),
 )
 
 # Generic labels that look like `Speaker:` lines in ordinary notes.
@@ -137,7 +137,7 @@ def _valid(category, match):
         except ValueError:
             return False
     if category == 'hostname':
-        return text.rsplit('.', 1)[1] not in _EXTENSIONS
+        return text.rsplit('.', 1)[1].casefold() not in _EXTENSIONS
     if category == 'date':
         numbers = re.match(r'(\d{1,2}):(\d{2})', text)
         if numbers:
