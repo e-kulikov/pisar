@@ -1,7 +1,8 @@
 # pisar
 
-pisar is an offline command-line tool for a file-authoritative personal/work
-knowledge repository kept in Git. It discovers spaces, validates and searches
+pisar is an offline command-line tool for a file-authoritative knowledge
+repository kept in Git and split into domains (for example personal and one per
+employer or client). It discovers domains and spaces, validates and searches
 Markdown documents with TOML front matter, captures sources without changing
 their bytes, applies externally prepared meeting plans, and routes a global inbox
 only after explicit acceptance. No network, model, daemon, index service or cloud
@@ -160,14 +161,15 @@ command output is JSON. Errors go to stderr prefixed with `pisar:` and exit 1
 ```sh
 pisar spaces
 pisar --root /absolute/knowledge check
-PISAR_ROOT=/absolute/knowledge pisar inventory --scope work
+PISAR_ROOT=/absolute/knowledge pisar inventory --include work
 ```
 
 ### Data formats
 
 The knowledge formats are independent of the executable's name and remain
-stable: space descriptors are named `.wiki.toml`, stable document references are
-`wiki:SPACE:DOCUMENT`, and every commit pisar makes has the subject
+stable: domain markers are named `.domain.toml`, space descriptors `.wiki.toml`,
+stable document references are `wiki:DOMAIN/SPACE:DOCUMENT`, and every commit
+pisar makes has the subject
 `wiki: OPERATION-ID`. Retries recognize their own commits by that subject and the
 rollback procedure below selects commits with it.
 
@@ -209,26 +211,76 @@ is not a sandbox: it can still read and edit files in the repository.
 ## Read, discover, and validate
 
 ```sh
-pisar spaces --scope personal
-pisar search 'релиз' --scope work --space alpha
-pisar read wiki:alpha:launch-call --scope work
-pisar read work/team/alpha/sources/meetings/launch-call/transcript.md --scope work
-pisar inventory --scope work --space alpha
-pisar check --scope all
+pisar spaces --include personal
+pisar search 'релиз' --include work --space work/alpha
+pisar read wiki:work/alpha:launch-call
+pisar read work/team/alpha/sources/meetings/launch-call/transcript.md --include work
+pisar inventory --exclude personal --space work/alpha
+pisar check
 ```
 
-The IDs and paths above are synthetic examples. Discover your actual IDs with
-`spaces`. Every read command supports `--scope personal|work|all` (default `all`).
-`search` and `inventory` support optional `--space ID`. Related meetings appear
-for each related project but retain their owner's single canonical reference.
+The IDs and paths above are synthetic examples. Discover your actual addresses
+with `spaces`. Every read command (`spaces`, `check`, `inventory`, `search`,
+`read`) selects domains with `--include a,b` (only these) and `--exclude x,y`
+(all except these). Both are comma separated and repeatable; neither means all
+domains; `--exclude` applies after `--include`; an unknown domain id is an error.
+`search` and `inventory` support optional `--space DOMAIN/ID`. Related meetings
+appear for each related space but retain their owner's single canonical reference.
 
-Discovery traverses `personal/` and `work/`, including initialized local Git
-submodules, and finds `.wiki.toml` files. It requires `schema_version = 1`, a
-unique stable `id`, `kind = "project"|"area"|"resource"`, and
-`status = "active"|"archived"`. IDs use `[a-z0-9][a-z0-9-]*`. The nearest enclosing
-space owns a document. A stable `wiki:SPACE:DOCUMENT` reference resolves by current
-metadata after moving a space; duplicate IDs cause errors rather than arbitrary
-selection. Document IDs are unique **within their owner**.
+### Domains
+
+A **domain** is a top-level directory of the root that contains a regular file
+`.domain.toml`. Top-level directories without it (docs, schemas, templates, ...)
+are not domains and are not searched. A domain may be an ordinary directory or an
+initialized Git submodule. The marker:
+
+```toml
+schema_version = 1
+id = "acme"                 # [a-z0-9][a-z0-9-]*, equals the directory name
+title = "Acme Corp"
+[layout]                    # optional; kind -> folder inside the domain, defaults shown
+project = "10-projects"
+area = "20-areas"
+resource = "30-resources"
+archive = "40-archives"
+inbox = "inbox"
+[ids]
+min_segments = 1            # optional; space ids need >= N dash-separated segments
+[sensitive]
+aliases = []                # optional; other names of the company
+terms = []                  # optional; extra sensitive terms
+```
+
+Unknown keys, a wrong type, an `id` different from the directory name, layout
+folders that escape the domain or coincide, and symlinked markers or domain
+directories are errors reported with the marker's path. `[layout]` and `[ids]`
+describe where new spaces belong and how they are named; discovery itself finds
+spaces anywhere inside the domain. `personal` is an ordinary domain.
+
+A root made for pisar 0.3 or earlier has no domains until `personal/` and `work/`
+each get a `.domain.toml` (ids `personal` and `work`); then rewrite front-matter
+`space_ids` and `wiki:` references as addresses. `pisar check` lists what is left.
+
+The domain is the confidentiality boundary. Related spaces, document and source
+references, and in-root sources copied into a space must stay within one domain;
+pisar refuses anything that crosses it.
+
+### Spaces, addresses, and references
+
+Discovery walks every domain, including initialized local Git submodules, and
+finds `.wiki.toml` files. It requires `schema_version = 1`, a stable `id`,
+`kind = "project"|"area"|"resource"`, and `status = "active"|"archived"`. IDs use
+`[a-z0-9][a-z0-9-]*` and are unique **within their domain**, archived spaces
+included; different domains may reuse an id. A domain directory cannot itself be
+a space. A space's **address** is `DOMAIN/ID` (for example `work/alpha`), and
+every option, plan field, front-matter field, and triage item that names a space
+takes its address. `pisar spaces` reports each space's `domain` and `address`.
+
+The nearest enclosing space owns a document. A stable `wiki:DOMAIN/SPACE:DOCUMENT`
+reference resolves by current metadata after moving a space inside its domain;
+duplicate IDs cause errors rather than arbitrary selection. Document IDs are
+unique **within their owner**. The pre-domain form `wiki:SPACE:DOCUMENT` no longer
+resolves; `check` reports each such legacy reference so it can be rewritten.
 
 Documents use TOML front matter between separate `+++` lines:
 
@@ -238,13 +290,14 @@ schema_version = 1
 id = "launch-call"
 type = "meeting"
 title = "Launch call"
-space_ids = ["alpha", "beta"]
+space_ids = ["work/alpha", "work/beta"]
 sources = ["sources/meetings/launch-call/transcript.md#00:12"]
 occurred_at = "2026-10-04T11:00:00+02:00"
 +++
 ```
 
-`space_ids` begins with the actual owner, then related spaces in the same domain.
+`space_ids` holds addresses: the actual owner first, then related spaces in the
+same domain.
 Supported types: `source`, `meeting`, `overview`, `decision`, `note`, `recipe`,
 `movie`, `series`, `book`. Ordinary personal topic knowledge can use `note`.
 `sources` is an array, possibly empty. Local source paths are relative to the
@@ -271,7 +324,7 @@ Disconnected submodules contribute no unavailable evidence.
 ## Known-space inbox capture
 
 ```sh
-pisar capture --space alpha --id capture-launch --source /external/transcript.txt
+pisar capture --space work/alpha --id capture-launch --source /external/transcript.txt
 ```
 
 Optional `--sha256 HEX` requires an exact original hash. Capture commits:
@@ -282,13 +335,13 @@ Optional `--sha256 HEX` requires an exact original hash. Capture commits:
 
 Full original paths are recorded only in the external capture journal's
 `source_path`, not in new committed descriptors. Existing descriptors are not
-automatically rewritten. If the selected source is inside the knowledge root, its
-`personal/` or `work/` namespace must match the destination; same-domain sources
-and the selected project inbox are supported. External file classification
+automatically rewritten. If the selected source is inside the knowledge root, it
+must be inside the destination's domain; same-domain sources and the selected
+space inbox are supported. External file classification
 remains the agent's responsibility; the CLI does not infer its contents' domain.
 
-The descriptor is the pending project ingestion queue; inspect it through
-`inventory --space alpha` or `read wiki:alpha:capture-launch`. Capture does not
+The descriptor is the pending space ingestion queue; inspect it through
+`inventory --space work/alpha` or `read wiki:work/alpha:capture-launch`. Capture does not
 perform semantic processing and does not remove external originals.
 
 A source manually dropped as an **untracked regular file in the target space's
@@ -297,7 +350,8 @@ selected source along with its immutable copy and descriptor. Every other
 untracked, modified, or staged path still blocks the write. Staged/modified
 tracked sources are not silently adopted. Finish or preserve that work first.
 
-Rerunning the same space/id/source/hash uses the external operation journal and
+Rerunning the same space/id/source/hash uses the external operation journal
+(`capture-DOMAIN-SPACE-ID`) and
 does not create another commit. Reusing an operation ID with changed inputs is
 a conflict. Repeating capture after successful ingest retains the descriptor's
 processed status. Capture IDs and meeting document IDs must be distinct.
@@ -312,7 +366,7 @@ infer task agreement, invent assignees, or invent dates. Plans use this contract
 {
   "schema_version": 1,
   "operation_id": "ingest-launch-one",
-  "space_id": "alpha",
+  "space_id": "work/alpha",
   "capture_id": "capture-launch",
   "source": {
     "path": "/absolute/knowledge/work/team/alpha/sources/captures/capture-launch/original",
@@ -321,12 +375,12 @@ infer task agreement, invent assignees, or invent dates. Plans use this contract
   "meeting": {
     "id": "launch-call",
     "title": "Launch call",
-    "related_space_ids": ["beta"],
+    "related_space_ids": ["work/beta"],
     "body": "# Launch call\n\n## Context\nDate/time and participants unknown. Source is linked in metadata.\n\n## Summary\nAgreed to prepare a launch draft.\n\n## Timeline and themes\nRecord the discussion and evidence here.\n\n## Decisions\nPrepare the draft.\n\n## Proposals\nBroader release remains a proposal.\n\n## Tasks at the meeting\nPrepare draft; owner and due unknown.\n\n## Open questions\nLaunch scope.\n\n## Contradictions\nNone recorded.\n\n## Completeness and limitations\nDescribe missing or uncertain evidence.\n"
   },
   "tasks": [
-    {"id": "prepare-launch", "space_id": "alpha", "title": "Prepare launch draft", "agreed": true},
-    {"id": "review-launch", "space_id": "beta", "title": "Review launch draft", "agreed": true}
+    {"id": "prepare-launch", "space_id": "work/alpha", "title": "Prepare launch draft", "agreed": true},
+    {"id": "review-launch", "space_id": "work/beta", "title": "Review launch draft", "agreed": true}
   ],
   "pages": []
 }
@@ -343,7 +397,7 @@ descriptor `processed`, adds `processed_by` and `meeting_reference`, and retains
 all original bytes. On ruwana failure it remains pending. For a direct source
 save, omit `capture_id` and use an absolute original file path with its actual
 hash. Sources inside the selected root must be in the destination's domain;
-personal-to-work and work-to-personal source copies are refused before writes.
+copies from one domain into another are refused before writes.
 The JSON plan itself stays external.
 
 Required meeting fields: `id`, `title`, nonempty filled Markdown `body`.
@@ -358,9 +412,10 @@ exactly one `meetings/MEETING.md`. The CLI creates metadata and the source link.
 The initial file commit records task creation as pending; verified task files
 and task references follow in further local commits. It never fabricates IDs.
 
-`tasks` defaults to `[]`. Each task requires a unique stable kebab `id`, project
-`space_id`, nonempty `title`, and explicit `agreed: true`. Targets must be the
-owner or a related project in the same domain. Optional `description` preserves
+`tasks` defaults to `[]`. Each task requires a unique stable kebab `id`, a
+`space_id` address, nonempty `title`, and explicit `agreed: true`. Targets must
+be the owner or a related space in the same domain, of any kind (project, area or
+resource). Optional `description` preserves
 known context; optional `due` is explicit RFC3339 with offset. Omit unknown
 owners/dates. Ruwana has no assignee flag; retain known assignees in the meeting
 and description. Proposals belong in the meeting body, not in agreed tasks.
@@ -397,7 +452,7 @@ never reads `WIKI_ROOT`, and ruwana's interface is used unchanged.
 
 Ruwana runs through `add`, `list --all --format json`, and `show --format json`
 with that explicit `WIKI_ROOT` and a root-relative `--project`. Each task gets both the
-canonical meeting reference and `wiki:OWNER:MEETING#task-TASK-ID` as sources.
+canonical meeting reference and `wiki:DOMAIN/OWNER:MEETING#task-TASK-ID` as sources.
 The task marker distinguishes multiple tasks from one meeting and deduplicates
 even closed tasks. Titles/descriptions/due dates are checked on retry; conflicts
 and duplicate source identities are errors. `.ruwana/*.toml` is written only by
@@ -416,7 +471,7 @@ authorize replay to overwrite the edits.
 
 ```json
 {
-  "space_id": "alpha",
+  "space_id": "work/alpha",
   "path": "overview.md",
   "content": "FULL_MARKDOWN_WITH_VALID_TOML_FRONT_MATTER",
   "base_sha256": "ACTUAL_HASH_OF_EXISTING_PAGE"
@@ -426,7 +481,7 @@ authorize replay to overwrite the edits.
 Paths are relative to that page's selected space. To create a new file, omit
 `base_sha256`; existing destinations then conflict. To update a page, supply its
 exact current hash and retain its stable ID. Sources, inbox originals, meetings,
-and task files cannot be rewritten as derived pages. Metadata, paths, IDs, scope,
+and task files cannot be rewritten as derived pages. Metadata, paths, IDs, domains,
 and references are validated before applying any proposed files. Only reusable
 knowledge explicitly included in `pages` is updated.
 
@@ -442,7 +497,7 @@ Snapshot an external inbox without semantic routing:
 ```sh
 pisar triage prepare --batch morning-one
 pisar triage report --batch morning-one
-pisar triage reroute --batch morning-one --item item-ACTUAL-ID --space alpha
+pisar triage reroute --batch morning-one --item item-ACTUAL-ID --space work/alpha
 pisar triage accept --batch morning-one --item item-ACTUAL-ID
 ```
 
@@ -461,7 +516,7 @@ Alternatively, use an external agent's routing JSON:
       "id": "routed-launch",
       "source": "/external/transcript.txt",
       "sha256": "ACTUAL_64_CHARACTER_SHA256",
-      "space_id": "alpha"
+      "space_id": "work/alpha"
     }
   ]
 }
@@ -471,11 +526,11 @@ Alternatively, use an external agent's routing JSON:
 pisar triage prepare --batch morning-one --plan /external/routing.json
 pisar triage report --batch morning-one
 pisar triage defer --batch morning-one --item routed-launch
-pisar triage reroute --batch morning-one --item routed-launch --space beta
+pisar triage reroute --batch morning-one --item routed-launch --space work/beta
 pisar triage accept --batch morning-one --item routed-launch
 ```
 
-`space_id` can be `null` until explicit reroute. A routing item can include
+`space_id` is a space address and can be `null` until explicit reroute. A routing item can include
 `plan` containing the meeting-plan object above, with matching owner/source/hash
 and no `capture_id`. Prepare snapshots it privately; accept captures the original,
 assigns `capture_id`, and applies the plan. Item ID and meeting ID must differ.
@@ -535,7 +590,7 @@ ruwana is not guaranteed.
 
 A nonblocking local writer lock serializes pisar operations for the selected
 root/runtime. Use one root and one runtime configuration for all writers to that
-root, and one writer per project. Direct ruwana/Git/external editors do not
+root, and one writer per space. Direct ruwana/Git/external editors do not
 participate in the lock and ruwana has no compare-and-swap. Do not change those
 files during an incomplete operation. Unexpected HEAD/file changes cause
 conflicts. Retry can recognize its own Git commit made before a missing journal
