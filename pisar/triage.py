@@ -1,7 +1,7 @@
 """External-only proposal snapshots; explicit per-item routing and acceptance."""
 import json
 from pathlib import Path
-from .operations import (Runtime, atomic_bytes, capture, fingerprint, outside_git,
+from .operations import (JOURNAL_FORMAT, Runtime, legacy_error, atomic_bytes, capture, fingerprint, outside_git,
                          read_plan, save, source_bytes, validate_plan, verify_capture, write_json)
 from .safety import WikiError, concrete_id, safe_path, sha256
 
@@ -19,6 +19,8 @@ def load(runtime, batch):
     if not path.is_file():
         raise WikiError(f'unknown triage batch: {batch}')
     manifest = json.loads(path.read_text(encoding='utf-8'))
+    if manifest.get('format') != JOURNAL_FORMAT:
+        raise legacy_error(f'triage batch {batch}', path)
     if manifest.get('root') != str(runtime.root) or manifest.get('batch_id') != batch:
         raise WikiError('triage root namespace/batch mismatch')
     return directory, manifest
@@ -109,7 +111,7 @@ def prepare(wiki, directory, batch, plan_path=None, inbox=None):
             entries.append(entry)
             snapshots[ident] = data
             drafts[ident] = draft_bytes
-        manifest = dict(schema_version=1, root=str(wiki.root), batch_id=batch,
+        manifest = dict(schema_version=1, format=JOURNAL_FORMAT, root=str(wiki.root), batch_id=batch,
                         fingerprint=fp, status='preparing', items=entries)
         if not dest.exists():
             dest.mkdir(parents=True, mode=0o700)

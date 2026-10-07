@@ -286,6 +286,19 @@ A root made for pisar 0.3 or earlier has no domains until `personal/` and `work/
 each get a `.domain.toml` (ids `personal` and `work`); then rewrite front-matter
 `space_ids` and `wiki:` references as addresses. `pisar check` lists what is left.
 
+**Upgrade order.** Pending operations of pisar 0.3 use plain space ids, so first
+complete or abandon every pending `save`, `capture` and `triage` batch with 0.3,
+and only then migrate. Journals and triage manifests carry a format marker. When
+this pisar meets one without it (an old `save` plan id, an old capture of the same
+space and id, an old triage batch) it never resumes or reinterprets it: it stops
+with a diagnostic naming the state file and writes nothing. To abandon such an
+operation explicitly, move that state file out of the state directory, then
+review `git status` and `pisar check` for files it already wrote, commit or
+discard them yourself, and start the work again with addresses. Limitation: the
+history of old completed operations is not carried over; retrying an old
+completed capture is reported with the same diagnostic (or, once its state file
+was moved away, as a duplicate document id).
+
 The domain is the confidentiality boundary. Related spaces, document and source
 references, and in-root sources copied into a space must stay within one domain;
 pisar refuses anything that crosses it.

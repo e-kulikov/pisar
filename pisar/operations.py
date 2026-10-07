@@ -13,6 +13,19 @@ from .documents import DATE, check_references, metadata, scan, validate_meta
 from .safety import WikiError, concrete_id, safe_path, sha256
 
 
+# Operation journals written since space addresses (domain/id) carry this marker; those without it were
+# started by pisar <= 0.3 with plain space ids and are never resumed or reinterpreted.
+JOURNAL_FORMAT = 2
+
+
+def legacy_error(what, path):
+    return WikiError(
+        f'{what} was started by pisar <= 0.3 with plain space ids (state file {path}); this pisar does not '
+        'resume or reinterpret it. Finish it with pisar 0.3 BEFORE upgrading, or abandon it explicitly: move '
+        'that state file out of the state directory, then check the repository (git status, pisar check) for '
+        'files it already wrote and commit or discard them yourself, and start the work again with addresses')
+
+
 _HELD_LOCKS = ContextVar('pisar_writer_locks', default=())
 
 
@@ -198,7 +211,7 @@ def validate_artifacts(wiki, journal):
 def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), extra=None):
     for item in artifacts:
         item['temp'] = f'.pisar-{ident}-{item["after"][:16]}.tmp'  # Ownership of an interrupted write.
-    journal = dict(schema_version=1, root=str(wiki.root), operation_id=ident,
+    journal = dict(schema_version=1, format=JOURNAL_FORMAT, root=str(wiki.root), operation_id=ident,
                    fingerprint=fingerprint(payload), status='incomplete',
                    artifacts=artifacts, commits=[], tasks={}, heads={})
     repos, _ = groups(wiki, artifacts)
@@ -216,7 +229,19 @@ def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), 
     return journal
 
 
+def reject_legacy(runtime, ident, owned_by=None):
+    """Raise the legacy diagnostic when IDENT names a journal of pisar <= 0.3.
+
+    OWNED_BY, a root-relative folder, restricts the match to journals that wrote files inside it."""
+    journal = runtime.load(ident)
+    if journal is None or journal.get('format') == JOURNAL_FORMAT:
+        return
+    if owned_by is None or any(a['path'].startswith(owned_by + '/') for a in journal.get('artifacts', [])):
+        raise legacy_error(f'operation {ident}', runtime.journal_path(ident))
+
+
 def existing(runtime, ident, payload):
+    reject_legacy(runtime, ident)
     journal = runtime.load(ident)
     if journal and journal['fingerprint'] != fingerprint(payload):
         raise WikiError('operation id reused with changed inputs; conflict')
@@ -348,6 +373,8 @@ def capture(wiki, directory, space_address, ident, source, expected=None):
     payload = dict(space=space.address, id=ident, source=str(source), sha256=digest)
     runtime = Runtime(directory, wiki.root)
     with runtime.lock():
+        # 0.3 named captures capture-<space id>-<id>; a retry must not be reported as a duplicate document.
+        reject_legacy(runtime, f'capture-{space.id}-{ident}', space.path.relative_to(wiki.root).as_posix())
         journal = existing(runtime, operation, payload)
         if journal is not None and journal['status'] == 'complete':
             # A subsequent save legitimately updates the queue descriptor to processed.
@@ -538,6 +565,9 @@ def verify_completed_save(wiki, journal, plan, binary, reference):
 def save(wiki, directory, plan_path, binary='ruwana'):
     from .ruwana import Ruwana
     plan = read_plan(plan_path)
+    if isinstance(plan.get('operation_id'), str):
+        # Before validating addresses: an old plan must get the legacy diagnostic, not an address error.
+        reject_legacy(Runtime(directory, wiki.root), plan['operation_id'])
     owner = validate_plan(wiki, plan)
     source, data, digest = source_bytes(plan['source']['path'], plan['source']['sha256'])
     runtime = Runtime(directory, wiki.root)
