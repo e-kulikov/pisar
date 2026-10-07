@@ -165,6 +165,8 @@ class DomainTests(SpaceCommandFixture):
     def test_resumed_submodule_add_refuses_unrelated_commits_in_the_child(self):
         args = self.half_done_add()
         acme = self.root / 'acme'
+        git(acme, 'config', 'user.email', 'synthetic@example.invalid')  # clones carry no identity
+        git(acme, 'config', 'user.name', 'Synthetic fixture')
         (acme / 'stray.md').write_text('unrelated\n')
         git(acme, 'add', 'stray.md')
         git(acme, 'commit', '-qm', 'unrelated work')
