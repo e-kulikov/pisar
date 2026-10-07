@@ -258,6 +258,42 @@ class CreateTests(SpaceCommandFixture):
         self.clean()
         self.assertTrue((path / '.wiki.toml').is_file())
 
+    def interrupt(self, pattern):
+        """Mark the finished operation's journal incomplete, as a crash before the commit leaves it."""
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob(pattern):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+
+    def test_resumed_create_refuses_a_readme_edited_after_the_crash(self):
+        args = ('--domain', 'work', '--kind', 'project', '--title', 'Launch Plan')
+        self.create(*args)
+        git(self.root, 'reset', '-q', '--hard', 'HEAD~1')
+        path = self.root / 'work/10-projects/launch-plan'
+        path.mkdir(parents=True)
+        (path / 'README.md').write_text('# Launch Plan\n\nMy own notes.\n')
+        self.interrupt('space-create-*.json')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli('space', 'create', *args, ok=False)
+        self.assertIn('README.md', failed.stderr)
+        self.assertEqual((path / 'README.md').read_text(), '# Launch Plan\n\nMy own notes.\n')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_resumed_create_refuses_unexpected_files_and_foreign_commits(self):
+        args = ('--domain', 'work', '--kind', 'project', '--title', 'Launch Plan')
+        self.create(*args)
+        git(self.root, 'reset', '-q', '--hard', 'HEAD~1')
+        path = self.root / 'work/10-projects/launch-plan'
+        path.mkdir(parents=True)
+        (path / 'draft.md').write_text('mine\n')
+        self.interrupt('space-create-*.json')
+        self.assertIn('draft.md', self.cli('space', 'create', *args, ok=False).stderr)
+        (path / 'draft.md').unlink()
+        (self.root / 'other.txt').write_text('unrelated commit\n')
+        commit_all(self.root)
+        self.assertIn('HEAD', self.cli('space', 'create', *args, ok=False).stderr)
+        self.assertFalse((path / '.wiki.toml').exists())
+
     def test_create_inside_a_submodule_domain_commits_child_then_parent(self):
         bare = self.origin()
         self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', bare)
@@ -423,6 +459,26 @@ class RelocateTests(SpaceCommandFixture):
         self.assertEqual(commits(self.root), before + 1)
         self.clean()
         self.assertEqual(self.spaces()['work/launch-plan']['kind'], 'area')
+
+    def test_resumed_move_refuses_a_draft_added_after_the_crash(self):
+        self.data('space', 'move', 'work/launch-plan', '--to', 'area')
+        git(self.root, 'reset', '-q', '--hard', 'HEAD~1')
+        (self.root / 'work/20-areas').mkdir(exist_ok=True)
+        git(self.root, 'mv', 'work/10-projects/launch-plan', 'work/20-areas/launch-plan')
+        marker = self.root / 'work/20-areas/launch-plan/.wiki.toml'
+        marker.write_text(marker.read_text().replace('"project"', '"area"'))
+        draft = self.root / 'work/20-areas/launch-plan/draft.md'
+        draft.write_text('my draft\n')
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-move-*.json'):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+        head = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)
+        self.assertIn('draft.md', failed.stderr)
+        self.assertEqual(draft.read_text(), 'my draft\n')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertNotIn('draft.md', git(self.root, 'ls-files'))
 
     def test_move_inside_a_submodule_domain_commits_child_then_parent(self):
         bare = self.origin()

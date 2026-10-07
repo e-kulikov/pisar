@@ -5,6 +5,7 @@ outside Git, commits explicit paths (the owning repository first, then each
 parent gitlink) and is safe to retry with the same inputs."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -121,17 +122,65 @@ def _locked(wiki, state_dir, op, intent, body):
         return body(runtime, None)
 
 
-def _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, extra=None):
-    """Check cleanliness, journal, APPLY(journal) the edits (returns [(repo, sha)]), then commit parent gitlinks."""
+def _hash(path):
+    if path.is_symlink():
+        return sha256(os.readlink(path).encode())
+    return 'directory' if path.is_dir() else sha256(path.read_bytes())
+
+
+def _files(directory):
+    for parent, dirs, names in os.walk(directory, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d != '.git')
+        for name in sorted(names):
+            yield Path(parent) / name
+
+
+def _verify(wiki, op, journal, repos):
+    """A resumed operation continues only on exactly the state it left: same HEADs, same files."""
+    root = wiki.root
+    for repo in repos:
+        recorded = journal.get('heads', {}).get(str(repo))
+        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+        if recorded and head != recorded:
+            parent = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
+            subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
+            if parent != recorded or subject != f'wiki: {op}':
+                raise WikiError(f'Git HEAD of {repo} changed since the interrupted operation {op}')
+    expected = journal.get('expected', {})
+    for rel, allowed in expected.items():
+        path = root / rel
+        if (path.exists() or path.is_symlink()) and _hash(path) not in allowed:
+            raise WikiError(f'{rel} changed since the interrupted operation {op}; resolve it by hand')
+    for directory in journal.get('closed', []):
+        for path in _files(root / directory):
+            rel = path.relative_to(root).as_posix()
+            if rel not in expected:
+                raise WikiError(f'unexpected file {rel} in the space of the interrupted operation {op}')
+    for pair in journal.get('pairs', []):
+        if not any((root / rel).exists() or (root / rel).is_symlink() for rel in pair):
+            raise WikiError(f'{pair[0]} is missing since the interrupted operation {op}')
+
+
+def _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, plan=None):
+    """Verify a resume, check cleanliness, journal, APPLY(journal) the edits (returns [(repo, sha)]),
+    then commit parent gitlinks. PLAN records the intended files (`expected` root-relative path ->
+    allowed hashes, `closed` directories holding nothing else, `pairs`, `allow`) for a later resume."""
     root = wiki.root
     chain = gitops.ancestors(repo, root)
-    own = [(root / t).relative_to(repo).as_posix() for t in touched if (root / t).is_relative_to(repo)]
-    _ensure_clean(repo, own if resumed else ())
+    repos = [repo, *(parent for parent, _, _ in chain)]
+    if resumed:
+        _verify(wiki, op, resumed, repos)
+        known = [*resumed.get('expected', {}), *resumed.get('closed', []), *resumed.get('allow', [])]
+        own = [(root / t).relative_to(repo).as_posix() for t in known if (root / t).is_relative_to(repo)]
+    else:
+        own = []
+    _ensure_clean(repo, own)
     for parent, link, _ in chain:
         _ensure_clean(parent, (link,) if resumed else ())
     journal = resumed or dict(schema_version=1, root=str(root), operation_id=op, fingerprint=fingerprint(intent),
-                              artifacts=[dict(path=t) for t in touched], commits=[], tasks={}, heads={},
-                              **(extra or {}))
+                              artifacts=[dict(path=t) for t in touched], commits=[], tasks={},
+                              heads={str(r): gitops.run(r, 'rev-parse', 'HEAD').strip() for r in repos},
+                              **{**dict(expected={}, closed=[], pairs=[], allow=[]), **(plan or {})})
     journal['status'] = 'incomplete'
     journal.pop('error', None)
     runtime.store(journal)
@@ -272,6 +321,7 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
                             if not folder.exists() or not any(folder.iterdir()):
                                 files[f'{LAYOUT[kind]}/.gitkeep'] = b''
                 journal['planned'] = {rel: sha256(data) for rel, data in files.items()}
+                journal['expected'] = {f'{ident}/{rel}': [digest] for rel, digest in journal['planned'].items()}
                 runtime.store(journal)
             for rel, digest in journal['planned'].items():
                 path = base / rel
@@ -286,7 +336,8 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
                 done.append((root, gitops.commit(root, ['.gitmodules', ident], op)))
             return done
 
-        return finish(True, _flow(wiki, runtime, op, intent, flow_repo, touched, apply, resumed))
+        plan = dict(allow=['.gitmodules', ident] if location else [])
+        return finish(True, _flow(wiki, runtime, op, intent, flow_repo, touched, apply, resumed, plan))
 
     return _locked(wiki, state_dir, op, intent, body)
 
@@ -377,7 +428,9 @@ def space_create(wiki, state_dir, domain_id, kind, title, ident):
                     atomic_bytes(target, text.encode())
             return [(repo, gitops.commit(repo, [(path / n).relative_to(repo).as_posix() for n in files], op))]
 
-        done = _flow(wiki, runtime, op, intent, repo, [relative], apply, resumed)
+        plan = dict(expected={f'{relative}/{n}': [sha256(t.encode())] for n, t in files.items()},
+                    closed=[relative])
+        done = _flow(wiki, runtime, op, intent, repo, [relative], apply, resumed, plan)
         return dict(space=_record(root, addr), changed=True, commits=done)
 
     return _locked(wiki, state_dir, op, intent, body)
@@ -484,9 +537,18 @@ def relocate(wiki, state_dir, action, value, to=None):
             return [(repo, gitops.commit_move(repo, rel(old), rel(new), op))]
 
         touched = sorted({old.relative_to(root).as_posix(), new.relative_to(root).as_posix()})
-        extra = dict(old=old.relative_to(root).as_posix(), new=new.relative_to(root).as_posix(),
-                     space_kind=kind, space_status=status)
-        done = _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, extra=extra)
+        old_rel, new_rel = old.relative_to(root).as_posix(), new.relative_to(root).as_posix()
+        plan = dict(old=old_rel, new=new_rel, space_kind=kind, space_status=status)
+        if not resumed:
+            plan.update(expected={}, closed=sorted({old_rel, new_rel}), pairs=[])
+            for path in _files(old):
+                inner = path.relative_to(old).as_posix()
+                allowed = [_hash(path)]
+                if inner == '.wiki.toml':
+                    allowed.append(sha256(_rewrite(path.read_text(encoding='utf-8'), kind, status).encode()))
+                plan['expected'][f'{old_rel}/{inner}'] = plan['expected'][f'{new_rel}/{inner}'] = allowed
+                plan['pairs'].append([f'{old_rel}/{inner}', f'{new_rel}/{inner}'])
+        done = _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, plan)
         return dict(space=_record(root, value), changed=True, commits=done)
 
     return _locked(wiki, state_dir, op, intent, body)
