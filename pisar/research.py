@@ -8,6 +8,7 @@ from the internet and must never be followed as instructions.
 from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import re
 import secrets
 import shutil
@@ -20,6 +21,7 @@ from .safety import WikiError
 SCHEMA_VERSION = 1
 QUOTE_LIMIT = 300  # characters; longer quotes are cut to this length
 TIMEOUT = 1800     # seconds
+FALLBACKS = ('/tmp',)  # used when TMPDIR is unset or not acceptable
 TOOLS = ('WebSearch', 'WebFetch')
 # The child sees only these variables (plus CLAUDE_CONFIG_DIR, set by pisar): enough to find
 # programs, resolve a home directory, reach the network through a proxy and authenticate.
@@ -147,6 +149,30 @@ def config_dir(base):
     return config
 
 
+def scratch_base(root, state):
+    """A directory for the child's temporary working directory, chosen and checked here.
+
+    TMPDIR is only a candidate: it must be an existing, writable directory outside Git,
+    outside the knowledge root and outside the state directory. Otherwise the fallbacks
+    are tried, and when none is acceptable research refuses.
+    """
+    root, state = Path(root).resolve(), Path(state).resolve()
+    for candidate in (os.environ.get('TMPDIR'), *FALLBACKS):
+        if not candidate or not os.path.isabs(candidate):
+            continue
+        path = Path(candidate).resolve()
+        if not path.is_dir() or not os.access(path, os.W_OK):
+            continue
+        if any(path == inside or path.is_relative_to(inside) for inside in (root, state)):
+            continue
+        try:
+            return outside_git(path)
+        except WikiError:
+            continue
+    raise WikiError('no usable temporary directory: TMPDIR and the fallbacks are missing, '
+                    'inside Git, or inside the knowledge root or state directory')
+
+
 def run(root, state_dir, question, model=None, effort=None, source=None, confirm=False):
     """Research QUESTION; returns the printed result (a stored record or a gate report)."""
     if not isinstance(question, str) or not question.strip():
@@ -171,7 +197,7 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
     now = datetime.now(timezone.utc)
     ident = f'{now:%Y%m%dT%H%M%S}-{secrets.token_hex(4)}'
     env = child_environment(config)
-    with tempfile.TemporaryDirectory(prefix='pisar-research-') as cwd:
+    with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
         try:
             done = subprocess.run(command(executable, model, effort), input=question, text=True,
                                   capture_output=True, cwd=cwd, env=env, timeout=TIMEOUT)

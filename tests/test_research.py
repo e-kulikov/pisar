@@ -393,6 +393,46 @@ class ResearchTests(Fixture):
         self.assertIn(str(self.bin), child['PATH'])
         self.assertEqual(child['CLAUDE_CONFIG_DIR'], str(self.state.resolve() / 'agents' / 'claude'))
 
+    def tmpdir_case(self, tmp, via_environment):
+        tmp.mkdir(exist_ok=True)
+        env = {**self.fake_env, 'TMPDIR': str(tmp)}
+        if via_environment:
+            env.update(PISAR_ROOT=str(self.root), PISAR_STATE_DIR=str(self.state))
+            self.fake()
+            self.run_pisar('research', QUESTION, env=env)
+        else:
+            self.research(QUESTION, env=env)
+        cwd = Path(self.call()['cwd']).resolve()
+        for forbidden in (self.root.resolve(), self.state.resolve()):
+            self.assertFalse(cwd.is_relative_to(forbidden), f'{cwd} inside {forbidden}')
+
+    def test_a_tmpdir_inside_the_root_or_the_state_dir_is_not_trusted(self):
+        for via_environment in (False, True):
+            self.tmpdir_case(self.root / 'tmp', via_environment)
+            self.tmpdir_case(self.state / 'tmp', via_environment)
+            self.tmpdir_case(self.root, via_environment)
+
+    def test_a_tmpdir_inside_a_git_repository_is_not_trusted(self):
+        other = self.base / 'other-repo'
+        (other / 'tmp').mkdir(parents=True)
+        import subprocess
+        subprocess.run(['git', '-C', str(other), 'init', '-q'], check=True)
+        self.research(QUESTION, env={**self.fake_env, 'TMPDIR': str(other / 'tmp')})
+        self.assertFalse(Path(self.call()['cwd']).resolve().is_relative_to(other.resolve()))
+
+    def test_a_valid_tmpdir_is_used(self):
+        tmp = self.base / 'scratch'
+        tmp.mkdir()
+        self.research(QUESTION, env={**self.fake_env, 'TMPDIR': str(tmp)})
+        self.assertTrue(Path(self.call()['cwd']).resolve().is_relative_to(tmp.resolve()))
+
+    def test_without_any_usable_temp_directory_research_refuses(self):
+        run = self.in_process(FALLBACKS=())
+        with mock.patch.dict(os.environ, {'TMPDIR': str(self.root)}):
+            with self.assertRaisesRegex(research.WikiError, 'temporary directory'):
+                run()
+        self.assertFalse(self.out.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
