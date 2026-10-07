@@ -159,6 +159,37 @@ class DomainTests(SpaceCommandFixture):
         self.clean()
         self.assertTrue(self.data('check')['ok'])
 
+    def test_invalid_clone_cleanup_removes_module_storage_of_a_linked_worktree(self):
+        work = self.base / 'linked-work'
+        init_repo(work)
+        (work / 'real.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
+        (work / '.domain.toml').symlink_to('real.toml')
+        commit_all(work)
+        bare = self.base / 'linked.git'
+        git(self.base, 'clone', '-q', '--bare', str(work), str(bare))
+        tree = self.base / 'second-checkout'
+        git(self.root, 'worktree', 'add', '-q', '-b', 'second', str(tree))
+        self.assertTrue((tree / '.git').is_file())
+        self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', bare, ok=False, root=tree)
+        storage = Path(git(tree, 'rev-parse', '--path-format=absolute', '--git-path', 'modules/acme'))
+        self.assertFalse(storage.exists(), storage)
+        self.assertFalse((tree / 'acme').exists())
+        self.clean(tree)
+
+    def test_cleanup_keeps_module_storage_that_existed_before(self):
+        work = self.base / 'linked-work'
+        init_repo(work)
+        (work / 'real.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
+        (work / '.domain.toml').symlink_to('real.toml')
+        commit_all(work)
+        bare = self.base / 'linked.git'
+        git(self.base, 'clone', '-q', '--bare', str(work), str(bare))
+        keep = self.root / '.git/modules/acme'
+        keep.mkdir(parents=True)
+        (keep / 'precious').write_text('not ours\n')
+        self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', bare, ok=False)
+        self.assertEqual((keep / 'precious').read_text(), 'not ours\n')
+
     def test_cloned_marker_with_another_title_is_refused_and_cleaned_up(self):
         bare = self.origin(marker='acme')
         failed = self.cli('domain', 'add', '--id', 'acme', '--title', 'Different', '--repo', bare, ok=False)

@@ -241,13 +241,18 @@ def _check_marker(base, ident, title):
         raise WikiError(f'domain {ident} marker has title {known.title!r}')
 
 
-def _undo_submodule(root, ident, had_modules):
+def _module_storage(root, ident):
+    """Where Git keeps the repository of submodule IDENT (differs in linked worktrees)."""
+    path = gitops.run(root, 'rev-parse', '--path-format=absolute', '--git-path', f'modules/{ident}').strip()
+    return Path(path)
+
+
+def _undo_submodule(root, ident, had_modules, storage):
     """Remove a submodule this command just added, leaving the tree as it was."""
     gitops.run(root, 'rm', '-f', '-q', '--', ident, check=False)
     gitops.run(root, 'config', '--remove-section', f'submodule.{ident}', check=False)
-    modules = root / '.git/modules' / ident
-    if modules.is_dir() and not modules.is_symlink():
-        shutil.rmtree(modules)
+    if storage is not None and storage.is_dir() and not storage.is_symlink():
+        shutil.rmtree(storage)
     if not had_modules:
         gitops.run(root, 'rm', '-f', '-q', '--cached', '--', '.gitmodules', check=False)
         (root / '.gitmodules').unlink(missing_ok=True)
@@ -300,12 +305,14 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
             if location and not _registered(wiki, ident):
                 options = ['-c', 'protocol.file.allow=always'] if location[1] else []
                 had_modules = bool(gitops.run(root, 'ls-files', '--', '.gitmodules').strip())
+                storage = _module_storage(root, ident)
+                ours = not storage.exists()  # Only storage this very clone creates may be removed.
                 gitops.run(root, *options, 'submodule', 'add', '-q', '--', location[0], ident)
                 try:
                     if (base / '.domain.toml').exists() or (base / '.domain.toml').is_symlink():
                         _check_marker(base, ident, title)
                 except WikiError:
-                    _undo_submodule(root, ident, had_modules)
+                    _undo_submodule(root, ident, had_modules, storage if ours else None)
                     raise
             target = gitops.owner(base, root)
             marker = base / '.domain.toml'
