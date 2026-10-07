@@ -440,6 +440,20 @@ class AcceptTests(LessonCase):
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.assertTrue(self.note(result).is_file())
 
+    def test_resumed_acceptance_ignores_an_edited_draft(self):
+        batch = self.interrupted_submodule_accept()
+        draft = self.workspace(batch) / 'draft.md'
+        persisted = (self.workspace(batch) / 'revisions/r1.md').read_bytes()
+        draft.write_text('A different lesson, edited after the interruption.\n')
+        for args in (('check',), ('discard',)):
+            self.assertIn('accept', self.cli('lesson', *args, '--batch', batch, ok=False).stderr)
+        result = json.loads(self.accept(batch).stdout)
+        self.assertTrue(self.note(result).read_bytes().endswith(persisted))
+        self.assertEqual(draft.read_text(), 'A different lesson, edited after the interruption.\n')
+        self.assertTrue(any('draft' in note and 'ignored' in note for note in result['notes']))
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.data('lesson', 'discard', '--batch', batch)
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)

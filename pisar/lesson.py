@@ -317,6 +317,7 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         payload = dict(batch=ident, revision=rev['revision'], sha256=rev['sha256'], to=target.address,
                        id=doc_id, keeps=keeps, mention_origin=bool(mention_origin), skip_review=bool(skip_review))
         journal = existing(batch.runtime, operation, payload)
+        journal_started = journal is not None  # Resuming: the persisted revision decides, not draft.md.
         if journal is not None and journal['status'] == 'complete':
             item = journal['artifacts'][0]
             path = safe_path(wiki.root, item['path'])
@@ -325,7 +326,7 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         else:
             if meta['status'] != 'open':
                 raise WikiError(f'lesson batch {ident} is {meta["status"]}')
-            if batch.draft()[1] != data:
+            if journal is None and batch.draft()[1] != data:
                 raise WikiError(f'draft.md differs from {rev["revision"]}; run `pisar lesson check` first')
             reviewed = None
             review_path = batch.file(f'{rev["revision"]}.review.json')
@@ -391,7 +392,15 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
         if meta['status'] != 'accepted':
             meta['status'] = 'accepted'
             batch.save(meta)
-        return dict(batch=ident, revision=rev['revision'], path=item['path'],
+        notes = []
+        try:
+            edited = batch.draft()[1] != data
+        except WikiError:
+            edited = True
+        if edited and journal_started:
+            notes.append(f'draft.md differs from the accepted revision {rev["revision"]} and was ignored: '
+                         'the immutable revision was written; draft.md is untouched')
+        return dict(batch=ident, revision=rev['revision'], path=item['path'], notes=notes,
                     reference=f'wiki:{target.address}:{doc_id}', keeps=keeps, skip_review=bool(skip_review),
                     mention_origin=bool(mention_origin), verdict=verdict, warnings=warnings(wiki, meta),
                     **operation_result(journal))
