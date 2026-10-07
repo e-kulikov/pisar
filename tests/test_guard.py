@@ -131,6 +131,10 @@ class TierTests(unittest.TestCase):
         self.assert_tier('Server 10.0.12.7 is down', 'ip', 'ask', '10.0.12.7')
         self.assert_tier('Subnet 192.168.1.0/24 only', 'ip', 'ask', '192.168.1.0/24')
         self.assert_tier('Link-local fe80::1ff:fe23:4567:890a works', 'ip', 'ask', 'fe80::1ff:fe23:4567:890a')
+        self.assert_tier('Host ::1 reachable', 'ip', 'ask', '::1')
+        self.assert_tier('Host dead:beef:cafe:babe:feed:face:abcd:eeee reachable', 'ip', 'ask',
+                         'dead:beef:cafe:babe:feed:face:abcd:eeee')
+        self.assert_tier('Prefix 2001:db8::/32 only', 'ip', 'ask', '2001:db8::/32')
         for text in ('Edit README.md and config.toml', 'Call os.walk(root)', 'Version 1.2.3 shipped',
                      'Invalid 999.1.1.1', 'Use std::vector here', 'e.g. this, i.e. that'):
             with self.subTest(text=text):

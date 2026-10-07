@@ -6,6 +6,7 @@ capture/save/writes never call it. Domain terms come straight from the
 """
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -131,8 +132,10 @@ def _valid(category, match):
             return 10 <= digits <= 15
         return 10 <= digits <= 15 and (not text.startswith('(') or '-' in text)
     if category == 'ip' and ':' in text:
-        groups = [g for g in text.split('/')[0].split(':') if g]
-        return len(groups) >= 2 and any(c.isdigit() for c in text)
+        try:
+            ipaddress.IPv6Interface(text)
+        except ValueError:
+            return False
     if category == 'hostname':
         return text.rsplit('.', 1)[1] not in _EXTENSIONS
     if category == 'date':
