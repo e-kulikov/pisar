@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 from types import SimpleNamespace
-from . import __version__, agent, config_command, guard, research_command, settings, spacecmd
+from . import __version__, agent, config_command, guard, lesson_command, research_command, settings, spacecmd
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -72,6 +72,7 @@ def parser():
     config_command.add_parser(commands)
     guard.add_parser(commands)
     spacecmd.add_parser(commands)
+    lesson_command.add_parser(commands)
     research_command.add_parser(commands)
     return p
 
@@ -110,6 +111,13 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 1 if result.get('ok') is False else 0
         wiki = Wiki(args.root)
+        if args.command == 'lesson':
+            result = lesson_command.run(args, SimpleNamespace(wiki=wiki))
+            if isinstance(result, str):
+                sys.stdout.write(result)
+            else:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         domains = None
         if getattr(args, 'include', None) or getattr(args, 'exclude', None):
             domains = wiki.select(args.include, args.exclude)
