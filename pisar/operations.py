@@ -33,10 +33,20 @@ def outside_git(path):
     return path
 
 
-def atomic_bytes(path, content):
+def atomic_bytes(path, content, temp=None):
+    """Replace PATH atomically. TEMP is a journaled, operation-owned temporary name: a leftover of
+    an interrupted write can then be recognised and removed; without it the name is random."""
     external_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='.pisar-', dir=path.parent)
+    if temp is None:
+        fd, name = tempfile.mkstemp(prefix='.pisar-', dir=path.parent)
+    else:
+        name = str(path.parent / temp)
+        if os.path.islink(name):
+            raise WikiError(f'temporary path is a symlink: {name}')
+        if os.path.exists(name):
+            os.unlink(name)  # Ours: named in this operation's journal.
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(content)
@@ -46,6 +56,17 @@ def atomic_bytes(path, content):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def remove_leftovers(wiki, journal):
+    """Remove ONLY the temporary files this operation's journal names (an interrupted atomic write)."""
+    for item in journal['artifacts']:
+        if item.get('temp'):
+            leftover = safe_path(wiki.root, item['path']).parent / item['temp']
+            if leftover.is_symlink():
+                raise WikiError(f'temporary path is a symlink: {leftover}')
+            if leftover.is_file():
+                leftover.unlink()
 
 
 def write_json(path, value):
@@ -175,6 +196,8 @@ def validate_artifacts(wiki, journal):
 
 
 def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), extra=None):
+    for item in artifacts:
+        item['temp'] = f'.pisar-{ident}-{item["after"][:16]}.tmp'  # Ownership of an interrupted write.
     journal = dict(schema_version=1, root=str(wiki.root), operation_id=ident,
                    fingerprint=fingerprint(payload), status='incomplete',
                    artifacts=artifacts, commits=[], tasks={}, heads={})
@@ -212,6 +235,7 @@ def owned_artifacts(wiki, journal):
 
 
 def apply_files(wiki, runtime, journal):
+    remove_leftovers(wiki, journal)
     validate_artifacts(wiki, journal)
     owned = owned_artifacts(wiki, journal)
     repos, links = groups(wiki, owned)
@@ -242,7 +266,7 @@ def apply_files(wiki, runtime, journal):
         path = safe_path(wiki.root, item['path'])
         data = base64.b64decode(item['data'])
         if not path.is_file() or sha256(path.read_bytes()) != item['after']:
-            atomic_bytes(path, data)
+            atomic_bytes(path, data, item.get('temp'))
     # Owners first, then parent gitlinks; each checkpoint survives partial completion.
     for repo in sorted(repos, key=lambda p: len(p.parts), reverse=True):
         gitops.clean_except(repo, repos[repo])

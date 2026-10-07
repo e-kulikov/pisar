@@ -578,6 +578,35 @@ class AcceptTests(LessonCase):
         self.assertNotIn('UNREVIEWED', committed)
         self.assertIn('UNREVIEWED EDIT', self.note(result).read_text())  # the edit is preserved, uncommitted
 
+    def stale_record(self, batch):
+        self.crash(batch, mock.patch.object(lesson, 'apply_files', side_effect=gitops.WikiError('crash')))
+        item = self.operation_record(batch)['artifacts'][0]
+        leftover = self.root / item['path']
+        leftover = leftover.parent / item['temp']  # the journal names the owned temporary file
+        leftover.parent.mkdir(parents=True, exist_ok=True)
+        leftover.write_bytes(b'half written note')
+        return leftover
+
+    def test_an_owned_temporary_leftover_does_not_block_recovery(self):
+        batch, _, _ = self.prepared()
+        leftover = self.stale_record(batch)
+        foreign = leftover.parent / '.pisar-someone-else'
+        foreign.write_bytes(b'not ours')
+        self.accept(batch, ok=False)  # only the operation's own leftover is recovered
+        self.assertTrue(foreign.exists())
+        foreign.unlink()
+        result = json.loads(self.accept(batch).stdout)
+        self.assertFalse(leftover.exists())
+        self.assertTrue(self.note(result).is_file())
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
+    def test_discard_removes_only_an_owned_leftover(self):
+        batch, _, _ = self.prepared()
+        leftover = self.stale_record(batch)
+        self.data('lesson', 'discard', '--batch', batch)
+        self.assertFalse(leftover.exists())
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()
         self.check(batch, CLEAN, draft)
