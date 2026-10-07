@@ -409,10 +409,10 @@ class AcceptTests(LessonCase):
         batch, _, _ = self.prepared(source='personal', to='work/module')
         real = gitops.commit
 
-        def commit(repo, paths, operation):
+        def commit(repo, paths, operation, **kwargs):
             if repo == self.root:
                 raise gitops.WikiError('interrupted before the parent commit')
-            return real(repo, paths, operation)
+            return real(repo, paths, operation, **kwargs)
         with mock.patch.object(gitops, 'commit', commit), self.assertRaises(gitops.WikiError):
             lesson.accept(Wiki(self.root), self.state, batch)
         return batch
@@ -560,6 +560,23 @@ class AcceptTests(LessonCase):
         for args in (('check',), ('discard',)):
             self.assertIn('accept', self.cli('lesson', *args, '--batch', batch, ok=False).stderr)
         self.assertEqual(json.loads(self.accept(batch).stdout)['path'], first['path'])
+
+    def test_an_edit_between_write_and_staging_never_enters_the_commit(self):
+        batch, _, _ = self.prepared()
+        real = gitops.commit
+        written = []
+
+        def commit(repo, paths, operation, **kwargs):
+            note = next((self.personal / 'notes').glob('*.md'))
+            written.append(note.read_bytes())
+            note.write_bytes(note.read_bytes() + b'UNREVIEWED EDIT\n')
+            return real(repo, paths, operation, **kwargs)
+        with mock.patch.object(gitops, 'commit', commit):
+            result = lesson.accept(Wiki(self.root), self.state, batch)
+        committed = git(self.root, 'show', f'HEAD:{result["path"]}')
+        self.assertEqual(committed, written[0].decode().strip())
+        self.assertNotIn('UNREVIEWED', committed)
+        self.assertIn('UNREVIEWED EDIT', self.note(result).read_text())  # the edit is preserved, uncommitted
 
     def test_discard_waits_for_the_decision_record(self):
         batch, draft = self.start()

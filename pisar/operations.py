@@ -246,7 +246,11 @@ def apply_files(wiki, runtime, journal):
     # Owners first, then parent gitlinks; each checkpoint survives partial completion.
     for repo in sorted(repos, key=lambda p: len(p.parts), reverse=True):
         gitops.clean_except(repo, repos[repo])
-        commit = gitops.commit(repo, repos[repo], journal['operation_id'])
+        verified = {}
+        for item in journal['artifacts']:
+            if item['repo'] == str(repo):
+                verified[(wiki.root / item['path']).relative_to(repo).as_posix()] = base64.b64decode(item['data'])
+        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified)
         if commit:
             journal['commits'].append(dict(repo=str(repo), commit=commit))
         journal['heads'][str(repo)] = gitops.run(repo, 'rev-parse', 'HEAD').strip()

@@ -139,10 +139,10 @@ class CaptureTests(Fixture):
         source = self.external()
         original_commit = gitops.commit
 
-        def fail_parent(repo, paths, operation):
+        def fail_parent(repo, paths, operation, **kwargs):
             if repo == self.root:
                 raise WikiError('synthetic parent Git failure')
-            return original_commit(repo, paths, operation)
+            return original_commit(repo, paths, operation, **kwargs)
 
         with patch.object(gitops, 'commit', fail_parent):
             with self.assertRaises(WikiError):

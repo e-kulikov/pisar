@@ -5,9 +5,12 @@ import subprocess
 from .safety import WikiError
 
 
-def run(repo, *args, check=True):
+def run(repo, *args, check=True, input=None):
     env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True, env=env)
+    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, env=env,
+                            **(dict(input=input) if input is not None else dict(text=True)))
+    if input is not None:
+        result.stdout, result.stderr = result.stdout.decode(), result.stderr.decode()
     if check and result.returncode:
         raise WikiError(f'git {args[0]} failed in {repo}: {result.stderr.strip()}')
     return result.stdout
@@ -63,18 +66,36 @@ def clean_except(repo, allowed=()):
         raise WikiError(f'dirty/staged repository {repo}: {", ".join(conflicts)}')
 
 
-def commit(repo, paths, operation_id):
+def stage_verified(repo, relative, data):
+    """Stage exactly DATA at RELATIVE, never rereading the working file."""
+    oid = run(repo, 'hash-object', '-w', '--stdin', '--path', relative, input=data).strip()
+    entry = run(repo, 'ls-files', '--stage', '--', relative).split()
+    mode = entry[0] if entry and entry[0] in ('100644', '100755') else '100644'
+    run(repo, 'update-index', '--add', '--cacheinfo', f'{mode},{oid},{relative}')
+
+
+def commit(repo, paths, operation_id, verified=None):
+    """Commit PATHS. VERIFIED maps a path to the exact bytes to commit for it (journaled, hash-checked):
+    those are staged from the bytes, so a later edit of the working file cannot enter the commit; it
+    stays a local modification."""
     paths = sorted(set(paths))
+    verified = verified or {}
     if not paths:
         return None
-    run(repo, 'add', '--', *paths)
+    for relative, data in verified.items():
+        stage_verified(repo, relative, data)
+    rest = [p for p in paths if p not in verified]
+    if rest:
+        run(repo, 'add', '--', *rest)
     if not run(repo, 'diff', '--cached', '--name-only', '--', *paths).strip():
         return None
     # Suppress repository hooks and signing: writes cannot run user publishing scripts.
     # The 'wiki: OPERATION' subject is a stable data protocol: retries recognize their
     # own commits by it and the documented rollback recipe selects commits with it.
+    # The index was verified clean apart from these paths, so commit the index itself
+    # (a pathspec commit would reread the working files).
     run(repo, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
-        'commit', '-qm', f'wiki: {operation_id}', '--', *paths)
+        'commit', '-qm', f'wiki: {operation_id}')
     return run(repo, 'rev-parse', 'HEAD').strip()
 
 
