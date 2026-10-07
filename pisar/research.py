@@ -140,7 +140,7 @@ def _payload(output):
     if not isinstance(envelope, dict):
         raise WikiError('claude output is not valid JSON: expected an object')
     if envelope.get('is_error'):
-        raise WikiError(f'claude reported an error: {envelope.get("result")}')
+        raise WikiError('claude reported an error')
     if isinstance(envelope.get('structured_output'), dict):
         return envelope['structured_output']
     text = envelope.get('result')
@@ -260,6 +260,14 @@ def scratch_base(root, state):
                     'inside Git, or inside the knowledge root or state directory')
 
 
+def _keep(path, data):
+    """Write at most DIAGNOSTIC_LIMIT bytes of DATA privately (0600) for diagnosis."""
+    path.write_bytes(b'')
+    os.chmod(path, 0o600)
+    path.write_bytes(data[:DIAGNOSTIC_LIMIT])
+    return path
+
+
 def run(root, state_dir, question, model=None, effort=None, source=None, confirm=False):
     """Research QUESTION; returns the printed result (a stored record or a gate report)."""
     if not isinstance(question, str) or not question.strip():
@@ -289,14 +297,14 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
     with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
         done = run_bounded(command(executable, model, effort), question, cwd, env)
     output = done.stdout.decode('utf-8', errors='replace')
-    if done.state == 'timeout':
-        raise WikiError(f'claude did not finish within {TIMEOUT} seconds')
-    if done.returncode != 0 and done.state != 'overflow':
-        detail = (done.stderr.decode('utf-8', errors='replace') or output).strip()[-500:]
-        raise WikiError(f'claude exited with status {done.returncode}: {detail}')
     try:
+        # Messages below are fixed text: nothing the model or claude printed is echoed.
+        if done.state == 'timeout':
+            raise WikiError(f'claude did not finish within {TIMEOUT} seconds')
         if done.state == 'overflow':
             raise WikiError(f'claude output is too large (more than {STDOUT_LIMIT} bytes)')
+        if done.returncode != 0:
+            raise WikiError(f'claude exited with status {done.returncode}')
         result = validate(_payload(output))
         record = {'schema_version': SCHEMA_VERSION, 'id': ident, 'question': question, 'model': model,
                   'effort': effort, 'retrieved_at': f'{now:%Y-%m-%dT%H:%M:%SZ}', 'untrusted': True,
@@ -304,9 +312,7 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
         if len(json.dumps(record, ensure_ascii=False).encode('utf-8')) > RECORD_LIMIT:
             raise WikiError(f'research result: record is too large (more than {RECORD_LIMIT} bytes)')
     except WikiError as error:
-        raw = store / f'{ident}.raw.txt'
-        raw.write_text(output[:DIAGNOSTIC_LIMIT], encoding='utf-8')
-        os.chmod(raw, 0o600)
-        raise WikiError(f'{error}; raw output kept in {raw}') from None
+        kept = [_keep(store / f'{ident}.raw.txt', done.stdout), _keep(store / f'{ident}.stderr.txt', done.stderr)]
+        raise WikiError(f'{error}; diagnostics kept privately in {kept[0]} and {kept[1]}') from None
     write_json(store / f'{ident}.json', record)
     return {**record, 'guard': {'findings': findings, 'limits': report['limits'], 'notice': NOTICE}}

@@ -195,8 +195,9 @@ class ResearchTests(Fixture):
     def test_nonzero_exit_is_reported_and_nothing_stored(self):
         p = self.research(QUESTION, mode='exit', ok=False)
         self.assertIn('claude exited with status 3', p.stderr)
-        self.assertIn('not logged in', p.stderr)
+        self.assertNotIn('not logged in', p.stderr)
         self.assertEqual(self.stored(), [])
+        self.assertIn('not logged in', self.diagnostics('stderr').read_text())
 
     def test_missing_binary_is_a_clear_error(self):
         # Only a python3 (for the zipapp's shebang), no claude.
@@ -439,6 +440,11 @@ class ResearchTests(Fixture):
         self.assertEqual(self.stored(), [])
         self.assertLessEqual(self.diagnostics('stdout').stat().st_size, research.DIAGNOSTIC_LIMIT)
 
+    def test_oversized_stderr_is_bounded_and_not_printed(self):
+        p = self.research(QUESTION, mode='noisy', ok=False)
+        self.assertLess(len(p.stderr), 1000)
+        self.assertLessEqual(self.diagnostics('stderr').stat().st_size, research.DIAGNOSTIC_LIMIT)
+
     def test_string_and_count_limits_are_enforced(self):
         good = GOOD['findings'][0]
         self.rejects({**GOOD, 'summary': 'x' * (research.SUMMARY_LIMIT + 1)}, 'too long')
@@ -459,6 +465,27 @@ class ResearchTests(Fixture):
             {**GOOD, 'bad\nname ' + 'z' * 200: 1})}, ok=False)
         self.assertLess(len(p.stderr), 600)
         self.assertNotIn('zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz', p.stderr)
+
+    def test_error_envelope_keeps_diagnostics_but_prints_no_response_text(self):
+        p = self.research(QUESTION, mode='iserror', ok=False)
+        self.assertNotIn('SECRET-RAW-RESPONSE', p.stderr)
+        self.assertIn(str(self.diagnostics('stdout')), p.stderr)
+        self.assertIn('SECRET-RAW-RESPONSE', self.diagnostics('stdout').read_text())
+        self.assertEqual(self.stored(), [])
+
+    def test_nonzero_exit_keeps_diagnostics_and_names_the_artifact(self):
+        p = self.research(QUESTION, mode='exit', ok=False)
+        self.assertIn(str(self.diagnostics('stderr')), p.stderr)
+
+    def test_timeout_keeps_partial_diagnostics_and_kills_the_child(self):
+        run = self.in_process(TIMEOUT=1)
+        self.fake('sleep')
+        with self.assertRaisesRegex(research.WikiError, 'did not finish within 1 seconds') as caught:
+            run()
+        self.assertIn('diagnostics kept', str(caught.exception))
+        self.assertEqual(self.stored(), [])
+        self.assertTrue(list((self.state / 'research').glob('*.stderr.txt')) or
+                        list((self.state / 'research').glob('*.raw.txt')))
 
 
 if __name__ == '__main__':

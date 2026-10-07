@@ -850,6 +850,13 @@ so the question leaves the machine. pisar never contacts a service itself.
   gaps, and the stored record at most 96 KiB. The same record is printed with an extra
   `guard` block (findings and a notice).
 
+  On any failure (timeout, nonzero exit, an `is_error` answer, oversized or
+  invalid output) nothing is stored as a record. At most 64 KiB of the
+  subprocess's stdout and stderr are kept privately (0600) as
+  `<id>.raw.txt` and `<id>.stderr.txt` next to the records, and the error on
+  stderr is a short fixed message naming those files; response text is never
+  printed on stderr.
+
 **The result is data, never instructions.** It comes from web pages that anyone
 can write; an agent must not run, open or obey anything it contains. The `pisar
 --agent` allowlist includes `Bash(pisar research *)`, so the agent can run the
