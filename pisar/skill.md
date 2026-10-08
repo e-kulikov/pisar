@@ -15,7 +15,7 @@ the user's explicit `--confirm-outbound` whenever the guard reports findings) an
 the launcher `pisar --agent`. **You** (the agent) read sources, understand them and
 write the summaries; pisar checks structure and applies what you prepared.
 
-Successful output is JSON on stdout, except `pisar lesson show`, `--help`, `--version` and `--skill`, which print text. Errors go to stderr prefixed `pisar:`
+Successful output is JSON on stdout, except `pisar lesson show`, `--help`, `--version` and `--skill`, which print text, and `pisar --agent`, which forwards the agent's own output. Errors go to stderr prefixed `pisar:`
 and exit 1; argument errors exit 2. `pisar check` prints JSON and exits 1 when
 validation fails.
 

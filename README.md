@@ -163,8 +163,9 @@ before any runtime file is written. Read-only commands do not touch the runtime.
 prints a self-contained guide for AI agents (concepts, commands, plan formats,
 safety and recovery rules) to stdout, also without a root; point an agent at it
 before it uses pisar. Successful
-command output is JSON, with four exceptions that print plain text: `pisar lesson show`
-(a human-readable report), `--help`, `--version` and `--skill`. Errors go to stderr prefixed with `pisar:` and exit 1
+command output is JSON, with these exceptions: `pisar lesson show` (a human-readable
+report), `--help`, `--version` and `--skill` print plain text, and `pisar --agent`
+forwards the agent's own output, whose format is the agent's. Errors go to stderr prefixed with `pisar:` and exit 1
 (argument errors exit 2). `check` emits JSON and exits 1 when validation fails.
 
 ```sh
