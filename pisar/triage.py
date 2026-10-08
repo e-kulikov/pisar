@@ -20,7 +20,7 @@ def load(runtime, batch):
         raise WikiError(f'unknown triage batch: {batch}')
     manifest = json.loads(path.read_text(encoding='utf-8'))
     if manifest.get('format') != JOURNAL_FORMAT:
-        raise legacy_error(f'triage batch {batch}', path)
+        raise legacy_error(f'triage batch {batch}', path, path.parent)
     if manifest.get('root') != str(runtime.root) or manifest.get('batch_id') != batch:
         raise WikiError('triage root namespace/batch mismatch')
     return directory, manifest

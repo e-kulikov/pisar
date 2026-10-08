@@ -60,17 +60,39 @@ class LegacyState(Fixture):
             data='', repo=str(self.root))])
         self.cli('capture', '--space', 'work/alpha', '--id', 'c2', '--source', self.external())
 
-    def test_an_old_triage_batch_is_diagnosed(self):
+    def old_batch(self):
         directory = self.state / 'triage' / 'old-batch'
-        directory.mkdir(parents=True)
+        (directory / 'originals').mkdir(parents=True)
+        (directory / 'originals' / 'item-1').write_text('snapshot of an old original')
         manifest = directory / 'manifest.json'
         manifest.write_text(json.dumps(dict(schema_version=1, root=str(self.root), batch_id='old-batch',
                                             fingerprint='0' * 64, status='prepared', items=[])))
+        routing = self.base / 'routing.json'
+        routing.write_text(json.dumps(dict(schema_version=1, items=[])))
+        return directory, manifest, routing
+
+    def test_an_old_triage_batch_is_diagnosed(self):
+        directory, manifest, _ = self.old_batch()
         for action in ('report', 'prepare'):
             p = self.cli('triage', action, '--batch', 'old-batch', ok=False)
             self.assertIn('pisar <= 0.3', p.stderr)
-            self.assertIn(str(manifest), p.stderr)
+            self.assertIn(str(directory), p.stderr)
+            self.assertIn('WHOLE batch directory', p.stderr)
+            self.assertIn('FRESH batch id', p.stderr)
         self.assertEqual(json.loads(manifest.read_text())['status'], 'prepared')
+
+    def test_abandoning_an_old_triage_batch_by_moving_its_whole_directory_works(self):
+        directory, _, routing = self.old_batch()
+        archive = self.base / 'archived-triage'
+        archive.mkdir()
+        directory.rename(archive / 'old-batch')  # the documented step
+        self.cli('triage', 'prepare', '--batch', 'old-batch', '--plan', routing)
+        self.assertTrue((archive / 'old-batch' / 'originals' / 'item-1').is_file())  # snapshots kept
+
+    def test_a_fresh_batch_id_works_next_to_an_old_batch(self):
+        directory, manifest, routing = self.old_batch()
+        self.cli('triage', 'prepare', '--batch', 'fresh-batch', '--plan', routing)
+        self.assertEqual(json.loads(manifest.read_text())['batch_id'], 'old-batch')
 
 
 def journal_status(path):

@@ -306,7 +306,12 @@ space and id, an old triage batch) it never resumes or reinterprets it: it stops
 with a diagnostic naming the state file and writes nothing. To abandon such an
 operation explicitly, move that state file out of the state directory, then
 review `git status` and `pisar check` for files it already wrote, commit or
-discard them yourself, and start the work again with addresses. Limitation: the
+discard them yourself, and start the work again with addresses. A triage batch
+is a whole directory: move the **whole** batch directory (it keeps its snapshots
+and originals) out of the state directory, or just use a **fresh** batch id;
+moving only `manifest.json` leaves a directory that blocks the same id. The
+operation journals of its already accepted items stay in the operations
+directory and are diagnosed the same way when their plans are retried. Limitation: the
 history of old completed operations is not carried over; retrying an old
 completed capture is reported with the same diagnostic (or, once its state file
 was moved away, as a duplicate document id).

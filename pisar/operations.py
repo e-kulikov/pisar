@@ -18,12 +18,23 @@ from .safety import WikiError, concrete_id, safe_path, sha256
 JOURNAL_FORMAT = 2
 
 
-def legacy_error(what, path):
+def legacy_error(what, path, batch_directory=None):
+    """The diagnostic for state of pisar <= 0.3. A triage batch is a whole directory: abandoning only
+    its manifest would leave a directory that blocks the same batch id."""
+    head = f'{what} was started by pisar <= 0.3 with plain space ids'
+    if batch_directory is not None:
+        return WikiError(
+            f'{head} (batch directory {batch_directory}); this pisar does not resume or reinterpret it. Finish it '
+            'with pisar 0.3 BEFORE upgrading, or abandon it explicitly: move the WHOLE batch directory (it keeps its '
+            'snapshots and originals) out of the state directory, or simply use a FRESH batch id. Operation journals '
+            'of its already accepted items stay in the operations directory and are diagnosed the same way. Then '
+            'check the repository (git status, pisar check) for files it already wrote and commit or discard them '
+            'yourself, and start the work again with addresses')
     return WikiError(
-        f'{what} was started by pisar <= 0.3 with plain space ids (state file {path}); this pisar does not '
-        'resume or reinterpret it. Finish it with pisar 0.3 BEFORE upgrading, or abandon it explicitly: move '
-        'that state file out of the state directory, then check the repository (git status, pisar check) for '
-        'files it already wrote and commit or discard them yourself, and start the work again with addresses')
+        f'{head} (state file {path}); this pisar does not resume or reinterpret it. Finish it with pisar 0.3 '
+        'BEFORE upgrading, or abandon it explicitly: move that state file out of the state directory, then check '
+        'the repository (git status, pisar check) for files it already wrote and commit or discard them '
+        'yourself, and start the work again with addresses')
 
 
 _HELD_LOCKS = ContextVar('pisar_writer_locks', default=())
