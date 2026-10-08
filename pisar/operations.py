@@ -305,7 +305,9 @@ def apply_files(wiki, runtime, journal):
             if parent_head != previous_head or subject != f'wiki: {journal["operation_id"]}' or not changed <= allowed:
                 raise WikiError(f'Git HEAD changed outside operation: {repo}')
             journal['heads'][str(repo)] = current_head
-            if not any(c['repo'] == str(repo) for c in journal['commits']):
+            # Every recovered commit is recorded (a repository can be committed to more than once);
+            # parent pinning then uses the latest one.
+            if not any(c['repo'] == str(repo) and c['commit'] == current_head for c in journal['commits']):
                 journal['commits'].append(dict(repo=str(repo), commit=current_head))
             runtime.store(journal)
         gitops.clean_except(repo, allowed)
