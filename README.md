@@ -11,8 +11,10 @@ activity is local and nothing is pushed. The only network uses are
 `pisar domain add --repo` (asks `git` to clone a repository; see
 [Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces))
 and `pisar research` (an isolated `claude` subprocess with web tools; the question
-leaves the machine, so it passes the outbound guard and needs explicit
-`--confirm-outbound` consent; see [Research](#research-through-an-isolated-web-researcher)).
+leaves the machine, so it first passes the outbound guard, and when the guard
+reports findings it runs only with explicit `--confirm-outbound` consent; see
+[Research](#research-through-an-isolated-web-researcher)). `pisar research` and the
+agent launcher `pisar --agent` start a model by design; nothing else does.
 
 ## The name
 
