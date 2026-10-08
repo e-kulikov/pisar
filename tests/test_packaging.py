@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -60,6 +61,9 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('pisar/skill.md', names)
             self.assertIn('pisar/agent-prompt.md', names)
             self.assertIn('pisar/agent.py', names)
+            for bundled in ('skills/lessons/SKILL.md', 'skills/research/SKILL.md',
+                            'hooks/hooks.json', 'hooks/protect-descriptors.py'):
+                self.assertIn(f'pisar/plugin/claude/{bundled}', names)
             self.assertFalse([n for n in names if not (n == '__main__.py' or n.startswith('pisar/'))])
             self.assertFalse([n for n in names if '__pycache__' in n or n.endswith('.pyc')])
             self.assertEqual({i.date_time for i in archive.infolist()}, {(2023, 11, 14, 22, 13, 20)})
@@ -80,6 +84,25 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual([s['id'] for s in json.loads(run(moved, 'spaces', env=self.env, cwd=self.base).stdout)['spaces']],
                          ['alpha'])
         self.assertTrue(json.loads(run(moved, 'check', env=self.env, cwd=self.base).stdout)['ok'])
+
+    def test_zipapp_extracts_a_complete_plugin(self):
+        zipapp = self.build()
+        fake = self.base / 'fakebin/claude'
+        fake.parent.mkdir()
+        fake.write_text('#!/bin/sh\nexit 0\n')
+        fake.chmod(0o755)
+        state, root = self.base / 'state', self.base / 'root'
+        init_repo(root)
+        env = {**self.env, 'PATH': f'{fake.parent}{os.pathsep}{os.environ["PATH"]}'}
+        run(zipapp, '--root', root, '--state-dir', state, '--agent', 'claude', env=env, cwd=self.base)
+        plugin, = [p for p in (state / 'agents/claude/plugin').iterdir() if not p.name.startswith('.')]
+        self.assertRegex(plugin.name, rf'^{re.escape(VERSION)}-[0-9a-f]{{8}}$')
+        for name in ('.claude-plugin/plugin.json', 'skills/pisar/SKILL.md', 'skills/lessons/SKILL.md',
+                     'skills/research/SKILL.md', 'hooks/hooks.json', 'hooks/protect-descriptors.py',
+                     'agents/lesson-reviewer.md'):
+            self.assertTrue((plugin / name).is_file(), name)
+        self.assertEqual((plugin / 'skills/pisar/SKILL.md').read_bytes(),
+                         run(zipapp, '--skill', env=env, cwd=self.base).stdout.encode())
 
     def test_zipapp_refuses_old_python_clearly(self):
         main = zipfile.ZipFile(self.build()).read('__main__.py').decode()

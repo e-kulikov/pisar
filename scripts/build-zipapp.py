@@ -45,6 +45,10 @@ def entries(version):
         files[f'pisar/{path.name}'] = path.read_bytes()
     for path in sorted((REPO / 'pisar').glob('*.md')):
         files[f'pisar/{path.name}'] = path.read_bytes()
+    bundled = REPO / 'pisar' / 'plugin'
+    for path in sorted(bundled.rglob('*')):
+        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
+            files[f'pisar/plugin/{path.relative_to(bundled).as_posix()}'] = path.read_bytes()
     return dict(sorted(files.items()))
 
 

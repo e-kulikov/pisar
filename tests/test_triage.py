@@ -11,7 +11,7 @@ class TriageTests(Fixture):
     def routing(self, items=None):
         source = self.external()
         default = dict(id='routed-call', source=str(source),
-                       sha256=hashlib.sha256(source.read_bytes()).hexdigest(), space_id='alpha')
+                       sha256=hashlib.sha256(source.read_bytes()).hexdigest(), space_id='work/alpha')
         plan = self.base / 'routing.json'
         plan.write_text(json.dumps(dict(schema_version=1, items=items if items is not None else [default])))
         return plan, default
@@ -34,7 +34,7 @@ class TriageTests(Fixture):
         self.assertTrue(Path(item['source']).exists())
         report = self.data('triage', 'report', '--batch', 'morning-one')
         self.assertEqual(report['items'][0]['status'], 'pending')
-        self.assertEqual(report['items'][0]['space_id'], 'alpha')
+        self.assertEqual(report['items'][0]['space_id'], 'work/alpha')
         batch_dir = Path(prepared['directory'])
         self.assertTrue(batch_dir.is_relative_to(self.state))
         self.assertTrue((batch_dir / 'originals/routed-call').is_file())
@@ -49,7 +49,7 @@ class TriageTests(Fixture):
         self.assertEqual(accepted['item']['status'], 'complete')
         self.assertEqual(Path(accepted['item']['processed_path']).read_bytes(), Path(item['source']).read_bytes())
         self.assertTrue(Path(item['source']).exists())  # explicit external inputs are never removed
-        self.assertEqual(self.data('read', 'wiki:alpha:routed-call')['metadata']['ingest_status'], 'pending')
+        self.assertEqual(self.data('read', 'wiki:work/alpha:routed-call')['metadata']['ingest_status'], 'pending')
         head = git(self.root, 'rev-parse', 'HEAD')
         self.action('accept')
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
@@ -71,7 +71,7 @@ class TriageTests(Fixture):
         self.prepare(plan)
         self.action('defer')
         self.cli('triage', 'accept', '--batch', 'morning-one', '--item', 'routed-call', ok=False)
-        self.action('reroute', 'routed-call', 'morning-one', '--space', 'beta')
+        self.action('reroute', 'routed-call', 'morning-one', '--space', 'work/beta')
         self.assertFalse((self.alpha / 'inbox').exists())
         self.assertFalse((self.beta / 'inbox').exists())
         self.action('accept')
@@ -84,7 +84,7 @@ class TriageTests(Fixture):
         plan.write_text(json.dumps(dict(schema_version=1, items=[item])))
         self.prepare(plan)
         self.cli('triage', 'accept', '--batch', 'morning-one', '--item', 'routed-call', ok=False)
-        self.action('reroute', 'routed-call', 'morning-one', '--space', 'alpha')
+        self.action('reroute', 'routed-call', 'morning-one', '--space', 'work/alpha')
         self.action('accept')
 
     def test_partial_accept_is_recoverable_without_duplicate_import(self):
@@ -98,7 +98,7 @@ class TriageTests(Fixture):
                 accept(Wiki(self.root), self.state, 'morning-one', 'routed-call', str(RUWANA))
         report = self.data('triage', 'report', '--batch', 'morning-one')
         self.assertEqual(report['items'][0]['status'], 'incomplete')
-        for action, flags in (('defer', []), ('reroute', ['--space', 'beta'])):
+        for action, flags in (('defer', []), ('reroute', ['--space', 'work/beta'])):
             failed = self.cli('triage', action, '--batch', 'morning-one', '--item', 'routed-call', *flags, ok=False)
             self.assertIn('incomplete', failed.stderr)
             self.assertIn('retry accept', failed.stderr)
@@ -117,7 +117,7 @@ class TriageTests(Fixture):
         report = self.data('triage', 'report', '--batch', 'auto-one')
         self.assertEqual(len(report['items']), 1)
         ident = report['items'][0]['id']
-        self.action('reroute', ident, 'auto-one', '--space', 'alpha')
+        self.action('reroute', ident, 'auto-one', '--space', 'work/alpha')
         accepted = self.action('accept', ident, 'auto-one')
         self.assertEqual(Path(accepted['item']['processed_path']).read_text(), 'Early synthetic original')
         self.assertFalse(source.exists())
@@ -139,7 +139,7 @@ class TriageTests(Fixture):
 
     def test_prepared_meeting_plan_applies_only_after_accept(self):
         plan, item = self.routing()
-        item['plan'] = dict(schema_version=1, operation_id='triaged-meeting', space_id='alpha',
+        item['plan'] = dict(schema_version=1, operation_id='triaged-meeting', space_id='work/alpha',
                             source=dict(path=item['source'], sha256=item['sha256']),
                             meeting=dict(id='triaged-call', title='Triaged meeting', body=BODY),
                             tasks=[], pages=[])
@@ -148,7 +148,7 @@ class TriageTests(Fixture):
         self.assertFalse((self.alpha / 'meetings').exists())
         self.action('accept')
         self.assertTrue((self.alpha / 'meetings/triaged-call.md').is_file())
-        self.assertEqual(self.data('read', 'wiki:alpha:routed-call')['metadata']['ingest_status'], 'processed')
+        self.assertEqual(self.data('read', 'wiki:work/alpha:routed-call')['metadata']['ingest_status'], 'processed')
 
     def test_duplicate_ids_and_snapshot_source_symlinks_rejected(self):
         plan, item = self.routing()
@@ -178,7 +178,7 @@ class TriageTests(Fixture):
         original.write_text('Preserve through archiving crash')
         self.data('triage', 'prepare', '--batch', 'archive-crash')
         ident = self.data('triage', 'report', '--batch', 'archive-crash')['items'][0]['id']
-        self.action('reroute', ident, 'archive-crash', '--space', 'alpha')
+        self.action('reroute', ident, 'archive-crash', '--space', 'work/alpha')
         persist = triage.persist
 
         def crash_before_complete(directory, manifest):
@@ -202,10 +202,10 @@ class TriageTests(Fixture):
         from pisar.spaces import Wiki
         from pisar.safety import WikiError
         routing, item = self.routing()
-        item['plan'] = dict(schema_version=1, operation_id='triaged-save', space_id='alpha',
+        item['plan'] = dict(schema_version=1, operation_id='triaged-save', space_id='work/alpha',
                             source=dict(path=item['source'], sha256=item['sha256']),
                             meeting=dict(id='triaged-call', title='Triaged call', body=BODY),
-                            tasks=[dict(id='draft', space_id='alpha', title='Prepare draft', agreed=True)])
+                            tasks=[dict(id='draft', space_id='work/alpha', title='Prepare draft', agreed=True)])
         routing.write_text(json.dumps(dict(schema_version=1, items=[item])))
         self.prepare(routing)
         original_write = triage.atomic_bytes
@@ -236,3 +236,19 @@ class TriageTests(Fixture):
         self.assertEqual(journal.read_bytes(), history)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertEqual(len(list(self.alpha.glob('.ruwana/*.toml'))), 1)
+
+    def test_items_route_by_address_when_domains_reuse_an_id(self):
+        acme = space(self.root, 'acme/10-projects/alpha', 'alpha')
+        commit_all(self.root)
+        plan, item = self.routing()
+        item['space_id'] = 'alpha'
+        plan.write_text(json.dumps(dict(schema_version=1, items=[item])))
+        self.cli('triage', 'prepare', '--batch', 'bare-id', '--plan', plan, ok=False)
+        item['space_id'] = 'acme/alpha'
+        plan.write_text(json.dumps(dict(schema_version=1, items=[item])))
+        self.prepare(plan)
+        self.cli('triage', 'reroute', '--batch', 'morning-one', '--item', 'routed-call', '--space', 'beta', ok=False)
+        self.action('accept')
+        self.assertTrue((acme / 'inbox/routed-call.md').is_file())
+        self.assertFalse((self.alpha / 'inbox').exists())
+        self.assertEqual(self.data('read', 'wiki:acme/alpha:routed-call')['metadata']['space_ids'], ['acme/alpha'])

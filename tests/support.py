@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 from pathlib import Path
@@ -19,12 +20,16 @@ REQUIRE_RUWANA = os.environ.get('PISAR_TEST_REQUIRE_RUWANA') == '1'
 # from outside the checkout instead of `python -m pisar`.
 EXECUTABLE = os.environ.get('PISAR_TEST_EXECUTABLE')
 # Settings inherited from the developer's shell must never reach live data.
-ISOLATED = ('PISAR_ROOT', 'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', 'WIKI_ROOT')
+ISOLATED = ('PISAR_ROOT', 'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', 'WIKI_ROOT', 'XDG_CONFIG_HOME')
+# The developer's own config file must not apply either: default to an empty one.
+NO_CONFIG = tempfile.mkdtemp(prefix='pisar-test-no-config-')
+atexit.register(shutil.rmtree, NO_CONFIG, ignore_errors=True)
 
 
 def clean_environ(**extra):
     env = {k: v for k, v in os.environ.items() if k not in ISOLATED}
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env['XDG_CONFIG_HOME'] = NO_CONFIG
     env.update(extra)
     return env
 
@@ -54,15 +59,28 @@ def commit_all(root):
     git(root, 'commit', '-qm', 'fixture')
 
 
-def space(root, relative, ident, kind='project'):
-    path = root / relative
+def domain(root, ident, title=None, extra=''):
+    """Mark a top-level directory of the root as a domain."""
+    path = root / ident
     path.mkdir(parents=True, exist_ok=True)
-    (path / '.wiki.toml').write_text(
-        f'schema_version = 1\nid = "{ident}"\nkind = "{kind}"\nstatus = "active"\n')
+    (path / '.domain.toml').write_text(
+        f'schema_version = 1\nid = "{ident}"\ntitle = {json.dumps(title or ident.title())}\n{extra}')
     return path
 
 
-def document(ident='call-one', owner='alpha', related=(), sources=(), body='Discussed русский launch.'):
+def space(root, relative, ident, kind='project', status='active'):
+    """A space; its top-level directory becomes a domain unless already marked."""
+    parts = Path(relative).parts
+    if len(parts) > 1 and not (root / parts[0] / '.domain.toml').exists():
+        domain(root, parts[0])
+    path = root / relative
+    path.mkdir(parents=True, exist_ok=True)
+    (path / '.wiki.toml').write_text(
+        f'schema_version = 1\nid = "{ident}"\nkind = "{kind}"\nstatus = "{status}"\n')
+    return path
+
+
+def document(ident='call-one', owner='work/alpha', related=(), sources=(), body='Discussed русский launch.'):
     return ('+++\nschema_version = 1\n'
             f'id = {json.dumps(ident)}\ntype = "meeting"\ntitle = "Launch call"\n'
             f'space_ids = {json.dumps([owner, *related])}\n'
@@ -79,12 +97,13 @@ class Fixture(unittest.TestCase):
         self.alpha = space(self.root, 'work/team/alpha', 'alpha')
         self.beta = space(self.root, 'work/team/beta', 'beta')
         self.personal = space(self.root, 'personal/10-projects/home', 'home')
-        (self.alpha / 'call.md').write_text(document(related=('beta',)))
-        (self.personal / 'note.md').write_text(document('private-note', 'home', body='Private launch data.'))
+        (self.alpha / 'call.md').write_text(document(related=('work/beta',)))
+        (self.personal / 'note.md').write_text(document('private-note', 'personal/home', body='Private launch data.'))
         commit_all(self.root)
         self.state = self.base / 'runtime'
         self.env = clean_environ(XDG_DATA_HOME=str(self.base / 'data'),
-                                 XDG_CACHE_HOME=str(self.base / 'cache'))
+                                 XDG_CACHE_HOME=str(self.base / 'cache'),
+                                 XDG_CONFIG_HOME=str(self.base / 'config'))
 
     def require_ruwana(self):
         if not RUWANA_AVAILABLE:
@@ -122,7 +141,7 @@ class Fixture(unittest.TestCase):
         remote = self.base / 'module-origin'
         init_repo(remote)
         space(remote, '.', 'module')
-        (remote / 'note.md').write_text(document('module-note', 'module', body='Module evidence.'))
+        (remote / 'note.md').write_text(document('module-note', 'work/module', body='Module evidence.'))
         commit_all(remote)
         git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
             str(remote), 'work/module')

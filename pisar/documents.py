@@ -4,11 +4,13 @@ from datetime import datetime
 from pathlib import Path
 import re
 import tomllib
-from .safety import WikiError, concrete_id, safe_path, sha256
+from .safety import WikiError, address, concrete_id, safe_path, sha256
 
 
 TYPES = {'source', 'meeting', 'overview', 'decision', 'note', 'recipe', 'movie', 'series', 'book'}
-REF = re.compile(r'wiki:([a-z0-9][a-z0-9-]*):([a-z0-9][a-z0-9-]*)(?:#[\w:.-]+)?')
+REF = re.compile(r'wiki:([a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*):([a-z0-9][a-z0-9-]*)(?:#[\w:.-]+)?')
+# The pre-domain form wiki:SPACE:DOCUMENT no longer resolves; check reports it.
+LEGACY_REF = re.compile(r'wiki:[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*')
 DATE = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)')
 
 
@@ -37,13 +39,13 @@ def validate_meta(meta, owner, wiki):
     if '{{' in repr(meta) or '}}' in repr(meta):
         raise WikiError('unresolved template placeholder')
     ids = meta.get('space_ids')
-    if not isinstance(ids, list) or not ids or ids[0] != owner.id:
-        raise WikiError('space_ids must start with actual owner')
+    if not isinstance(ids, list) or not ids or ids[0] != owner.address:
+        raise WikiError('space_ids must start with actual owner address')
     for ident in ids:
-        concrete_id(ident, 'space_ids')
-        related = wiki.space(ident)
-        if related.scope != owner.scope:
+        # Judge the boundary from the address alone, so another domain's state never matters.
+        if address(ident, 'space_ids').split('/')[0] != owner.domain:
             raise WikiError('cross-domain related space')
+        wiki.space(ident, {owner.domain})
     if len(set(ids)) != len(ids):
         raise WikiError('duplicate space_ids')
     if not isinstance(meta.get('sources'), list) or not all(isinstance(s, str) and s for s in meta['sources']):
@@ -68,17 +70,17 @@ class Document:
 
     @property
     def reference(self):
-        return f'wiki:{self.owner.id}:{self.meta["id"]}'
+        return f'wiki:{self.owner.address}:{self.meta["id"]}'
 
     def record(self, root):
         return dict(reference=self.reference, path=self.path.relative_to(root).as_posix(),
                     metadata=self.meta, sha256=sha256(self.path.read_bytes()))
 
 
-def scan(wiki, scope='all'):
+def scan(wiki, domains=None):
     docs, errors = [], []
     seen = set()
-    for path in wiki.files(scope):
+    for path in wiki.files(domains):
         owner = wiki.owner(path)
         if path.suffix.lower() != '.md' or owner is None:
             continue
@@ -101,15 +103,15 @@ def scan(wiki, scope='all'):
     return docs, errors
 
 
-def resolve(wiki, reference, scope='all'):
+def resolve(wiki, reference, domains=None):
     match = REF.fullmatch(reference)
     if not match:
-        raise WikiError('expected wiki:<space-id>:<document-id>')
-    owner = wiki.space(match[1], scope)
-    docs, errors = scan(wiki, owner.scope)
+        raise WikiError('expected wiki:<domain>/<space-id>:<document-id> (a domain/id space address)')
+    owner = wiki.space(match[1], domains)
+    docs, errors = scan(wiki, {owner.domain})
     if errors:
         raise WikiError('; '.join(errors))
-    matches = [d for d in docs if d.owner.id == owner.id and d.meta['id'] == match[2]]
+    matches = [d for d in docs if d.owner == owner and d.meta['id'] == match[2]]
     if len(matches) != 1:
         raise WikiError(f'unknown or ambiguous reference: {reference}')
     return matches[0]
@@ -123,8 +125,10 @@ def check_references(wiki, doc, docs, available=()):
         target = by_ref.get(ref)
         if target is None:
             errors.append(f'{doc.reference}: unresolved reference {ref}')
-        elif target.owner.scope != doc.owner.scope:
+        elif target.owner.domain != doc.owner.domain:
             errors.append(f'{doc.reference}: cross-domain reference {ref}')
+    for ref in sorted(set(m.group(0) for m in LEGACY_REF.finditer(doc.content))):
+        errors.append(f'{doc.reference}: legacy reference {ref}; use wiki:<domain>/<space-id>:<document-id>')
     for source in doc.meta['sources']:
         if source.startswith('wiki:'):
             if not REF.fullmatch(source):
@@ -145,22 +149,19 @@ def check_references(wiki, doc, docs, available=()):
     return errors
 
 
-def check(wiki, scope='all'):
-    docs, errors = scan(wiki, scope)
-    errors = [*wiki.errors, *errors]
+def check(wiki, domains=None):
+    docs, errors = scan(wiki, domains)
+    errors = [*wiki.errors_in(domains), *errors]
     # Read other domain only when requested; domain-crossing references remain unresolved errors.
     for doc in docs:
         errors.extend(check_references(wiki, doc, docs))
     import os
-    for domain in ('personal', 'work'):
-        if scope not in ('all', domain):
-            continue
-        if (wiki.root / domain).is_symlink():
-            continue
-        for parent, dirs, files in os.walk(wiki.root / domain, followlinks=False):
+    for domain in wiki.selected(domains):
+        for parent, dirs, files in os.walk(domain.path, followlinks=False):
             dirs[:] = [d for d in dirs if d not in ('.git', '.ruwana')]
             for name in [*dirs, *files]:
                 if (Path(parent) / name).is_symlink():
                     errors.append(f'{Path(parent, name).relative_to(wiki.root)}: symlink refused')
-    return dict(ok=not errors, errors=errors, documents=len(docs), spaces=len(wiki.spaces),
+    spaces = [s for s in wiki.spaces if domains is None or s.domain in domains]
+    return dict(ok=not errors, errors=errors, documents=len(docs), spaces=len(spaces),
                 limitations=['External source identifiers are not verified; no semantic analysis.'])

@@ -13,6 +13,30 @@ from .documents import DATE, check_references, metadata, scan, validate_meta
 from .safety import WikiError, concrete_id, safe_path, sha256
 
 
+# Operation journals written since space addresses (domain/id) carry this marker; those without it were
+# started by pisar <= 0.3 with plain space ids and are never resumed or reinterpreted.
+JOURNAL_FORMAT = 2
+
+
+def legacy_error(what, path, batch_directory=None):
+    """The diagnostic for state of pisar <= 0.3. A triage batch is a whole directory: abandoning only
+    its manifest would leave a directory that blocks the same batch id."""
+    head = f'{what} was started by pisar <= 0.3 with plain space ids'
+    if batch_directory is not None:
+        return WikiError(
+            f'{head} (batch directory {batch_directory}); this pisar does not resume or reinterpret it. Finish it '
+            'with pisar 0.3 BEFORE upgrading, or abandon it explicitly: move the WHOLE batch directory (it keeps its '
+            'snapshots and originals) out of the state directory, or simply use a FRESH batch id. Operation journals '
+            'of its already accepted items stay in the operations directory and are diagnosed the same way. Then '
+            'check the repository (git status, pisar check) for files it already wrote and commit or discard them '
+            'yourself, and start the work again with addresses')
+    return WikiError(
+        f'{head} (state file {path}); this pisar does not resume or reinterpret it. Finish it with pisar 0.3 '
+        'BEFORE upgrading, or abandon it explicitly: move that state file out of the state directory, then check '
+        'the repository (git status, pisar check) for files it already wrote and commit or discard them '
+        'yourself, and start the work again with addresses')
+
+
 _HELD_LOCKS = ContextVar('pisar_writer_locks', default=())
 
 
@@ -33,10 +57,20 @@ def outside_git(path):
     return path
 
 
-def atomic_bytes(path, content):
+def atomic_bytes(path, content, temp=None):
+    """Replace PATH atomically. TEMP is a journaled, operation-owned temporary name: a leftover of
+    an interrupted write can then be recognised and removed; without it the name is random."""
     external_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='.pisar-', dir=path.parent)
+    if temp is None:
+        fd, name = tempfile.mkstemp(prefix='.pisar-', dir=path.parent)
+    else:
+        name = str(path.parent / temp)
+        if os.path.islink(name):
+            raise WikiError(f'temporary path is a symlink: {name}')
+        if os.path.exists(name):
+            os.unlink(name)  # Ours: named in this operation's journal.
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(content)
@@ -46,6 +80,17 @@ def atomic_bytes(path, content):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def remove_leftovers(wiki, journal):
+    """Remove ONLY the temporary files this operation's journal names (an interrupted atomic write)."""
+    for item in journal['artifacts']:
+        if item.get('temp'):
+            leftover = safe_path(wiki.root, item['path']).parent / item['temp']
+            if leftover.is_symlink():
+                raise WikiError(f'temporary path is a symlink: {leftover}')
+            if leftover.is_file():
+                leftover.unlink()
 
 
 def write_json(path, value):
@@ -117,12 +162,12 @@ def source_bytes(path, expected=None):
     return path, data, digest
 
 
-def check_source_scope(wiki, space, path):
+def check_source_domain(wiki, space, path):
     path = external_path(path)
     if path.is_relative_to(wiki.root):
         relative = path.relative_to(wiki.root)
-        if not relative.parts or relative.parts[0] != space.scope:
-            raise WikiError(f'source scope violation: in-root source must be in {space.scope}/')
+        if not relative.parts or relative.parts[0] != space.domain:
+            raise WikiError(f'source domain violation: in-root source must be in {space.domain}/')
     return path
 
 
@@ -174,8 +219,10 @@ def validate_artifacts(wiki, journal):
             raise WikiError('journal artifact hash mismatch')
 
 
-def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=()):
-    journal = dict(schema_version=1, root=str(wiki.root), operation_id=ident,
+def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), extra=None):
+    for item in artifacts:
+        item['temp'] = f'.pisar-{ident}-{item["after"][:16]}.tmp'  # Ownership of an interrupted write.
+    journal = dict(schema_version=1, format=JOURNAL_FORMAT, root=str(wiki.root), operation_id=ident,
                    fingerprint=fingerprint(payload), status='incomplete',
                    artifacts=artifacts, commits=[], tasks={}, heads={})
     repos, _ = groups(wiki, artifacts)
@@ -188,11 +235,24 @@ def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=()):
             if relative in allowed and status != '??':
                 raise WikiError('only an untracked intended inbox source may be adopted')
         journal['heads'][str(repo)] = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+    journal.update(extra or {})  # Extra records join the first write: one atomic replace.
     runtime.store(journal)
     return journal
 
 
+def reject_legacy(runtime, ident, owned_by=None):
+    """Raise the legacy diagnostic when IDENT names a journal of pisar <= 0.3.
+
+    OWNED_BY, a root-relative folder, restricts the match to journals that wrote files inside it."""
+    journal = runtime.load(ident)
+    if journal is None or journal.get('format') == JOURNAL_FORMAT:
+        return
+    if owned_by is None or any(a['path'].startswith(owned_by + '/') for a in journal.get('artifacts', [])):
+        raise legacy_error(f'operation {ident}', runtime.journal_path(ident))
+
+
 def existing(runtime, ident, payload):
+    reject_legacy(runtime, ident)
     journal = runtime.load(ident)
     if journal and journal['fingerprint'] != fingerprint(payload):
         raise WikiError('operation id reused with changed inputs; conflict')
@@ -210,7 +270,24 @@ def owned_artifacts(wiki, journal):
     return items
 
 
+def pinned_commit(journal, child, wiki):
+    """The child commit this operation recorded, checked to hold the journaled bytes; None if it made none.
+
+    The parent gitlink is pinned to it and never follows the child's current HEAD, so later child
+    commits cannot slip into the parent's snapshot; they show as a modified submodule."""
+    recorded = next((c['commit'] for c in reversed(journal['commits']) if c['repo'] == str(child)), None)
+    if recorded is None:
+        return None
+    for item in journal['artifacts']:
+        if item['repo'] == str(child):
+            relative = (wiki.root / item['path']).relative_to(child).as_posix()
+            if gitops.blob(child, f'{recorded}:{relative}') != base64.b64decode(item['data']):
+                raise WikiError(f'recorded commit {recorded} in {child} does not hold the journaled bytes of {relative}')
+    return recorded
+
+
 def apply_files(wiki, runtime, journal):
+    remove_leftovers(wiki, journal)
     validate_artifacts(wiki, journal)
     owned = owned_artifacts(wiki, journal)
     repos, links = groups(wiki, owned)
@@ -228,6 +305,10 @@ def apply_files(wiki, runtime, journal):
             if parent_head != previous_head or subject != f'wiki: {journal["operation_id"]}' or not changed <= allowed:
                 raise WikiError(f'Git HEAD changed outside operation: {repo}')
             journal['heads'][str(repo)] = current_head
+            # Every recovered commit is recorded (a repository can be committed to more than once);
+            # parent pinning then uses the latest one.
+            if not any(c['repo'] == str(repo) and c['commit'] == current_head for c in journal['commits']):
+                journal['commits'].append(dict(repo=str(repo), commit=current_head))
             runtime.store(journal)
         gitops.clean_except(repo, allowed)
         for _, relative in gitops.dirty(repo):
@@ -241,13 +322,29 @@ def apply_files(wiki, runtime, journal):
         path = safe_path(wiki.root, item['path'])
         data = base64.b64decode(item['data'])
         if not path.is_file() or sha256(path.read_bytes()) != item['after']:
-            atomic_bytes(path, data)
+            atomic_bytes(path, data, item.get('temp'))
     # Owners first, then parent gitlinks; each checkpoint survives partial completion.
     for repo in sorted(repos, key=lambda p: len(p.parts), reverse=True):
         gitops.clean_except(repo, repos[repo])
-        commit = gitops.commit(repo, repos[repo], journal['operation_id'])
+        verified = {}
+        for item in journal['artifacts']:
+            if item['repo'] == str(repo):
+                verified[(wiki.root / item['path']).relative_to(repo).as_posix()] = base64.b64decode(item['data'])
+        pins = {link: pinned_commit(journal, child, wiki)
+                for (parent, link), child in links.items() if parent == repo}
+        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins)
         if commit:
             journal['commits'].append(dict(repo=str(repo), commit=commit))
+        for (parent, link), child in links.items():
+            pinned = pins.get(link) if parent == repo else None
+            head = gitops.run(child, 'rev-parse', 'HEAD').strip() if pinned else pinned
+            if pinned and head != pinned:
+                if not gitops.is_ancestor(child, pinned, head):
+                    raise WikiError(f'recorded commit {pinned} is no longer reachable from HEAD of {child}')
+                note = (f'{child.name} moved on after the accepted commit {pinned[:10]}; the parent was pinned to '
+                        'that commit and later commits there show as a modified submodule')
+                if note not in journal.setdefault('notes', []):
+                    journal['notes'].append(note)
         journal['heads'][str(repo)] = gitops.run(repo, 'rev-parse', 'HEAD').strip()
         runtime.store(journal)
 
@@ -256,9 +353,16 @@ def result(journal):
     return {key: journal[key] for key in ('operation_id', 'status', 'commits', 'tasks')}
 
 
+def capture_operation(space, ident):
+    # Dash-joined kebab ids are ambiguous (acme/alpha-beta vs acme-alpha/beta);
+    # a hash of the exact triple keeps distinct captures apart.
+    digest = sha256(json.dumps([space.domain, space.id, ident]).encode())[:12]
+    return f'capture-{space.domain}-{space.id}-{ident}-{digest}'
+
+
 def verify_capture(wiki, runtime, space, ident, source, digest):
-    operation = f'capture-{space.id}-{ident}'
-    payload = dict(space=space.id, id=ident, source=str(external_path(source)), sha256=digest)
+    operation = capture_operation(space, ident)
+    payload = dict(space=space.address, id=ident, source=str(external_path(source)), sha256=digest)
     journal = existing(runtime, operation, payload)
     if journal is None or journal['status'] != 'complete':
         raise WikiError('capture is not durably complete')
@@ -273,15 +377,17 @@ def verify_capture(wiki, runtime, space, ident, source, digest):
     return journal
 
 
-def capture(wiki, directory, space_id, ident, source, expected=None):
-    space = wiki.space(space_id)
+def capture(wiki, directory, space_address, ident, source, expected=None):
+    space = wiki.space(space_address)
     concrete_id(ident)
-    source = check_source_scope(wiki, space, source)
+    source = check_source_domain(wiki, space, source)
     source, data, digest = source_bytes(source, expected)
-    operation = f'capture-{space_id}-{ident}'
-    payload = dict(space=space_id, id=ident, source=str(source), sha256=digest)
+    operation = capture_operation(space, ident)
+    payload = dict(space=space.address, id=ident, source=str(source), sha256=digest)
     runtime = Runtime(directory, wiki.root)
     with runtime.lock():
+        # 0.3 named captures capture-<space id>-<id>; a retry must not be reported as a duplicate document.
+        reject_legacy(runtime, f'capture-{space.id}-{ident}', space.path.relative_to(wiki.root).as_posix())
         journal = existing(runtime, operation, payload)
         if journal is not None and journal['status'] == 'complete':
             # A subsequent save legitimately updates the queue descriptor to processed.
@@ -290,13 +396,13 @@ def capture(wiki, directory, space_id, ident, source, expected=None):
             docs, errors = scan(wiki)
             if errors:
                 raise WikiError('; '.join(errors))
-            if any(d.reference == f'wiki:{space_id}:{ident}' for d in docs):
+            if any(d.reference == f'wiki:{space.address}:{ident}' for d in docs):
                 raise WikiError('duplicate document id')
             relative = f'sources/captures/{ident}/original'
             now = datetime.now(timezone.utc).isoformat()
             text = ('+++\nschema_version = 1\n'
                     f'id = {json.dumps(ident)}\ntype = "source"\ntitle = {json.dumps(ident)}\n'
-                    f'space_ids = {json.dumps([space_id])}\nsources = {json.dumps([relative])}\n'
+                    f'space_ids = {json.dumps([space.address])}\nsources = {json.dumps([relative])}\n'
                     f'imported_at = {json.dumps(now)}\nsource_sha256 = {json.dumps(digest)}\n'
                     'ingest_status = "pending"\n'
                     f'original_name = {json.dumps(source.name)}\n+++\n\n'
@@ -359,9 +465,9 @@ def validate_plan(wiki, plan):
     if not isinstance(related, list):
         raise WikiError('related_space_ids must be array')
     for ident in related:
-        if wiki.space(ident).scope != owner.scope:
+        if wiki.space(ident).domain != owner.domain:
             raise WikiError('cross-domain meeting relation')
-    if owner.id in related or len(set(related)) != len(related):
+    if owner.address in related or len(set(related)) != len(related):
         raise WikiError('duplicate owner/related space ids')
     if 'occurred_at' in meeting:
         value = meeting['occurred_at']
@@ -373,7 +479,7 @@ def validate_plan(wiki, plan):
         raise WikiError('source.path must be absolute explicit file')
     if not isinstance(source.get('sha256'), str) or len(source['sha256']) != 64:
         raise WikiError('source.sha256 required')
-    check_source_scope(wiki, owner, source['path'])
+    check_source_domain(wiki, owner, source['path'])
     tasks = plan.get('tasks', [])
     pages = plan.get('pages', [])
     if not isinstance(tasks, list) or not isinstance(pages, list):
@@ -387,10 +493,10 @@ def validate_plan(wiki, plan):
             raise WikiError('duplicate task id')
         ids.add(ident)
         target = wiki.space(task.get('space_id'))
-        if target.scope != owner.scope or target.kind != 'project':
-            raise WikiError('task target must be a project in the meeting domain')
-        if target.id not in [owner.id, *related]:
-            raise WikiError('task target must be owner or related project')
+        if target.domain != owner.domain:
+            raise WikiError('task target must be a space in the meeting domain')
+        if target.address not in [owner.address, *related]:
+            raise WikiError('task target must be owner or related space')
         if task.get('agreed') is not True:
             raise WikiError('task requires agreed=true; proposals must not create tasks')
         if not isinstance(task.get('title'), str) or not task['title'].strip():
@@ -405,7 +511,7 @@ def validate_plan(wiki, plan):
         if not isinstance(page, dict):
             raise WikiError('page must be object')
         target = wiki.space(page.get('space_id'))
-        if target.scope != owner.scope:
+        if target.domain != owner.domain:
             raise WikiError('cross-domain derived page')
         path = safe_path(target.path, page.get('path'))
         if path.suffix != '.md' or wiki.owner(path) != target:
@@ -472,11 +578,14 @@ def verify_completed_save(wiki, journal, plan, binary, reference):
 def save(wiki, directory, plan_path, binary='ruwana'):
     from .ruwana import Ruwana
     plan = read_plan(plan_path)
+    if isinstance(plan.get('operation_id'), str):
+        # Before validating addresses: an old plan must get the legacy diagnostic, not an address error.
+        reject_legacy(Runtime(directory, wiki.root), plan['operation_id'])
     owner = validate_plan(wiki, plan)
     source, data, digest = source_bytes(plan['source']['path'], plan['source']['sha256'])
     runtime = Runtime(directory, wiki.root)
     operation = plan['operation_id']
-    reference = f'wiki:{owner.id}:{plan["meeting"]["id"]}'
+    reference = f'wiki:{owner.address}:{plan["meeting"]["id"]}'
     with runtime.lock():
         journal = existing(runtime, operation, plan)
         if journal is not None and journal['status'] == 'complete':

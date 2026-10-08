@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import unittest
 
@@ -64,7 +65,7 @@ class AgentTests(Fixture):
     def test_tools_are_minimal_and_mcp_is_disabled(self):
         _, call = self.launch()
         argv = call['argv']
-        self.assertIn('--tools=Read,Write,Edit,Glob,Grep,Bash', argv)
+        self.assertIn('--tools=Read,Write,Edit,Glob,Grep,Bash,Agent,Skill', argv)
         self.assertIn('--strict-mcp-config', argv)
 
     def test_mcp_config_is_passed_only_when_the_root_has_one(self):
@@ -93,10 +94,127 @@ class AgentTests(Fixture):
                      'Bash(pisar spaces*)', 'Bash(pisar save *)', 'Bash(pisar triage *)'):
             self.assertIn(rule, allowed)
         for rule in allowed:
-            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ')), rule)
+            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ', 'Edit(//', 'Agent(', 'Skill(')), rule)
             self.assertNotIn(rule, ('Bash(git *)', 'Bash(pisar *)', 'Bash(mv *)', 'Bash(*)', 'Bash'))
             self.assertFalse(rule.startswith('Bash(mv'), rule)
         self.assertFalse([r for r in allowed if 'pisar --' in r], 'global flags would allow --ruwana')
+
+    def test_domain_space_guard_config_lesson_and_research_commands_are_allowed(self):
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        for rule in ('Bash(pisar domain *)', 'Bash(pisar space *)', 'Bash(pisar guard *)',
+                     'Bash(pisar config *)', 'Bash(pisar research *)',
+                     'Bash(pisar lesson start *)', 'Bash(pisar lesson check *)',
+                     'Bash(pisar lesson review *)', 'Bash(pisar lesson show *)',
+                     'Bash(pisar lesson discard *)'):
+            self.assertIn(rule, allowed)
+        self.assertNotIn('Bash(pisar lesson *)', allowed)
+        self.assertFalse([r for r in allowed if 'lesson accept' in r])
+
+    def test_lesson_accept_asks_through_settings_and_is_not_allowed(self):
+        _, call = self.launch()
+        argv = call['argv']
+        settings = json.loads(argv[argv.index('--settings') + 1])
+        self.assertEqual(settings, {'permissions': {'ask': ['Bash(pisar lesson accept *)']}})
+
+    def test_only_the_lesson_workspace_is_writable_by_absolute_path(self):
+        _, call = self.launch()
+        edits = [r for r in values(call['argv'], '--allowedTools') if r.startswith('Edit(')]
+        self.assertEqual(edits, [f'Edit(/{self.state.resolve()}/lessons/**)'])
+        self.assertTrue(edits[0].startswith('Edit(//'))
+        self.assertNotIn('--add-dir', call['argv'])
+
+    def test_bundled_plugin_is_extracted_and_passed_with_plugin_dir(self):
+        from pisar import claude_plugin
+        _, call = self.launch()
+        directory = self.state.resolve() / 'agents' / 'claude' / 'plugin' / claude_plugin.generation({})
+        self.assertEqual(values(call['argv'], '--plugin-dir'), [str(directory)])
+        self.assertTrue((directory / '.claude-plugin' / 'plugin.json').is_file())
+        self.assertTrue((directory / 'skills' / 'lessons' / 'SKILL.md').is_file())
+
+    def test_reviewer_agent_takes_model_and_effort_from_the_config(self):
+        from pisar import claude_plugin
+        plugins = self.state.resolve() / 'agents' / 'claude' / 'plugin'
+        _, call = self.launch()
+        default = Path(values(call['argv'], '--plugin-dir')[0])
+        self.assertEqual(default, plugins / claude_plugin.generation({}))
+        self.assertIn('model: opus\neffort: high\n', (default / 'agents/lesson-reviewer.md').read_text())
+        self.write_config('[agents.claude.reviewer]\nmodel = "m1"\neffort = "low"\n')
+        _, call = self.launch()
+        changed = Path(values(call['argv'], '--plugin-dir')[0])
+        self.assertEqual(changed, plugins / claude_plugin.generation({'model': 'm1', 'effort': 'low'}))
+        self.assertNotEqual(changed, default)
+        self.assertIn('model: m1\neffort: low\n', (changed / 'agents/lesson-reviewer.md').read_text())
+        self.assertIn('model: opus\neffort: high\n', (default / 'agents/lesson-reviewer.md').read_text())
+
+    def test_relaunch_reuses_the_extracted_plugin_without_rewriting_it(self):
+        from pisar import claude_plugin
+        self.launch()
+        manifest = (self.state.resolve() / 'agents/claude/plugin' / claude_plugin.generation({})
+                    / '.claude-plugin/plugin.json')
+        before = manifest.stat().st_mtime_ns
+        self.launch()
+        self.assertEqual(manifest.stat().st_mtime_ns, before)
+
+    def test_plugin_dir_comes_before_the_system_prompt_and_after_caller_arguments(self):
+        _, call = self.launch('--', '-p', 'hi')
+        argv = call['argv']
+        self.assertEqual(argv[:2], ['-p', 'hi'])
+        self.assertLess(argv.index('--plugin-dir'), argv.index('--system-prompt'))
+
+    def test_reviewer_subagent_and_skills_are_usable_but_other_agents_are_denied(self):
+        _, call = self.launch()
+        argv = call['argv']
+        tools = argv[[a.startswith('--tools=') for a in argv].index(True)].split('=', 1)[1].split(',')
+        self.assertIn('Agent', tools)
+        self.assertIn('Skill', tools)
+        allowed = values(argv, '--allowedTools')
+        self.assertIn('Agent(pisar:lesson-reviewer)', allowed)
+        self.assertNotIn('Agent', allowed)
+        for skill in ('pisar', 'lessons', 'research'):
+            self.assertIn(f'Skill(pisar:{skill})', allowed)
+        denied = values(argv, '--disallowedTools')
+        for agent in ('Explore', 'general-purpose', 'Plan', 'claude', 'statusline-setup'):
+            self.assertIn(f'Agent({agent})', denied)
+        self.assertNotIn('Agent', denied)
+        self.assertNotIn('Agent(pisar:lesson-reviewer)', denied)
+
+    def other_repo(self):
+        repo = self.base / 'other-repo'
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        return repo
+
+    def test_plugin_directory_symlinked_into_a_git_repo_is_refused_before_any_write(self):
+        repo = self.other_repo()
+        config = self.state / 'agents' / 'claude'
+        config.mkdir(parents=True)
+        (config / 'plugin').symlink_to(repo)
+        p, call = self.launch(ok=False)
+        self.assertIn('pisar:', p.stderr)
+        self.assertIsNone(call)
+        self.assertEqual([x.name for x in repo.iterdir()], ['.git'])
+
+    def test_version_directory_symlink_is_refused(self):
+        from pisar import claude_plugin
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        plugin = self.state / 'agents' / 'claude' / 'plugin'
+        plugin.mkdir(parents=True)
+        (plugin / claude_plugin.generation({})).symlink_to(target)
+        p, call = self.launch(ok=False)
+        self.assertIn('symlink', p.stderr)
+        self.assertIsNone(call)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_lessons_workspace_symlink_is_refused_and_gets_no_edit_permission(self):
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'lessons').symlink_to(target)
+        p, call = self.launch(ok=False)
+        self.assertIn('symlink', p.stderr)
+        self.assertIsNone(call)
 
     def test_push_and_git_internals_are_denied(self):
         _, call = self.launch()
@@ -108,7 +226,7 @@ class AgentTests(Fixture):
         _, call = self.launch('--', '-c', 'continue the review')
         argv = call['argv']
         self.assertEqual(argv[:2], ['-c', 'continue the review'])
-        self.assertLess(argv.index('--system-prompt'), argv.index('--tools=Read,Write,Edit,Glob,Grep,Bash'))
+        self.assertLess(argv.index('--system-prompt'), argv.index('--tools=Read,Write,Edit,Glob,Grep,Bash,Agent,Skill'))
 
     def test_config_dir_is_reused_and_state_overrides_come_from_the_flag(self):
         self.launch()
@@ -147,6 +265,74 @@ class AgentTests(Fixture):
         p = self.run_pisar('--root', self.root, '--agent', 'nope', env=self.agent_env, ok=False)
         self.assertEqual(p.returncode, 2)
         self.assertFalse(self.out.exists())
+
+    # Settings from the config file
+
+    def write_config(self, text):
+        path = self.base / 'config/pisar/config.toml'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def bare(self, *args, ok=True):
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state, '--agent', *args,
+                           env=self.agent_env, ok=ok)
+        return p, (json.loads(self.out.read_text()) if self.out.exists() else None)
+
+    def test_agent_without_a_value_uses_the_configured_default(self):
+        self.write_config('default_agent = "claude"\n')
+        _, call = self.bare()
+        self.assertIn('--system-prompt', call['argv'])
+        self.assertEqual(Path(call['cwd']).resolve(), self.root.resolve())
+
+    def test_agent_without_a_value_keeps_arguments_after_double_dash(self):
+        self.write_config('default_agent = "claude"\n')
+        _, call = self.bare('--', '-c', 'continue the review')
+        self.assertEqual(call['argv'][:2], ['-c', 'continue the review'])
+
+    def test_agent_without_a_value_or_a_default_is_an_error(self):
+        p, call = self.bare(ok=False)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertTrue(p.stderr.startswith('pisar: '), p.stderr)
+        self.assertIn('default_agent', p.stderr)
+        self.assertIsNone(call)
+
+    def test_model_and_effort_are_passed_only_when_configured(self):
+        _, call = self.launch()
+        self.assertNotIn('--model', call['argv'])
+        self.assertNotIn('--effort', call['argv'])
+        self.write_config('[agents.claude]\neffort = "low"\n')
+        _, call = self.launch()
+        self.assertNotIn('--model', call['argv'])
+        self.assertEqual(values(call['argv'], '--effort'), ['low'])
+        self.write_config('[agents.claude]\nmodel = "any-model[1m]"\neffort = "max"\n')
+        _, call = self.launch('--', '-p', 'hello')
+        argv = call['argv']
+        self.assertEqual(argv[:2], ['-p', 'hello'])
+        self.assertEqual(values(argv, '--model'), ['any-model[1m]'])
+        self.assertEqual(values(argv, '--effort'), ['max'])
+
+    def test_subagent_settings_do_not_reach_the_main_session(self):
+        self.write_config('[agents.claude.reviewer]\nmodel = "opus"\neffort = "high"\n'
+                          '[agents.claude.researcher]\nmodel = "sonnet"\n')
+        _, call = self.launch()
+        self.assertNotIn('--model', call['argv'])
+        self.assertNotIn('--effort', call['argv'])
+
+    def test_explicit_agent_arguments_beat_the_config_file(self):
+        self.write_config('[agents.claude]\nmodel = "config-model"\neffort = "low"\n')
+        _, call = self.launch('--', '--model', 'flag-model', '--effort=high')
+        argv = call['argv']
+        self.assertEqual(argv.count('--model'), 1)
+        self.assertEqual(values(argv, '--model'), ['flag-model'])
+        self.assertNotIn('--effort', argv)
+        self.assertIn('--effort=high', argv)
+        self.assertNotIn('config-model', argv)
+
+    def test_invalid_config_file_stops_the_launch(self):
+        self.write_config('[agents.claude]\nmodel = 3\n')
+        p, call = self.launch(ok=False)
+        self.assertIn('agents.claude.model', p.stderr)
+        self.assertIsNone(call)
 
     def test_without_agent_or_command_it_still_fails_with_usage(self):
         p = self.run_pisar(env=self.agent_env, ok=False)

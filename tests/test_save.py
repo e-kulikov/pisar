@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import time
 from unittest.mock import patch
-from .support import Fixture, RUWANA, RUWANA_AVAILABLE, commit_all, document, git
+from .support import Fixture, RUWANA, RUWANA_AVAILABLE, commit_all, document, git, space
 
 
 BODY = '''# Synthetic launch meeting
@@ -34,13 +34,13 @@ Synthetic fixture; source has no reliable timestamp.
 class SaveTests(Fixture):
     def plan(self, ident='save-one', tasks=None):
         source = self.external()
-        value = dict(schema_version=1, operation_id=ident, space_id='alpha',
+        value = dict(schema_version=1, operation_id=ident, space_id='work/alpha',
                      source=dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()),
                      meeting=dict(id='launch-meeting', title='Launch meeting', body=BODY,
-                                  related_space_ids=['beta']),
+                                  related_space_ids=['work/beta']),
                      tasks=tasks if tasks is not None else [
-                         dict(id='prepare-launch', space_id='alpha', title='Prepare launch', agreed=True),
-                         dict(id='review-launch', space_id='beta', title='Review launch', agreed=True)],
+                         dict(id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True),
+                         dict(id='review-launch', space_id='work/beta', title='Review launch', agreed=True)],
                      pages=[])
         path = self.base / f'{ident}.json'
         path.write_text(json.dumps(value))
@@ -61,20 +61,20 @@ class SaveTests(Fixture):
         result = json.loads(self.save(path).stdout)
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(len(result['tasks']), 2)
-        for space_id, task_id in (('alpha', 'prepare-launch'), ('beta', 'review-launch')):
-            project = 'work/team/' + space_id
+        for name, task_id in (('alpha', 'prepare-launch'), ('beta', 'review-launch')):
+            project = 'work/team/' + name
             tasks = json.loads(self.ruwana('list', '--project', project, '--all', '--format', 'json'))
             self.assertEqual(len(tasks), 1)
-            self.assertIn('wiki:alpha:launch-meeting#task-' + task_id, tasks[0]['source'])
+            self.assertIn('wiki:work/alpha:launch-meeting#task-' + task_id, tasks[0]['source'])
             self.ruwana('done', tasks[0]['id'], '--project', project)
         commit_all(self.root)  # simulate legitimate task status change outside wiki CLI
         head = git(self.root, 'rev-parse', 'HEAD')
         self.save(path)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
-        meeting = self.data('read', 'wiki:alpha:launch-meeting')
+        meeting = self.data('read', 'wiki:work/alpha:launch-meeting')
         self.assertIn('## Ruwana references', meeting['content'])
         self.assertIn(next(iter(result['tasks'].values()))['id'], meeting['content'])
-        self.assertEqual(meeting['metadata']['space_ids'], ['alpha', 'beta'])
+        self.assertEqual(meeting['metadata']['space_ids'], ['work/alpha', 'work/beta'])
         self.assertEqual(len(list(self.root.rglob('launch-meeting.md'))), 1)
         self.assertEqual((self.alpha / 'sources/meetings/launch-meeting/transcript.md').read_bytes(),
                          Path(value['source']['path']).read_bytes())
@@ -100,7 +100,7 @@ class SaveTests(Fixture):
         from pisar.operations import save
         from pisar.spaces import Wiki
         from pisar.ruwana import Ruwana
-        path, _ = self.plan(tasks=[dict(id='prepare-launch', space_id='alpha', title='Prepare launch', agreed=True)])
+        path, _ = self.plan(tasks=[dict(id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
         original = Ruwana.ensure
 
         def interrupt_after_creation(adapter, *args, **kwargs):
@@ -127,19 +127,19 @@ class SaveTests(Fixture):
         self.save(path, ok=False)
 
     def test_save_rejects_unagreed_tasks_and_cross_domain(self):
-        for tasks in ([dict(id='idea', space_id='alpha', title='Maybe launch', agreed=False)],
-                      [dict(id='private', space_id='home', title='Copy work', agreed=True)]):
+        for tasks in ([dict(id='idea', space_id='work/alpha', title='Maybe launch', agreed=False)],
+                      [dict(id='private', space_id='personal/home', title='Copy work', agreed=True)]):
             path, _ = self.plan(tasks=tasks)
             self.save(path, ok=False)
             self.assertFalse((self.alpha / 'meetings').exists())
 
     def test_explicit_derived_note_update_requires_matching_base_hash(self):
         existing = self.alpha / 'overview.md'
-        existing.write_text(document('current-overview', 'alpha', body='Old knowledge.').replace('"meeting"', '"overview"'))
+        existing.write_text(document('current-overview', 'work/alpha', body='Old knowledge.').replace('"meeting"', '"overview"'))
         commit_all(self.root)
         path, value = self.plan(tasks=[])
-        content = document('current-overview', 'alpha', body='Reusable current knowledge.').replace('"meeting"', '"note"')
-        value['pages'] = [dict(space_id='alpha', path='overview.md', content=content,
+        content = document('current-overview', 'work/alpha', body='Reusable current knowledge.').replace('"meeting"', '"note"')
+        value['pages'] = [dict(space_id='work/alpha', path='overview.md', content=content,
                               base_sha256='0' * 64)]
         path.write_text(json.dumps(value))
         self.save(path, ok=False)
@@ -148,7 +148,7 @@ class SaveTests(Fixture):
         path.write_text(json.dumps(value))
         self.save(path)
         self.assertIn('Reusable current knowledge.', existing.read_text())
-        self.assertEqual(self.data('read', 'wiki:alpha:current-overview')['metadata']['type'], 'note')
+        self.assertEqual(self.data('read', 'wiki:work/alpha:current-overview')['metadata']['type'], 'note')
 
     def test_subprocess_failure_does_not_claim_task_success(self):
         binary = self.base / 'failing-ruwana'
@@ -161,9 +161,9 @@ class SaveTests(Fixture):
         self.assertEqual(journal['status'], 'incomplete')
 
     def test_duplicate_task_ids_and_unsafe_page_paths_reject_whole_plan(self):
-        for pages, tasks in ([dict(space_id='alpha', path='../escape.md', content='bad')], []), ([], [
-                dict(id='duplicate', space_id='alpha', title='one', agreed=True),
-                dict(id='duplicate', space_id='alpha', title='two', agreed=True)]):
+        for pages, tasks in ([dict(space_id='work/alpha', path='../escape.md', content='bad')], []), ([], [
+                dict(id='duplicate', space_id='work/alpha', title='one', agreed=True),
+                dict(id='duplicate', space_id='work/alpha', title='two', agreed=True)]):
             path, value = self.plan(tasks=tasks)
             value['pages'] = pages
             path.write_text(json.dumps(value))
@@ -172,23 +172,23 @@ class SaveTests(Fixture):
 
     def test_save_marks_captured_inbox_processed_only_after_success(self):
         source = self.external()
-        self.cli('capture', '--space', 'alpha', '--id', 'pending-call', '--source', source)
+        self.cli('capture', '--space', 'work/alpha', '--id', 'pending-call', '--source', source)
         path, value = self.plan()
         value['capture_id'] = 'pending-call'
         raw = self.alpha / 'sources/captures/pending-call/original'
         value['source'] = dict(path=str(raw), sha256=hashlib.sha256(raw.read_bytes()).hexdigest())
         path.write_text(json.dumps(value))
         self.save(path, binary=self.base / 'missing', ok=False)
-        self.assertEqual(self.data('read', 'wiki:alpha:pending-call')['metadata']['ingest_status'], 'pending')
+        self.assertEqual(self.data('read', 'wiki:work/alpha:pending-call')['metadata']['ingest_status'], 'pending')
         if RUWANA_AVAILABLE:
             self.save(path)
-            self.assertEqual(self.data('read', 'wiki:alpha:pending-call')['metadata']['ingest_status'], 'processed')
+            self.assertEqual(self.data('read', 'wiki:work/alpha:pending-call')['metadata']['ingest_status'], 'processed')
             self.assertEqual(raw.read_bytes(), source.read_bytes())
-            self.cli('capture', '--space', 'alpha', '--id', 'pending-call', '--source', source)
-            self.assertEqual(self.data('read', 'wiki:alpha:pending-call')['metadata']['ingest_status'], 'processed')
+            self.cli('capture', '--space', 'work/alpha', '--id', 'pending-call', '--source', source)
+            self.assertEqual(self.data('read', 'wiki:work/alpha:pending-call')['metadata']['ingest_status'], 'processed')
 
     def test_plan_cross_domain_body_and_missing_evidence_rejected_before_write(self):
-        for bad_body in ('See wiki:home:private-note.', 'See wiki:alpha:absent.'):
+        for bad_body in ('See wiki:personal/home:private-note.', 'See wiki:work/alpha:absent.'):
             path, value = self.plan(tasks=[])
             value['meeting']['body'] = bad_body
             path.write_text(json.dumps(value))
@@ -212,7 +212,7 @@ class SaveTests(Fixture):
         for index, (due, expected) in enumerate(cases):
             with self.subTest(due=due):
                 ident = f'due-{index}'
-                path, value = self.plan(ident, tasks=[dict(id='scheduled', space_id='alpha',
+                path, value = self.plan(ident, tasks=[dict(id='scheduled', space_id='work/alpha',
                                                          title='Scheduled task', agreed=True, due=due)])
                 value['meeting']['id'] = ident
                 path.write_text(json.dumps(value))
@@ -230,7 +230,7 @@ class SaveTests(Fixture):
         from pisar.operations import save
         from pisar.spaces import Wiki
         from pisar.ruwana import Ruwana
-        path, _ = self.plan(tasks=[dict(id='scheduled', space_id='alpha', title='Scheduled task', agreed=True,
+        path, _ = self.plan(tasks=[dict(id='scheduled', space_id='work/alpha', title='Scheduled task', agreed=True,
                                        due='2026-10-10T23:30:00Z')])
         original = Ruwana.run
 
@@ -257,7 +257,7 @@ class SaveTests(Fixture):
     def test_real_due_changed_day_is_still_a_conflict(self):
         self.require_ruwana()
         self.env['TZ'] = 'UTC'
-        path, _ = self.plan(tasks=[dict(id='scheduled', space_id='alpha', title='Scheduled task', agreed=True,
+        path, _ = self.plan(tasks=[dict(id='scheduled', space_id='work/alpha', title='Scheduled task', agreed=True,
                                        due='2026-10-10T12:00:00+02:00')])
         result = json.loads(self.save(path).stdout)
         task_id = result['tasks']['scheduled']['id']
@@ -270,9 +270,9 @@ class SaveTests(Fixture):
 
     def test_real_dash_title_and_markdown_description_are_literal_arguments(self):
         self.require_ruwana()
-        tasks = [dict(id='dash-title', space_id='alpha', title='-1 day slip', agreed=True,
+        tasks = [dict(id='dash-title', space_id='work/alpha', title='-1 day slip', agreed=True,
                       description='- item one\n- item two'),
-                 dict(id='option-title', space_id='alpha', title='--help', agreed=True,
+                 dict(id='option-title', space_id='work/alpha', title='--help', agreed=True,
                       description='--source=literal text')]
         path, _ = self.plan(tasks=tasks)
         result = json.loads(self.save(path).stdout)
@@ -295,7 +295,7 @@ class SaveTests(Fixture):
             # Rust's Unicode White_Space excludes these Python strip characters.
             ('control', '\x1cKeep separators\x1c', '\x1c', '\x1cKeep separators\x1c', '\x1c'),
         ]
-        tasks = [dict(id=ident, space_id='alpha', title=title, agreed=True,
+        tasks = [dict(id=ident, space_id='work/alpha', title=title, agreed=True,
                       **({} if description is None else dict(description=description)))
                  for ident, title, description, _, _ in cases]
         path, _ = self.plan(tasks=tasks)
@@ -339,7 +339,7 @@ class SaveTests(Fixture):
         for ident, title, description, expected_title, expected_description in cases:
             with self.subTest(task=ident):
                 operation = 'text-crash-' + ident
-                task = dict(id=ident, space_id='alpha', title=title, agreed=True)
+                task = dict(id=ident, space_id='work/alpha', title=title, agreed=True)
                 if description is not None:
                     task['description'] = description
                 path, value = self.plan(operation, tasks=[task])
@@ -351,7 +351,7 @@ class SaveTests(Fixture):
                         save(Wiki(self.root), self.state, path, str(RUWANA))
                 records = json.loads(self.ruwana('list', '--project', 'work/team/alpha',
                                                 '--all', '--format', 'json'))
-                marker = f'wiki:alpha:{operation}#task-{ident}'
+                marker = f'wiki:work/alpha:{operation}#task-{ident}'
                 created = [record for record in records if marker in record['source']]
                 self.assertEqual(len(created), 1)
                 created_id = created[0]['id']
@@ -373,7 +373,7 @@ class SaveTests(Fixture):
 
     def test_real_nonempty_description_edge_whitespace_change_is_content_conflict(self):
         self.require_ruwana()
-        path, _ = self.plan(tasks=[dict(id='spacing', space_id='alpha', title='Review draft', agreed=True,
+        path, _ = self.plan(tasks=[dict(id='spacing', space_id='work/alpha', title='Review draft', agreed=True,
                                        description=' \n- Keep spacing. \t')])
         result = json.loads(self.save(path).stdout)
         task_id = result['tasks']['spacing']['id']
@@ -386,7 +386,7 @@ class SaveTests(Fixture):
 
     def test_completed_replay_preserves_history_through_dirty_done_and_later_meeting_edit(self):
         self.require_ruwana()
-        path, _ = self.plan(tasks=[dict(id='task-one', space_id='alpha', title='Agreed task', agreed=True)])
+        path, _ = self.plan(tasks=[dict(id='task-one', space_id='work/alpha', title='Agreed task', agreed=True)])
         result = json.loads(self.save(path).stdout)
         journal = next(self.state.rglob('operations/save-one.json'))
         historical = journal.read_bytes()
@@ -414,13 +414,13 @@ class SaveTests(Fixture):
     def test_save_rejects_in_root_cross_domain_sources_before_destination_writes(self):
         path, value = self.plan(tasks=[])
         head = git(self.root, 'rev-parse', 'HEAD')
-        for source, target in ((self.personal / 'note.md', 'alpha'), (self.alpha / 'call.md', 'home')):
+        for source, target in ((self.personal / 'note.md', 'work/alpha'), (self.alpha / 'call.md', 'personal/home')):
             with self.subTest(target=target):
                 value['space_id'] = target
                 value['meeting']['related_space_ids'] = []
                 value['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
                 path.write_text(json.dumps(value))
-                self.assertIn('source scope', self.save(path, ok=False).stderr)
+                self.assertIn('source domain', self.save(path, ok=False).stderr)
                 self.assertFalse((self.alpha / 'meetings').exists())
                 self.assertFalse((self.personal / 'meetings').exists())
                 self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
@@ -434,3 +434,42 @@ class SaveTests(Fixture):
         path.write_text(json.dumps(value))
         self.save(path)
         self.assertEqual((self.alpha / 'sources/meetings/launch-meeting/transcript.md').read_bytes(), source.read_bytes())
+
+    def test_tasks_are_allowed_in_spaces_of_any_kind(self):
+        area = space(self.root, 'work/20-areas/ops', 'ops', kind='area')
+        resource = space(self.root, 'work/30-resources/kit', 'kit', kind='resource')
+        commit_all(self.root)
+        tasks = [dict(id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True),
+                 dict(id='staff-rota', space_id='work/ops', title='Update rota', agreed=True),
+                 dict(id='refresh-kit', space_id='work/kit', title='Refresh kit', agreed=True)]
+        path, value = self.plan(tasks=tasks)
+        value['meeting']['related_space_ids'] = ['work/ops', 'work/kit']
+        path.write_text(json.dumps(value))
+        # Validation passes; only the missing tracker stops the operation.
+        self.assertIn('unavailable', self.save(path, binary=self.base / 'missing', ok=False).stderr)
+        if RUWANA_AVAILABLE:
+            result = json.loads(self.save(path).stdout)
+            self.assertEqual(result['status'], 'complete')
+            for task_id, target in (('staff-rota', area), ('refresh-kit', resource)):
+                self.assertTrue((self.root / result['tasks'][task_id]['path']).is_relative_to(target / '.ruwana'))
+            self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
+    def test_plan_targets_are_addresses_and_stay_in_the_owner_domain(self):
+        space(self.root, 'acme/10-projects/alpha', 'alpha')
+        commit_all(self.root)
+        changes = [lambda v: v.update(space_id='alpha'),
+                   lambda v: v['meeting'].update(related_space_ids=['beta']),
+                   lambda v: v['tasks'][0].update(space_id='alpha'),
+                   lambda v: v['meeting'].update(related_space_ids=['acme/alpha']),
+                   lambda v: v['tasks'][0].update(space_id='acme/alpha'),
+                   lambda v: v.update(pages=[dict(space_id='acme/alpha', path='leak.md',
+                                                  content=document('leak', 'acme/alpha'))])]
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                path, value = self.plan(tasks=[dict(id='prepare-launch', space_id='work/alpha',
+                                                    title='Prepare launch', agreed=True)])
+                change(value)
+                path.write_text(json.dumps(value))
+                self.save(path, binary=self.base / 'missing', ok=False)
+                self.assertFalse((self.alpha / 'meetings').exists())
+                self.assertFalse(list(self.root.rglob('leak.md')))

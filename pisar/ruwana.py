@@ -96,7 +96,7 @@ class Ruwana:
             returned = self.wiki.root / returned
         if returned.resolve() != path or not path.is_file():
             raise WikiError('ruwana returned unexpected/missing task file')
-        return dict(id=ident, space_id=space.id, project=project, source=marker,
+        return dict(id=ident, space_id=space.address, project=project, source=marker,
                     path=path.relative_to(self.wiki.root).as_posix(), sha256=sha256(path.read_bytes()))
 
     def ensure(self, space, task, reference):

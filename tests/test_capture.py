@@ -6,7 +6,7 @@ from .support import Fixture, commit_all, git
 
 
 class CaptureTests(Fixture):
-    def capture(self, source=None, ident='capture-one', space='alpha', **kwargs):
+    def capture(self, source=None, ident='capture-one', space='work/alpha', **kwargs):
         return self.data('capture', '--space', space, '--id', ident,
                          '--source', source or self.external(), **kwargs)
 
@@ -25,16 +25,16 @@ class CaptureTests(Fixture):
         self.capture(source)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
-        self.assertEqual(self.data('read', 'wiki:alpha:capture-one')['metadata']['type'], 'source')
-        pending = self.data('inventory', '--space', 'alpha')['documents']
-        self.assertEqual(next(d['metadata']['ingest_status'] for d in pending if d['reference'] == 'wiki:alpha:capture-one'), 'pending')
+        self.assertEqual(self.data('read', 'wiki:work/alpha:capture-one')['metadata']['type'], 'source')
+        pending = self.data('inventory', '--space', 'work/alpha')['documents']
+        self.assertEqual(next(d['metadata']['ingest_status'] for d in pending if d['reference'] == 'wiki:work/alpha:capture-one'), 'pending')
 
     def test_changed_original_and_explicit_hash_mismatch_are_conflicts(self):
         source = self.external()
         self.capture(source)
         source.write_text('changed')
-        self.cli('capture', '--space', 'alpha', '--id', 'capture-one', '--source', source, ok=False)
-        self.cli('capture', '--space', 'alpha', '--id', 'new-one', '--source', source,
+        self.cli('capture', '--space', 'work/alpha', '--id', 'capture-one', '--source', source, ok=False)
+        self.cli('capture', '--space', 'work/alpha', '--id', 'new-one', '--source', source,
                  '--sha256', '0' * 64, ok=False)
         self.assertFalse((self.alpha / 'sources/captures/new-one').exists())
 
@@ -44,7 +44,7 @@ class CaptureTests(Fixture):
             if runtime.name == 'outside-link':
                 runtime.symlink_to(self.root, target_is_directory=True)
             with self.subTest(runtime=runtime):
-                self.cli('capture', '--space', 'alpha', '--id', 'bad-runtime', '--source', source,
+                self.cli('capture', '--space', 'work/alpha', '--id', 'bad-runtime', '--source', source,
                          state=runtime, ok=False)
         self.assertFalse((self.alpha / 'sources/captures').exists())
 
@@ -55,22 +55,22 @@ class CaptureTests(Fixture):
         for staged in (False, True):
             if staged:
                 git(self.root, 'add', '--', 'unrelated.txt')
-            self.cli('capture', '--space', 'alpha', '--id', 'dirty', '--source', source, ok=False)
+            self.cli('capture', '--space', 'work/alpha', '--id', 'dirty', '--source', source, ok=False)
             self.assertEqual(dirty.read_text(), 'keep exactly')
             self.assertFalse((self.alpha / 'sources/captures/dirty').exists())
 
     def test_capture_rejects_id_traversal_symlink_and_existing_target(self):
         source = self.external()
-        self.cli('capture', '--space', 'alpha', '--id', '../../escape', '--source', source, ok=False)
+        self.cli('capture', '--space', 'work/alpha', '--id', '../../escape', '--source', source, ok=False)
         (self.alpha / 'sources').symlink_to(self.base, target_is_directory=True)
         commit_all(self.root)
-        self.cli('capture', '--space', 'alpha', '--id', 'escape', '--source', source, ok=False)
+        self.cli('capture', '--space', 'work/alpha', '--id', 'escape', '--source', source, ok=False)
         self.assertFalse((self.base / 'captures').exists())
         (self.alpha / 'sources').unlink()
         (self.alpha / 'sources/captures/existing').mkdir(parents=True)
         (self.alpha / 'sources/captures/existing/original').write_text('keep')
         commit_all(self.root)
-        self.cli('capture', '--space', 'alpha', '--id', 'existing', '--source', source, ok=False)
+        self.cli('capture', '--space', 'work/alpha', '--id', 'existing', '--source', source, ok=False)
         self.assertEqual((self.alpha / 'sources/captures/existing/original').read_text(), 'keep')
 
     def test_capture_in_submodule_commits_child_then_parent_gitlink(self):
@@ -78,7 +78,7 @@ class CaptureTests(Fixture):
         source = self.external()
         child_before = git(module, 'rev-parse', 'HEAD')
         parent_before = git(self.root, 'rev-parse', 'HEAD')
-        result = self.capture(source, space='module')
+        result = self.capture(source, space='work/module')
         self.assertNotEqual(git(module, 'rev-parse', 'HEAD'), child_before)
         self.assertNotEqual(git(self.root, 'rev-parse', 'HEAD'), parent_before)
         self.assertEqual(git(self.root, 'show', '--format=', '--name-only', 'HEAD'), 'work/module')
@@ -95,7 +95,7 @@ class CaptureTests(Fixture):
         source = self.external()
         with patch('pisar.gitops.commit', side_effect=WikiError('synthetic commit failure')):
             with self.assertRaises(WikiError):
-                capture(Wiki(self.root), self.state, 'alpha', 'recovery', source)
+                capture(Wiki(self.root), self.state, 'work/alpha', 'recovery', source)
         self.assertTrue((self.alpha / 'sources/captures/recovery/original').exists())
         manifests = list(self.state.rglob('operations/*.json'))
         self.assertEqual(len(manifests), 1)
@@ -108,7 +108,7 @@ class CaptureTests(Fixture):
         from pisar.operations import Runtime
         runtime = Runtime(self.state, self.root)
         with runtime.lock():
-            p = self.cli('capture', '--space', 'alpha', '--id', 'busy', '--source', self.external(), ok=False)
+            p = self.cli('capture', '--space', 'work/alpha', '--id', 'busy', '--source', self.external(), ok=False)
         self.assertIn('lock', p.stderr.lower())
         self.assertFalse((self.alpha / 'sources/captures/busy').exists())
 
@@ -126,7 +126,7 @@ class CaptureTests(Fixture):
         another.write_text('next intended source')
         unrelated = inbox / 'unrelated.txt'
         unrelated.write_text('preserve other pending drop')
-        self.cli('capture', '--space', 'alpha', '--id', 'next-one', '--source', another, ok=False)
+        self.cli('capture', '--space', 'work/alpha', '--id', 'next-one', '--source', another, ok=False)
         self.assertEqual(unrelated.read_text(), 'preserve other pending drop')
         self.assertFalse((inbox / 'next-one.md').exists())
 
@@ -139,19 +139,19 @@ class CaptureTests(Fixture):
         source = self.external()
         original_commit = gitops.commit
 
-        def fail_parent(repo, paths, operation):
+        def fail_parent(repo, paths, operation, **kwargs):
             if repo == self.root:
                 raise WikiError('synthetic parent Git failure')
-            return original_commit(repo, paths, operation)
+            return original_commit(repo, paths, operation, **kwargs)
 
         with patch.object(gitops, 'commit', fail_parent):
             with self.assertRaises(WikiError):
-                capture(Wiki(self.root), self.state, 'module', 'head-conflict', source)
+                capture(Wiki(self.root), self.state, 'work/module', 'head-conflict', source)
         user_file = module / 'user-work.txt'
         user_file.write_text('independent user work')
         commit_all(module)
         head = git(module, 'rev-parse', 'HEAD')
-        self.cli('capture', '--space', 'module', '--id', 'head-conflict', '--source', source, ok=False)
+        self.cli('capture', '--space', 'work/module', '--id', 'head-conflict', '--source', source, ok=False)
         self.assertEqual(git(module, 'rev-parse', 'HEAD'), head)
         self.assertEqual(user_file.read_text(), 'independent user work')
 
@@ -163,10 +163,10 @@ class CaptureTests(Fixture):
 
     def test_capture_rejects_cross_domain_sources_before_destination_writes(self):
         head = git(self.root, 'rev-parse', 'HEAD')
-        for source, target in ((self.personal / 'note.md', 'alpha'), (self.alpha / 'call.md', 'home')):
+        for source, target in ((self.personal / 'note.md', 'work/alpha'), (self.alpha / 'call.md', 'personal/home')):
             with self.subTest(target=target):
                 failed = self.cli('capture', '--space', target, '--id', 'wrong-domain', '--source', source, ok=False)
-                self.assertIn('source scope', failed.stderr)
+                self.assertIn('source domain', failed.stderr)
                 self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
                 self.assertFalse(list(self.root.rglob('wrong-domain.md')))
 
@@ -175,8 +175,8 @@ class CaptureTests(Fixture):
         self.capture(source)
         descriptor = self.alpha / 'inbox/capture-one.md'
         self.assertNotIn(str(source), descriptor.read_text())
-        meta = self.data('read', 'wiki:alpha:capture-one')['metadata']
+        meta = self.data('read', 'wiki:work/alpha:capture-one')['metadata']
         self.assertEqual(meta['original_name'], 'transcript.txt')
         self.assertEqual(meta['source_sha256'], hashlib.sha256(source.read_bytes()).hexdigest())
-        journal = next(self.state.rglob('operations/capture-alpha-capture-one.json'))
+        journal = next(self.state.rglob('operations/capture-work-alpha-capture-one-*.json'))
         self.assertEqual(json.loads(journal.read_text())['source_path'], str(source))

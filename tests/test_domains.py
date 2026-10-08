@@ -1,0 +1,286 @@
+"""Domains: top-level directories marked by .domain.toml, nothing hardcoded."""
+import json
+from .support import Fixture, commit_all, document, domain, git, init_repo, space
+
+
+class DomainDiscoveryTests(Fixture):
+    def spaces(self, *args):
+        return self.data('spaces', *args)['spaces']
+
+    def test_spaces_report_domain_and_address(self):
+        found = {s['id']: s for s in self.spaces()}
+        self.assertEqual(found['alpha']['domain'], 'work')
+        self.assertEqual(found['alpha']['address'], 'work/alpha')
+        self.assertEqual(found['home']['domain'], 'personal')
+        self.assertEqual(found['home']['address'], 'personal/home')
+        self.assertEqual(found['home']['path'], 'personal/10-projects/home')
+
+    def test_any_marked_directory_is_a_domain_and_unmarked_ones_are_not(self):
+        domain(self.root, 'acme', 'Acme Corp')
+        space(self.root, 'acme/20-areas/ops', 'ops', kind='area')
+        (self.root / 'docs').mkdir()
+        space(self.root / 'docs', 'guide', 'guide')  # .wiki.toml outside any domain
+        (self.personal.parents[1] / '.domain.toml').unlink()
+        commit_all(self.root)
+        self.assertEqual(sorted(s['address'] for s in self.spaces()),
+                         ['acme/ops', 'work/alpha', 'work/beta'])
+        self.assertTrue(self.data('check')['ok'])
+
+    def test_invalid_markers_are_reported_with_their_path(self):
+        bad = {
+            'id differs from directory': 'schema_version = 1\nid = "other"\ntitle = "Acme"\n',
+            'wrong schema': 'schema_version = 2\nid = "acme"\ntitle = "Acme"\n',
+            'schema as string': 'schema_version = "1"\nid = "acme"\ntitle = "Acme"\n',
+            'missing title': 'schema_version = 1\nid = "acme"\n',
+            'blank title': 'schema_version = 1\nid = "acme"\ntitle = " "\n',
+            'unknown key': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\nowner = "x"\n',
+            'unknown layout kind': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[layout]\nmisc = "x"\n',
+            'layout escapes': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[layout]\nproject = "../x"\n',
+            'layout not string': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[layout]\narea = 3\n',
+            'layout collision': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[layout]\narea = "10-projects"\n',
+            'min_segments zero': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[ids]\nmin_segments = 0\n',
+            'min_segments bool': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[ids]\nmin_segments = true\n',
+            'aliases not strings': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[sensitive]\naliases = [1]\n',
+            'unknown sensitive key': 'schema_version = 1\nid = "acme"\ntitle = "Acme"\n[sensitive]\nclients = []\n',
+            'invalid toml': 'schema_version = 1\nid = "acme\n',
+        }
+        marker = self.root / 'acme/.domain.toml'
+        marker.parent.mkdir()
+        for name, content in bad.items():
+            with self.subTest(name):
+                marker.write_text(content)
+                failed = self.cli('spaces', ok=False)
+                self.assertIn('acme/.domain.toml', failed.stderr)
+                result = json.loads(self.cli('check', ok=False).stdout)
+                self.assertTrue(any('acme/.domain.toml' in e for e in result['errors']), result)
+
+    def test_full_marker_is_accepted(self):
+        domain(self.root, 'acme', 'Acme Corp', extra=(
+            '[layout]\nproject = "p"\narea = "a"\nresource = "r"\narchive = "z"\ninbox = "in"\n'
+            '[ids]\nmin_segments = 2\n[sensitive]\naliases = ["ACME Inc"]\nterms = ["Rocket"]\n'))
+        space(self.root, 'acme/p/launch-plan', 'launch-plan')
+        self.assertIn('acme/launch-plan', [s['address'] for s in self.spaces()])
+        from pisar.spaces import Wiki
+        acme = Wiki(self.root).domains['acme']
+        self.assertEqual(acme.title, 'Acme Corp')
+        self.assertEqual(acme.layout['inbox'], 'in')
+        self.assertEqual(acme.min_segments, 2)
+        self.assertEqual((acme.aliases, acme.terms), (('ACME Inc',), ('Rocket',)))
+
+    def test_layout_defaults(self):
+        from pisar.spaces import Wiki
+        work = Wiki(self.root).domains['work']
+        self.assertEqual(work.layout, dict(project='10-projects', area='20-areas', resource='30-resources',
+                                           archive='40-archives', inbox='inbox'))
+        self.assertEqual(work.min_segments, 1)
+        self.assertEqual((work.aliases, work.terms), ((), ()))
+
+    def test_symlinked_marker_or_domain_directory_is_refused(self):
+        outside = self.base / 'outside-domain'
+        outside.mkdir()
+        (outside / '.domain.toml').write_text('schema_version = 1\nid = "linked"\ntitle = "Linked"\n')
+        space(outside, 'sub/leak', 'leak')
+        (self.root / 'linked').symlink_to(outside, target_is_directory=True)
+        failed = self.cli('spaces', ok=False)
+        self.assertIn('linked', failed.stderr)
+        (self.root / 'linked').unlink()
+        (self.root / 'linked').mkdir()
+        (self.root / 'linked/.domain.toml').symlink_to(outside / '.domain.toml')
+        self.assertIn('linked/.domain.toml', self.cli('spaces', ok=False).stderr)
+
+    def test_domain_directory_cannot_itself_be_a_space(self):
+        space(self.root, 'work', 'work')
+        self.assertIn('work/.wiki.toml', self.cli('spaces', ok=False).stderr)
+
+
+class AddressTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        domain(self.root, 'acme', 'Acme Corp')
+        self.acme = space(self.root, 'acme/10-projects/alpha', 'alpha')
+        (self.acme / 'call.md').write_text(document(owner='acme/alpha', body='Acme-only words.'))
+        commit_all(self.root)
+
+    def test_space_ids_are_unique_per_domain_only(self):
+        self.assertEqual(sorted(s['address'] for s in self.data('spaces')['spaces'] if s['id'] == 'alpha'),
+                         ['acme/alpha', 'work/alpha'])
+        self.assertTrue(self.data('check')['ok'])
+        work = self.data('read', 'wiki:work/alpha:call-one')
+        acme = self.data('read', 'wiki:acme/alpha:call-one')
+        self.assertEqual((work['path'], acme['path']), ('work/team/alpha/call.md', 'acme/10-projects/alpha/call.md'))
+        self.assertEqual(acme['reference'], 'wiki:acme/alpha:call-one')
+        self.assertEqual([r['reference'] for r in self.data('search', 'words', '--space', 'acme/alpha')['results']],
+                         ['wiki:acme/alpha:call-one'])
+        self.assertEqual([d['reference'] for d in self.data('inventory', '--space', 'work/alpha')['documents']],
+                         ['wiki:work/alpha:call-one'])
+
+    def test_duplicate_id_within_a_domain_is_an_error_even_when_archived(self):
+        space(self.root, 'acme/40-archives/old-alpha', 'alpha', status='archived')
+        self.assertIn('duplicate space id: acme/alpha', self.cli('spaces', ok=False).stderr)
+
+    def test_bare_space_ids_are_refused_where_addresses_are_expected(self):
+        self.assertIn('domain/id', self.cli('read', 'wiki:alpha:call-one', ok=False).stderr)
+        self.cli('search', 'words', '--space', 'alpha', ok=False)
+        self.cli('inventory', '--space', 'alpha', ok=False)
+        self.cli('capture', '--space', 'alpha', '--id', 'bare', '--source', self.external(), ok=False)
+        self.cli('capture', '--space', 'nowhere/alpha', '--id', 'bare', '--source', self.external(), ok=False)
+        self.assertFalse(list(self.root.rglob('bare.md')))
+
+    def test_front_matter_space_ids_are_addresses(self):
+        (self.acme / 'call.md').write_text(document(owner='alpha'))
+        self.cli('check', ok=False)
+        (self.acme / 'call.md').write_text(document(owner='work/alpha'))
+        self.cli('check', ok=False)
+
+    def test_legacy_references_are_reported_by_check(self):
+        (self.acme / 'call.md').write_text(document(owner='acme/alpha', body='See wiki:alpha:call-one.'))
+        result = json.loads(self.cli('check', ok=False).stdout)
+        self.assertTrue(any('wiki:alpha:call-one' in e for e in result['errors']), result)
+
+    def test_domain_is_the_confidentiality_boundary(self):
+        for content in (document(owner='acme/alpha', related=('work/beta',)),
+                        document(owner='acme/alpha', body='See wiki:work/alpha:call-one.'),
+                        document(owner='acme/alpha', sources=('wiki:work/alpha:call-one',))):
+            with self.subTest(content=content):
+                (self.acme / 'call.md').write_text(content)
+                result = json.loads(self.cli('check', ok=False).stdout)
+                self.assertTrue(any('cross-domain' in e for e in result['errors']), result)
+        failed = self.cli('capture', '--space', 'work/alpha', '--id', 'leak',
+                          '--source', self.acme / 'call.md', ok=False)
+        self.assertIn('source domain', failed.stderr)
+        self.assertFalse(list(self.root.rglob('leak.md')))
+
+    def test_capture_writes_address_metadata_and_a_domain_qualified_journal(self):
+        self.data('capture', '--space', 'acme/alpha', '--id', 'acme-capture', '--source', self.external())
+        meta = self.data('read', 'wiki:acme/alpha:acme-capture')['metadata']
+        self.assertEqual(meta['space_ids'], ['acme/alpha'])
+        self.assertTrue(list(self.state.rglob('operations/capture-acme-alpha-acme-capture*.json')))
+
+    def test_captures_into_addresses_with_equal_dash_joins_do_not_collide(self):
+        first = space(self.root, 'acme/10-projects/alpha-beta', 'alpha-beta')
+        second = space(self.root, 'acme-alpha/10-projects/beta', 'beta')
+        commit_all(self.root)
+        sources = {'acme/alpha-beta': self.base / 'first.txt', 'acme-alpha/beta': self.base / 'second.txt'}
+        for address, source in sources.items():
+            source.write_text(f'Synthetic original for {address}')
+            self.assertEqual(self.data('capture', '--space', address, '--id', 'call', '--source', source)['status'],
+                             'complete')
+        self.assertEqual((first / 'sources/captures/call/original').read_text(), 'Synthetic original for acme/alpha-beta')
+        self.assertEqual((second / 'sources/captures/call/original').read_text(), 'Synthetic original for acme-alpha/beta')
+        self.assertEqual(len(list(self.state.rglob('operations/*.json'))), 2)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        for address, source in sources.items():
+            with self.subTest(retry=address):
+                self.assertEqual(self.data('capture', '--space', address, '--id', 'call', '--source', source)['status'],
+                                 'complete')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
+
+class SelectionTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.acme = space(self.root, 'acme/10-projects/rocket', 'rocket')
+        (self.acme / 'call.md').write_text(document(owner='acme/rocket', body='Acme launch notes.'))
+        commit_all(self.root)
+
+    def addresses(self, *args):
+        return sorted(s['address'] for s in self.data('spaces', *args)['spaces'])
+
+    def test_neither_flag_selects_all_domains(self):
+        self.assertEqual(self.addresses(), ['acme/rocket', 'personal/home', 'work/alpha', 'work/beta'])
+
+    def test_include_and_exclude_are_comma_separated_and_repeatable(self):
+        self.assertEqual(self.addresses('--include', 'personal'), ['personal/home'])
+        self.assertEqual(self.addresses('--include', 'personal,acme'), ['acme/rocket', 'personal/home'])
+        self.assertEqual(self.addresses('--include', 'personal', '--include', 'acme'),
+                         ['acme/rocket', 'personal/home'])
+        self.assertEqual(self.addresses('--exclude', 'work,personal'), ['acme/rocket'])
+        self.assertEqual(self.addresses('--exclude', 'work', '--exclude', 'acme'), ['personal/home'])
+        self.assertEqual(self.addresses('--include', 'work,acme', '--exclude', 'acme'), ['work/alpha', 'work/beta'])
+
+    def test_unknown_domain_is_an_error(self):
+        for flag in ('--include', '--exclude'):
+            for command in (('spaces',), ('check',), ('inventory',), ('search', 'launch'),
+                            ('read', 'wiki:work/alpha:call-one')):
+                with self.subTest(flag=flag, command=command):
+                    self.assertIn('unknown domain: nowhere', self.cli(*command, flag, 'work,nowhere', ok=False).stderr)
+
+    def test_search_inventory_and_read_respect_the_selection(self):
+        refs = lambda result, key: sorted(d['reference'] for d in result[key])
+        self.assertEqual(refs(self.data('search', 'launch', '--include', 'acme'), 'results'),
+                         ['wiki:acme/rocket:call-one'])
+        self.assertEqual(refs(self.data('search', 'launch', '--exclude', 'acme,personal'), 'results'),
+                         ['wiki:work/alpha:call-one'])
+        files = self.data('inventory', '--exclude', 'work,acme')['files']
+        self.assertTrue(files and all(f.startswith('personal/') for f in files), files)
+        self.cli('inventory', '--space', 'work/alpha', '--include', 'acme', ok=False)
+        self.cli('search', 'launch', '--space', 'work/alpha', '--exclude', 'work', ok=False)
+        self.cli('read', 'wiki:personal/home:private-note', '--include', 'work', ok=False)
+        self.cli('read', 'personal/10-projects/home/note.md', '--exclude', 'personal', ok=False)
+        self.assertIn('Private', self.data('read', 'personal/10-projects/home/note.md',
+                                           '--include', 'personal')['content'])
+
+    def test_check_validates_only_selected_domains_documents(self):
+        (self.acme / 'call.md').write_text(document(owner='acme/rocket').replace('schema_version = 1', 'schema_version = 9'))
+        self.assertTrue(self.data('check', '--exclude', 'acme')['ok'])
+        self.cli('check', '--include', 'acme', ok=False)
+        self.cli('check', ok=False)
+
+    def assert_work_is_usable(self, *flags):
+        self.assertEqual(self.addresses(*flags), ['work/alpha', 'work/beta'])
+        self.assertTrue(self.data('check', *flags)['ok'])
+        self.assertIn('русский', self.data('read', 'wiki:work/alpha:call-one', *flags)['content'])
+        self.assertEqual([r['reference'] for r in self.data('search', 'русский', *flags)['results']],
+                         ['wiki:work/alpha:call-one'])
+        self.assertEqual([d['reference'] for d in self.data('inventory', '--space', 'work/beta', *flags)['documents']],
+                         ['wiki:work/alpha:call-one'])
+
+    def test_invalid_space_in_an_unselected_domain_does_not_block(self):
+        (self.personal / '.wiki.toml').write_text('schema_version = 1\nid = "home"\nkind = "bogus"\nstatus = "active"\n')
+        space(self.root, 'acme/40-archives/rocket', 'rocket', status='archived')  # duplicate id in acme
+        commit_all(self.root)
+        self.assert_work_is_usable('--include', 'work')
+        self.assert_work_is_usable('--exclude', 'personal,acme')
+        for flags in ((), ('--include', 'personal'), ('--include', 'acme')):
+            with self.subTest(flags=flags):
+                self.cli('spaces', *flags, ok=False)
+                self.assertFalse(json.loads(self.cli('check', *flags, ok=False).stdout)['ok'])
+
+    def test_marked_directory_with_invalid_marker_can_be_excluded(self):
+        (self.root / 'acme/.domain.toml').write_text('schema_version = 1\nid = "other"\ntitle = "Acme"\n')
+        outside = self.base / 'linked-domain'
+        outside.mkdir()
+        (outside / '.domain.toml').write_text('schema_version = 1\nid = "linked"\ntitle = "Linked"\n')
+        (self.root / 'linked').symlink_to(outside, target_is_directory=True)
+        self.assert_work_is_usable('--include', 'work')
+        self.assert_work_is_usable('--exclude', 'acme,linked,personal')
+        for name in ('acme', 'linked'):
+            with self.subTest(name=name):
+                failed = self.cli('spaces', '--include', name, ok=False)
+                self.assertNotIn('unknown domain', failed.stderr)
+                self.assertIn(name, failed.stderr)
+                self.cli('spaces', '--exclude', name, ok=False)  # the other one is still selected
+
+    def test_scope_flag_is_gone(self):
+        self.assertEqual(self.cli('spaces', '--scope', 'work', ok=False).returncode, 2)
+
+
+class SubmoduleDomainTests(Fixture):
+    def test_a_domain_can_be_a_submodule_and_writes_commit_child_then_parent(self):
+        remote = self.base / 'acme-origin'
+        init_repo(remote)
+        (remote / '.domain.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
+        space(remote, '10-projects/rocket', 'rocket')
+        commit_all(remote)
+        git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(remote), 'acme')
+        module = self.root / 'acme'
+        git(module, 'config', 'user.email', 'synthetic@example.invalid')
+        git(module, 'config', 'user.name', 'Synthetic fixture')
+        commit_all(self.root)
+        self.assertIn('acme/rocket', [s['address'] for s in self.data('spaces', '--include', 'acme')['spaces']])
+        result = self.data('capture', '--space', 'acme/rocket', '--id', 'acme-call', '--source', self.external())
+        self.assertEqual(len(result['commits']), 2)
+        self.assertEqual(git(self.root, 'show', '--format=', '--name-only', 'HEAD'), 'acme')
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(self.data('read', 'wiki:acme/rocket:acme-call')['metadata']['space_ids'], ['acme/rocket'])

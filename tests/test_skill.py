@@ -42,7 +42,7 @@ class SkillTests(Fixture):
     def test_skill_documents_every_global_option_and_variable(self):
         text = self.skill().stdout
         for token in ('--root', '--state-dir', '--ruwana', 'PISAR_ROOT',
-                      'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', '--scope', '--version'):
+                      'PISAR_STATE_DIR', 'PISAR_RUWANA_BIN', '--include', '--exclude', '--version'):
             self.assertIn(token, text, token)
 
     def test_skill_is_generic_and_leaks_nothing_local(self):

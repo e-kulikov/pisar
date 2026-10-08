@@ -63,12 +63,12 @@ class RollbackTests(Fixture):
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
     def test_documented_rollback_keeps_closed_real_task_in_plain_repository(self):
-        self.exercise_rollback(self.alpha, 'alpha')
+        self.exercise_rollback(self.alpha, 'work/alpha')
 
     def test_documented_rollback_keeps_closed_real_task_and_updates_submodule_gitlink(self):
         module = self.add_submodule()
-        self.exercise_rollback(module, 'module', module)
+        self.exercise_rollback(module, 'work/module', module)
 
     def test_documented_rollback_root_meeting_and_task_only_child_preserve_gitlink(self):
         module = self.add_submodule()
-        self.exercise_rollback(self.alpha, 'alpha', module, task_space='module')
+        self.exercise_rollback(self.alpha, 'work/alpha', module, task_space='work/module')
