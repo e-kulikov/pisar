@@ -262,6 +262,21 @@ class CommandTests(unittest.TestCase):
     def excerpts(self, result, category='term'):
         return [f['excerpt'] for f in result['findings'] if f['category'] == category]
 
+    def test_malformed_domain_markers_fail_closed_with_the_canonical_error(self):
+        for body, message in (
+                ('schema_version = 1\nid = "acme"\ntitle = "Acme"\n[sensitive]\nterm = ["X"]\n',
+                 'unknown key in [sensitive]: term'),
+                ('schema_version = 1\nid = "acme"\ntitle = "Acme"\nextra = 1\n', 'unknown key: extra'),
+                ('schema_version = 1\nid = "acme"\ntitle = "Acme"\n[sensitive]\nterms = [1]\n',
+                 'sensitive.terms must be an array of nonempty strings'),
+                ('schema_version = 1\nid = "other"\ntitle = "Acme"\n', 'must equal the directory name')):
+            (self.root / 'acme' / '.domain.toml').write_text(body)
+            for args in (('--from', 'acme'), ('--from', 'home'), ('--outbound',)):
+                p = self.run_guard('check', '--text', 'X Bluebird', *args, code=1)
+                self.assertIn('acme/.domain.toml', p.stderr)
+                self.assertIn(message, p.stderr)
+                self.assertEqual(p.stdout, '')
+
     def test_json_shape_and_exit_zero_with_findings(self):
         result = self.check('--text', 'Acme mail ops@example.com', '--from', 'acme', '--to', 'home')
         self.assertEqual(set(result), {'findings', 'limits'})

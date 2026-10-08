@@ -112,6 +112,16 @@ class CheckTests(LessonCase):
         self.assertIn('+Size a launch', second['diff'])
         self.assertEqual((ws / 'revisions/r1.md').read_text(), DIRTY)  # immutable
 
+    def test_a_malformed_domain_marker_fails_the_check_and_records_no_revision(self):
+        batch, draft = self.start()
+        (self.root / 'work' / '.domain.toml').write_text(
+            'schema_version = 1\nid = "work"\ntitle = "Work"\n[sensitive]\nterm = ["Alpha"]\n')
+        draft.write_text(CLEAN, encoding='utf-8')
+        p = self.cli('lesson', 'check', '--batch', batch, ok=False)
+        self.assertIn('unknown key in [sensitive]: term', p.stderr)
+        self.assertEqual(list((self.workspace(batch) / 'revisions').glob('*')), [])
+        self.assertEqual(json.loads((self.workspace(batch) / 'meta.json').read_text())['revisions'], [])
+
     def test_unchanged_draft_keeps_the_current_revision_and_its_review(self):
         batch, draft, checked = self.prepared()
         again = self.check(batch)

@@ -234,8 +234,9 @@ def check(wiki, state, ident):
             report = read_json(batch.file(f'{revision}.report.json'), f'{revision}.report.json')
         else:
             revision = f'r{len(meta["revisions"]) + 1}'
-            atomic_bytes(batch.file(f'revisions/{revision}.md'), data)
+            # Guard first: a malformed domain marker must fail before any revision is written.
             found = guard.check(wiki.root, text, meta['from']['domain'], meta['to'].split('/')[0])
+            atomic_bytes(batch.file(f'revisions/{revision}.md'), data)
             report = dict(schema_version=1, revision=revision, sha256=digest, created_at=now(), **found)
             write_json(batch.file(f'{revision}.report.json'), report)
             meta['revisions'].append(dict(revision=revision, sha256=digest))

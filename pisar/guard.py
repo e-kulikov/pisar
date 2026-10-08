@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import tomllib
 from .safety import WikiError
+from .spaces import load_domain
 
 
 LIMITS = ('Best effort: a deterministic lexical scan, not a guarantee. It reports only what its '
@@ -294,8 +295,9 @@ def _spaces(base, root, ident):
         if '.wiki.toml' not in names or (here / '.wiki.toml').is_symlink():
             continue
         meta = _toml(here / '.wiki.toml', root)
-        if isinstance(meta.get('id'), str):
-            yield meta['id'], f'{ident}: space id'
+        if not isinstance(meta.get('id'), str) or not meta['id'].strip():
+            raise WikiError(f'{here.relative_to(root)}/.wiki.toml: id must be a nonempty string')
+        yield meta['id'], f'{ident}: space id'
         title = _title(here / 'README.md')
         if title:
             yield title, f'{ident}: space title'
@@ -309,26 +311,29 @@ def domains(root):
     found = []
     for entry in sorted(root.iterdir()):
         marker = entry / '.domain.toml'
+        if entry.name.startswith('.'):
+            continue  # like Wiki: hidden directories are not domains
         if entry.is_symlink():
             if os.path.lexists(marker):
                 raise WikiError(f'{entry.name}: symlinked domain refused')
             continue
         if not entry.is_dir() or not os.path.lexists(marker):
             continue
-        meta = _toml(marker, root)
+        # The one canonical validation (spaces.load_domain): a malformed marker must not silently
+        # drop its terms, so any problem fails closed with the same message `pisar spaces` gives.
         where = f'{entry.name}/.domain.toml'
-        if type(meta.get('schema_version')) is not int or meta['schema_version'] != 1:
-            raise WikiError(f'{where}: schema_version must be 1')
-        ident = meta.get('id')
-        if not isinstance(ident, str) or not DOMAIN_ID.fullmatch(ident) or ident != entry.name:
-            raise WikiError(f'{where}: id must be a lowercase kebab id equal to the directory name')
-        title = meta.get('title', '')
-        sensitive = meta.get('sensitive', {})
-        if not isinstance(title, str) or not isinstance(sensitive, dict):
-            raise WikiError(f'{where}: title must be a string and [sensitive] a table')
-        terms = [(ident, f'{ident}: domain id'), (title, f'{ident}: domain title')]
-        terms += [(a, f'{ident}: alias') for a in _strings(sensitive.get('aliases', []), f'{where} aliases')]
-        terms += [(t, f'{ident}: sensitive term') for t in _strings(sensitive.get('terms', []), f'{where} terms')]
+        if marker.is_symlink():
+            raise WikiError(f'{where}: symlink refused')
+        try:
+            if not marker.is_file():
+                raise WikiError('marker must be a regular file')
+            domain = load_domain(entry)
+        except (WikiError, ValueError, OSError) as error:
+            raise WikiError(f'{where}: {error}') from None
+        ident = domain.id
+        terms = [(ident, f'{ident}: domain id'), (domain.title, f'{ident}: domain title')]
+        terms += [(a, f'{ident}: alias') for a in domain.aliases]
+        terms += [(t, f'{ident}: sensitive term') for t in domain.terms]
         terms += _spaces(entry, root, ident)
         found.append(Domain(ident, entry, tuple(terms)))
     return found

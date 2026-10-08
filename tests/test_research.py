@@ -520,6 +520,29 @@ class ResearchTests(Fixture):
     def test_no_prefix_rule_remains_in_the_environment_allowlist(self):
         self.assertFalse(hasattr(research, 'ENV_PREFIXES'))
 
+    # --- malformed domain markers fail closed -------------------------------
+
+    TYPO = 'schema_version = 1\nid = "{0}"\ntitle = "T"\n[sensitive]\nterm = ["CedarSecret"]\n'
+
+    def test_a_malformed_domain_marker_prevents_the_launch(self):
+        (self.root / 'work' / '.domain.toml').write_text(self.TYPO.format('work'))
+        p = self.research('How can CedarSecret improve?', ok=False)
+        self.assertFalse(self.out.exists(), 'claude must not be started')
+        self.assertIn('work/.domain.toml', p.stderr)
+        self.assertIn('unknown key in [sensitive]: term', p.stderr)
+        self.assertEqual(self.stored(), [])
+
+    def test_a_malformed_other_domain_also_blocks_outbound_research(self):
+        (self.root / 'personal' / '.domain.toml').write_text(self.TYPO.format('personal'))
+        p = self.research(QUESTION, '--from', 'work', ok=False)
+        self.assertFalse(self.out.exists())
+        self.assertIn('personal/.domain.toml', p.stderr)
+
+    def test_a_malformed_marker_blocks_even_with_confirm_outbound(self):
+        (self.root / 'work' / '.domain.toml').write_text(self.TYPO.format('work'))
+        self.research(QUESTION, '--confirm-outbound', ok=False)
+        self.assertFalse(self.out.exists())
+
     def tmpdir_case(self, tmp, via_environment):
         tmp.mkdir(exist_ok=True)
         env = {**self.fake_env, 'TMPDIR': str(tmp)}
