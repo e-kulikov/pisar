@@ -133,6 +133,13 @@ def stage_entry(repo, index, relative, data):
         index=index)
 
 
+def sync_index(repo, paths):
+    """Make the real index agree with HEAD for PATHS only (idempotent). Every other staged or unstaged
+    change of the user is left as it was. Run on EVERY path, also when nothing was interrupted, because
+    a crash between `update-ref` and this step leaves stale staged entries behind."""
+    run(repo, 'reset', '-q', '--', *paths, check=False)
+
+
 def commit(repo, paths, operation_id, verified=None, pins=None):
     """Commit PATHS without ever using the shared index.
 
@@ -165,6 +172,7 @@ def commit(repo, paths, operation_id, verified=None, pins=None):
                 run(repo, 'update-index', '--force-remove', '--', relative, index=index)
         tree = run(repo, 'write-tree', index=index).strip()
         if tree == run(repo, 'rev-parse', f'{old}^{{tree}}').strip():
+            sync_index(repo, paths)  # Already committed (a retry): finish the interrupted synchronization.
             return None
         # Hooks and signing stay off: writes cannot run user publishing scripts. The 'wiki: OPERATION'
         # subject is a stable data protocol: retries recognize their own commits by it and the
@@ -175,7 +183,7 @@ def commit(repo, paths, operation_id, verified=None, pins=None):
             if blob(repo, f'{new}:{relative}') != data:
                 raise WikiError(f'committed bytes of {relative} differ from the journal in {repo}')
         run(repo, 'update-ref', '-m', f'wiki: {operation_id}', 'HEAD', new, old)
-    run(repo, 'reset', '-q', '--', *paths, check=False)
+    sync_index(repo, paths)
     return new
 
 
@@ -207,6 +215,7 @@ def commit_move(repo, old, new, operation_id, replace=None):
         for path, data in replace.items():
             if path not in committed or blob(repo, f'{head}:{path}') != data:
                 raise WikiError(f'nothing committed under {old} and {new} is not the intended result in {repo}')
+        sync_index(repo, [old, new])  # The move was committed; finish the interrupted index synchronization.
         return None
     moved = {}
     with tempfile.TemporaryDirectory(prefix='pisar-index-') as scratch:
@@ -239,5 +248,5 @@ def commit_move(repo, old, new, operation_id, replace=None):
     if tree_entries(repo, new_commit, old):
         raise WikiError(f'{old} still holds entries after the move in {repo}')
     run(repo, 'update-ref', '-m', f'wiki: {operation_id}', 'HEAD', new_commit, head)
-    run(repo, 'reset', '-q', '--', old, new, check=False)
+    sync_index(repo, [old, new])
     return new_commit
