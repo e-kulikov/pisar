@@ -563,6 +563,14 @@ def relocate(wiki, state_dir, action, value, to=None):
         if gitops.owner(new, root) != repo:
             raise WikiError('the move would cross Git repositories')
         rel = lambda p: p.relative_to(repo).as_posix()  # noqa: E731
+        if new != old:
+            # The rewritten marker is committed byte for byte; refuse before any change if Git would not.
+            problems = gitops.attribute_problems(repo, rel(new / '.wiki.toml'))
+            if problems:
+                raise WikiError(f'Git would not store {rel(new / ".wiki.toml")} byte for byte ({", ".join(problems)}); '
+                                'moving the space would transform it. Nothing was changed. Make the path '
+                                'byte-preserving, e.g. add `/<path> -text -filter -ident` to .gitattributes, '
+                                'commit that yourself and rerun the command')
 
         def apply(_):
             if new != old and old.exists() and not new.exists():
@@ -571,7 +579,9 @@ def relocate(wiki, state_dir, action, value, to=None):
             _edit_marker(new / '.wiki.toml', kind, status)
             if new == old:
                 return [(repo, gitops.commit(repo, [rel(new / '.wiki.toml')], op))]
-            return [(repo, gitops.commit_move(repo, rel(old), rel(new), op))]
+            marker = rel(new / '.wiki.toml')
+            return [(repo, gitops.commit_move(repo, rel(old), rel(new), op,
+                                              replace={marker: (new / '.wiki.toml').read_bytes()}))]
 
         touched = sorted({old.relative_to(root).as_posix(), new.relative_to(root).as_posix()})
         old_rel, new_rel = old.relative_to(root).as_posix(), new.relative_to(root).as_posix()

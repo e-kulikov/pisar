@@ -179,10 +179,65 @@ def commit(repo, paths, operation_id, verified=None, pins=None):
     return new
 
 
-def commit_move(repo, old, new, operation_id):
-    """Commit a staged `git mv` of OLD to NEW (repo-relative) and nothing else."""
-    run(repo, 'add', '-A', '--', new)
-    if not run(repo, 'diff', '--cached', '--name-only', '--', old, new).strip():
+def tree_entries(repo, revision, prefix):
+    """(mode, oid, path) of every committed entry (gitlinks included) under PREFIX."""
+    out = run(repo, 'ls-tree', '-r', '-z', revision, '--', prefix)
+    entries = []
+    for record in filter(None, out.split('\0')):
+        meta, path = record.split('\t', 1)
+        mode, _, oid = meta.split()
+        entries.append((mode, oid, path))
+    return entries
+
+
+def commit_move(repo, old, new, operation_id, replace=None):
+    """Commit the rename of OLD to NEW (repo-relative) by blob identity, and nothing else.
+
+    The moved tree is never re-staged through Git attributes or filters: in a private index read
+    from HEAD every committed entry under OLD (blobs and gitlinks) reappears under NEW with the SAME
+    mode and object id. Only REPLACE (path under NEW -> exact new bytes, e.g. the rewritten marker)
+    is new content, written without filters. The branch moves by compare-and-swap and the real index
+    is synced for these paths only."""
+    replace = replace or {}
+    head = run(repo, 'rev-parse', 'HEAD').strip()
+    entries = tree_entries(repo, head, old)
+    if not entries:
+        # Already committed by an interrupted earlier run, or nothing to do.
+        committed = {path: oid for _, oid, path in tree_entries(repo, head, new)}
+        for path, data in replace.items():
+            if path not in committed or blob(repo, f'{head}:{path}') != data:
+                raise WikiError(f'nothing committed under {old} and {new} is not the intended result in {repo}')
         return None
-    run(repo, 'commit', '-qm', f'wiki: {operation_id}', '--', old, new)
-    return run(repo, 'rev-parse', 'HEAD').strip()
+    moved = {}
+    with tempfile.TemporaryDirectory(prefix='pisar-index-') as scratch:
+        index = Path(scratch) / 'index'
+        run(repo, 'read-tree', head, index=index)
+        lines = []
+        for mode, oid, path in entries:
+            target = new + path[len(old):]
+            moved[target] = (mode, oid)
+            lines.append(f'0 {"0" * len(oid)}\t{path}\0')
+        for target, (mode, oid) in moved.items():
+            if target in replace:
+                oid = run(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=replace[target]).strip()
+                moved[target] = (mode, oid)
+            lines.append(f'{moved[target][0]} {moved[target][1]}\t{target}\0')
+        for target in replace:
+            if target not in moved:
+                raise WikiError(f'{target} is not part of the moved tree in {repo}')
+        run(repo, 'update-index', '-z', '--index-info', input=''.join(lines).encode(), index=index)
+        tree = run(repo, 'write-tree', index=index).strip()
+    new_commit = run(repo, 'commit-tree', tree, '-p', head, '-m', f'wiki: {operation_id}').strip()
+    # Verify before the branch moves: identical object ids (except the replaced paths) and exact bytes.
+    after = {path: (mode, oid) for mode, oid, path in tree_entries(repo, new_commit, new)}
+    for target, (mode, oid) in moved.items():
+        if after.get(target) != (mode, oid):
+            raise WikiError(f'moved entry {target} differs from its blob identity in {repo}')
+    for target, data in replace.items():
+        if blob(repo, f'{new_commit}:{target}') != data:
+            raise WikiError(f'committed bytes of {target} differ from the intended ones in {repo}')
+    if tree_entries(repo, new_commit, old):
+        raise WikiError(f'{old} still holds entries after the move in {repo}')
+    run(repo, 'update-ref', '-m', f'wiki: {operation_id}', 'HEAD', new_commit, head)
+    run(repo, 'reset', '-q', '--', old, new, check=False)
+    return new_commit
