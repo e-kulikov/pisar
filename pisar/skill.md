@@ -226,6 +226,8 @@ and `[types.NAME.fields.FIELD]` tables). Never invent a type silently.
   `pisar space type add ADDRESS NAME --description '...' [--template-file F]
   [--field NAME:TYPE[:required]]`. Write the template to a file outside the wiki
   first. The command refuses a dirty tree and a conflicting redeclaration.
+- Date fields take quoted `"YYYY-MM-DD"` strings. A required field must be
+  present; an empty value still counts as present.
 
 ## Guard: report possibly sensitive text
 

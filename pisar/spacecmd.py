@@ -723,7 +723,11 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
                                 'command, so nothing was changed')
             separator = b'' if not old or old.endswith(b'\n') else b'\n'
             new = old + separator + (b'\n' if old else b'') + text.encode('utf-8')
-            if parse_types(tomllib.loads(new.decode('utf-8'))).get(name) != decl:
+            try:
+                reread = parse_types(tomllib.loads(new.decode('utf-8')))
+            except (tomllib.TOMLDecodeError, WikiError) as error:
+                raise WikiError(f'cannot append [types.{name}] to {rel}: {error}; nothing was changed') from None
+            if reread.get(name) != decl:
                 raise WikiError(f'the appended declaration of {name} does not read back; nothing was changed')
             # The final bytes are journaled, so a resume writes exactly what was decided.
             plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'))

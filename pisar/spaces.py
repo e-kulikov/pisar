@@ -174,6 +174,8 @@ def parse_type(name, raw, key='types'):
         path = f'{where}.fields.{fname}'
         if not isinstance(fname, str) or not fname.strip():
             raise WikiError(f'{where}.fields: field name must be nonempty')
+        if fname != fname.strip():
+            raise WikiError(f'{where}.fields.{fname}: field name must not have surrounding whitespace')
         if fname in BASE_FIELDS:
             raise WikiError(f'{path}: reserved field name')
         if not isinstance(spec, dict):

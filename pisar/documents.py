@@ -48,7 +48,7 @@ def _field_problem(field, value):
     }
     if not kinds[field.type](value):
         if field.type == 'date':
-            return f'field {field.name} must be a calendar date (YYYY-MM-DD)'
+            return f'field {field.name} must be a quoted calendar date, for example "2026-10-01"'
         return f'field {field.name} must be {"an" if field.type == "integer" else "a"} {field.type}'
     if field.values is None:
         return None

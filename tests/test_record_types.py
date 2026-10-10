@@ -112,9 +112,9 @@ class FieldTests(RecordTypeFixture):
             'integer-not-string': ('cuisine = "x"\nserves = "4"\n', 'field serves must be an integer'),
             'boolean-not-int': ('cuisine = "x"\nvegan = 0\n', 'field vegan must be a boolean'),
             'date-not-timestamp': ('cuisine = "x"\ntried = "2026-10-01T10:00:00Z"\n',
-                                   'field tried must be a calendar date'),
-            'date-impossible': ('cuisine = "x"\ntried = "2026-02-30"\n', 'field tried must be a calendar date'),
-            'date-not-toml-date': ('cuisine = "x"\ntried = 2026-10-01\n', 'field tried must be a calendar date'),
+                                   'field tried must be a quoted calendar date'),
+            'date-impossible': ('cuisine = "x"\ntried = "2026-02-30"\n', 'field tried must be a quoted calendar date'),
+            'date-not-toml-date': ('cuisine = "x"\ntried = 2026-10-01\n', 'field tried must be a quoted calendar date'),
             'list-not-string': ('cuisine = "x"\ntags = "quick"\n', 'field tags must be a list'),
             'list-element-not-allowed': ('cuisine = "x"\ntags = ["quick", "slow"]\n',
                                          'field tags contains a value not in its allowed values'),
@@ -176,6 +176,8 @@ class MalformedDeclarationTests(RecordTypeFixture):
         'fields-bad-name': ('[types.idea]\ndescription = "x"\n[types.idea.fields.""]\n',
                             'types.idea.fields: field name must be nonempty'),
         'types-scalar-entry': ('[types]\nidea = "x"\n', 'types.idea: expected a table'),
+        'field-padded-name': ('[types.idea]\ndescription = "x"\n[types.idea.fields." cuisine "]\n',
+                              'types.idea.fields. cuisine : field name must not have surrounding whitespace'),
     }
 
     def test_malformed_declarations_fail_closed(self):
@@ -307,10 +309,31 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
                      ('idea', '--description', 'x', '--field', 'a:float'),
                      ('idea', '--description', 'x', '--field', 'a:string:maybe'),
                      ('idea', '--description', 'x', '--field', 'a:string', '--field', 'a:integer'),
+                     ('idea', '--description', 'x', '--field', ' cuisine :string'),
                      ('idea', '--description', 'x', '--field', 'title:string')):
             with self.subTest(args):
                 self.add(*args, ok=False)
                 self.assertEqual(self.marker.read_bytes(), self.original)
+        self.clean()
+
+    def test_marker_without_a_final_newline_gets_a_separated_table(self):
+        self.marker.write_bytes(self.original.rstrip(b'\n'))
+        commit_all(self.root)
+        self.add('recipe-idea', '--description', 'One idea')
+        self.clean()
+        text = self.marker.read_text()
+        self.assertTrue(text.startswith(MARKER.rstrip('\n') + '\n\n[types.recipe-idea]\n'), text)
+        self.assertEqual(self.listing()['declared_types'][0]['name'], 'recipe-idea')
+
+    def test_inline_types_table_cannot_be_appended_to_and_nothing_changes(self):
+        self.marker.write_bytes(self.original + b'types = {}\n')
+        commit_all(self.root)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        text = self.marker.read_bytes()
+        result = self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertIn('cannot append [types.recipe-idea]', result.stderr)
+        self.assertEqual(self.marker.read_bytes(), text)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.clean()
 
     def test_template_inside_the_wiki_is_refused(self):

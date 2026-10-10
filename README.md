@@ -466,8 +466,10 @@ values = ["thai", "italian"]    # optional allowed values; strings or integers
   cannot be declared as fields. Undeclared extra front-matter fields stay allowed.
 - A space with no declarations accepts only the system types. Nothing is
   predefined in code.
-- A date field holds a quoted calendar date such as `"2026-10-01"`; timestamps
-  belong in the base fields.
+- A date field holds a quoted calendar date such as `"2026-10-01"` (a TOML date
+  is refused); timestamps belong in the base fields.
+- A required field must be present. An empty string, `0`, `false` or `[]` counts
+  as present.
 - A malformed declaration (unknown key, wrong type, bad name) makes the space
   invalid: `check` reports it with the file path, and its documents and writes
   are refused until it is fixed by hand.
