@@ -1,12 +1,20 @@
 """Discover spaces from files; never persist a registry or read symlinks."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import tomllib
 from .safety import WikiError, address, concrete_id, safe_path
 
 
 SKIP = {'.git', '.ruwana', '__pycache__'}
+# Document types pisar itself writes (capture sources, meeting records). Every other type is declared by its space.
+SYSTEM_TYPES = frozenset({'source', 'meeting'})
+# Front matter every document has; a space cannot declare a field with one of these names.
+BASE_FIELDS = frozenset({'schema_version', 'id', 'type', 'title', 'space_ids', 'sources',
+                         'occurred_at', 'imported_at', 'updated_at'})
+FIELD_TYPES = ('string', 'integer', 'boolean', 'date', 'list')
+TYPE_NAME = re.compile(r'[a-z][a-z0-9-]*')
 
 
 def walk_files(root):
@@ -89,6 +97,7 @@ class Space:
     domain: str
     kind: str
     status: str
+    types: dict = field(default_factory=dict, compare=False, hash=False)
 
     @property
     def address(self):
@@ -97,6 +106,98 @@ class Space:
     def record(self, root):
         return dict(id=self.id, domain=self.domain, address=self.address,
                     path=self.path.relative_to(root).as_posix(), kind=self.kind, status=self.status)
+
+
+@dataclass(frozen=True)
+class Field:
+    name: str
+    type: str = 'string'
+    required: bool = False
+    values: tuple = None  # None: any value of the type; () allows nothing
+
+
+@dataclass(frozen=True)
+class RecordType:
+    name: str
+    description: str
+    template: str = None  # None: no body skeleton; '' is an explicit empty one
+    fields: tuple = ()
+
+    def record(self):
+        return dict(name=self.name, description=self.description, template=self.template,
+                    fields=[dict(name=f.name, type=f.type, required=f.required,
+                                 values=None if f.values is None else list(f.values))
+                            for f in self.fields])
+
+
+def _values(path, kind, values):
+    if values is None:
+        return None
+    if kind == 'boolean':
+        raise WikiError(f'{path}.values: boolean fields take no values')
+    if not isinstance(values, list):
+        raise WikiError(f'{path}.values: expected an array')
+    if not all(isinstance(v, str) or type(v) is int for v in values):
+        raise WikiError(f'{path}.values: expected strings or integers')
+    if kind in ('string', 'date') and not all(isinstance(v, str) for v in values):
+        raise WikiError(f'{path}.values: {kind} fields take string values')
+    if kind == 'integer' and not all(type(v) is int for v in values):
+        raise WikiError(f'{path}.values: integer fields take integer values')
+    return tuple(values)
+
+
+def parse_type(name, raw, key='types'):
+    """Validate one declaration; KEY is the TOML path shown in errors. Shared by loading and `space type add`."""
+    where = f'{key}.{name}'
+    if not isinstance(name, str) or not TYPE_NAME.fullmatch(name):
+        raise WikiError(f'{where}: name must match [a-z][a-z0-9-]*')
+    if name in SYSTEM_TYPES:
+        raise WikiError(f'{where}: reserved system type')
+    if not isinstance(raw, dict):
+        raise WikiError(f'{where}: expected a table')
+    unknown = sorted(set(raw) - {'description', 'template', 'fields'})
+    if unknown:
+        raise WikiError(f'unknown key in {where}: {", ".join(unknown)}')
+    description = raw.get('description')
+    if description is None:
+        raise WikiError(f'{where}.description: required')
+    if not isinstance(description, str) or not description.strip():
+        raise WikiError(f'{where}.description: nonempty string required')
+    template = raw.get('template')
+    if template is not None and not isinstance(template, str):
+        raise WikiError(f'{where}.template: expected a string')
+    fields = raw.get('fields', {})
+    if not isinstance(fields, dict):
+        raise WikiError(f'{where}.fields: expected a table')
+    parsed = []
+    for fname, spec in fields.items():
+        path = f'{where}.fields.{fname}'
+        if not isinstance(fname, str) or not fname.strip():
+            raise WikiError(f'{where}.fields: field name must be nonempty')
+        if fname in BASE_FIELDS:
+            raise WikiError(f'{path}: reserved field name')
+        if not isinstance(spec, dict):
+            raise WikiError(f'{path}: expected a table')
+        unknown = sorted(set(spec) - {'type', 'required', 'values'})
+        if unknown:
+            raise WikiError(f'unknown key in {path}: {", ".join(unknown)}')
+        kind = spec.get('type', 'string')
+        if kind not in FIELD_TYPES:
+            raise WikiError(f'{path}.type: unsupported field type {kind!r}; use {"/".join(FIELD_TYPES)}')
+        required = spec.get('required', False)
+        if type(required) is not bool:
+            raise WikiError(f'{path}.required: expected true or false')
+        values = _values(path, kind, spec.get('values'))
+        parsed.append(Field(fname, kind, required, values))
+    return RecordType(name, description, template, tuple(sorted(parsed, key=lambda f: f.name)))
+
+
+def parse_types(meta):
+    """The `[types.*]` declarations of a parsed .wiki.toml; absent means none, malformed fails closed."""
+    raw = meta.get('types', {})
+    if not isinstance(raw, dict):
+        raise WikiError('types must be a table')
+    return {name: parse_type(name, spec) for name, spec in raw.items()}
 
 
 class Wiki:
@@ -144,7 +245,8 @@ class Wiki:
                         raise WikiError('kind must be project/area/resource')
                     if meta.get('status') not in ('active', 'archived'):
                         raise WikiError('status must be active/archived')
-                    self.spaces.append(Space(ident, path.parent, domain.id, meta['kind'], meta['status']))
+                    declared = parse_types(meta)
+                    self.spaces.append(Space(ident, path.parent, domain.id, meta['kind'], meta['status'], declared))
                 except (WikiError, ValueError, OSError) as error:
                     self.report(domain.id, f'{path.relative_to(self.root)}: {error}')
         seen = set()

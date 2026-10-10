@@ -7,7 +7,7 @@ from unittest import mock
 
 from pisar import gitops, lesson
 from pisar.spaces import Wiki
-from .support import Fixture, git, init_repo
+from .support import Fixture, commit_all, git, init_repo
 
 
 DIRTY = 'Alpha rollout: write to jane@client.example.\n'
@@ -15,6 +15,16 @@ CLEAN = 'Size a launch team by the number of parallel workstreams.\n'
 
 
 class LessonCase(Fixture):
+    def setUp(self):
+        super().setUp()
+        # A lesson note is written into its target space, so every space the tests target declares `note`.
+        self.marker = self.personal / '.wiki.toml'
+        self.plain = self.marker.read_bytes()
+        for path in (self.alpha, self.beta, self.personal):
+            with (path / '.wiki.toml').open('a') as declared:
+                declared.write('\n[types.note]\ndescription = "A reusable lesson"\n')
+        commit_all(self.root)
+
     def start(self, source='work', to='personal/home', title='Sizing a launch team'):
         data = self.data('lesson', 'start', '--from', source, '--to', to, '--title', title)
         return data['batch'], Path(data['draft'])
@@ -233,6 +243,17 @@ class AcceptTests(LessonCase):
         self.assertEqual(doc['metadata']['sources'], [])
         self.assertEqual(doc['metadata']['space_ids'], ['personal/home'])
         self.assertEqual(doc['metadata']['title'], 'Sizing a launch team')
+
+    def test_accept_refuses_an_undeclared_note_before_anything_is_written(self):
+        self.marker.write_bytes(self.plain)
+        commit_all(self.root)
+        batch, _, _ = self.prepared()
+        head = git(self.root, 'rev-parse', 'HEAD')
+        error = self.accept(batch, ok=False).stderr
+        self.assertIn('personal/home declares (none)', error)
+        self.assertIn('pisar space type add personal/home', error)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
 
     def test_note_carries_no_reference_to_the_origin(self):
         batch, _, _ = self.prepared(source='work/alpha')

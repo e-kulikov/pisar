@@ -1,17 +1,18 @@
 """TOML front matter, stable references, validation of real documents."""
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import re
 import tomllib
 from .safety import WikiError, address, concrete_id, safe_path, sha256
+from .spaces import SYSTEM_TYPES
 
 
-TYPES = {'source', 'meeting', 'overview', 'decision', 'note', 'recipe', 'movie', 'series', 'book'}
 REF = re.compile(r'wiki:([a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*):([a-z0-9][a-z0-9-]*)(?:#[\w:.-]+)?')
 # The pre-domain form wiki:SPACE:DOCUMENT no longer resolves; check reports it.
 LEGACY_REF = re.compile(r'wiki:[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*')
 DATE = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)')
+CALENDAR_DATE = re.compile(r'\d{4}-\d\d-\d\d')
 
 
 def metadata(content):
@@ -28,12 +29,64 @@ def metadata(content):
         raise WikiError(f'invalid TOML front matter: {error}') from None
 
 
+def undeclared_type(owner, doc_type):
+    declared = ', '.join(sorted(owner.types)) or '(none)'
+    return (f'unsupported document type {doc_type!r}: space {owner.address} declares {declared}; '
+            f'system types are {", ".join(sorted(SYSTEM_TYPES))}. Either use a similar declared type, or '
+            'propose a new type with a template (see "Record types per space" in the skill) and, once the '
+            f'user approves it, run `pisar space type add {owner.address} NAME --description TEXT`')
+
+
+def _field_problem(field, value):
+    """Why VALUE (present) is not a valid value of FIELD, or None."""
+    kinds = {
+        'string': lambda v: isinstance(v, str),
+        'integer': lambda v: type(v) is int,
+        'boolean': lambda v: type(v) is bool,
+        'date': lambda v: isinstance(v, str) and bool(CALENDAR_DATE.fullmatch(v)) and _calendar(v),
+        'list': lambda v: isinstance(v, list),
+    }
+    if not kinds[field.type](value):
+        if field.type == 'date':
+            return f'field {field.name} must be a calendar date (YYYY-MM-DD)'
+        return f'field {field.name} must be {"an" if field.type == "integer" else "a"} {field.type}'
+    if field.values is None:
+        return None
+    elements = value if field.type == 'list' else [value]
+    if any(not any(type(e) is type(v) and e == v for v in field.values) for e in elements):
+        if field.type == 'list':
+            return f'field {field.name} contains a value not in its allowed values'
+        return f'field {field.name} must be one of: {", ".join(str(v) for v in field.values)}'
+    return None
+
+
+def _calendar(text):
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_fields(record_type, meta):
+    for field in record_type.fields:
+        if field.name not in meta:
+            if field.required:
+                raise WikiError(f'required field {field.name} is missing for type {record_type.name}')
+            continue
+        if problem := _field_problem(field, meta[field.name]):
+            raise WikiError(problem)
+
+
 def validate_meta(meta, owner, wiki):
     if type(meta.get('schema_version')) is not int or meta['schema_version'] != 1:
         raise WikiError('schema_version must be 1')
     concrete_id(meta.get('id'))
-    if meta.get('type') not in TYPES:
-        raise WikiError('unsupported document type')
+    doc_type = meta.get('type')
+    if not isinstance(doc_type, str):
+        raise WikiError('document type must be a string')
+    if doc_type not in SYSTEM_TYPES and doc_type not in owner.types:
+        raise WikiError(undeclared_type(owner, doc_type))
     if not isinstance(meta.get('title'), str) or not meta['title'].strip():
         raise WikiError('title must be nonempty string')
     if '{{' in repr(meta) or '}}' in repr(meta):
@@ -59,6 +112,8 @@ def validate_meta(meta, owner, wiki):
                 datetime.fromisoformat(value.replace('Z', '+00:00'))
             except ValueError:
                 raise WikiError(f'{field}: invalid timestamp') from None
+    if doc_type in owner.types:
+        validate_fields(owner.types[doc_type], meta)
 
 
 @dataclass
