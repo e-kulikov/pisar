@@ -75,7 +75,8 @@ class CodexAgentTests(Fixture):
     def test_instructions_are_the_packaged_agent_prompt(self):
         _, call = self.launch()
         prompt = (CHECKOUT / 'pisar/agent-prompt.md').read_text(encoding='utf-8')
-        self.assertEqual(call['files']['instructions.md'], prompt)
+        self.assertTrue(call['files']['instructions.md'].startswith(prompt + '\n'))
+        self.assertIn('## Tools in this session', call['files']['instructions.md'])
         self.assertEqual(self.config(call)['model_instructions_file'],
                          str(self.state.resolve() / 'agents' / 'codex' / 'instructions.md'))
 
@@ -94,7 +95,9 @@ class CodexAgentTests(Fixture):
         profile = config['permissions']['pisar']
         self.assertEqual(config['default_permissions'], 'pisar')
         self.assertEqual(profile['filesystem'], {
-            ':root': 'read', str(self.state.resolve() / 'lessons'): 'write'})
+            ':minimal': 'read', str(self.root.resolve()): 'read',
+            str(self.state.resolve() / 'lessons'): 'write'})
+        self.assertNotIn(':root', profile['filesystem'])  # the whole filesystem is not readable
         self.assertIs(profile['network']['enabled'], False)
         self.assertNotIn('sandbox_mode', config)
         self.assertNotIn('--add-dir', call['argv'])
@@ -121,6 +124,36 @@ class CodexAgentTests(Fixture):
                 self.assertNotEqual(p.returncode, 0)
                 self.assertIsNone(call)
                 self.assertIn('cannot be passed to the agent', p.stderr)
+
+    def test_only_the_listed_config_overrides_are_accepted_and_effort_can_be_set(self):
+        _, call = self.launch('--', '-c', 'model_reasoning_effort=high')
+        self.assertEqual(self.config(call)['model_reasoning_effort'], 'high')
+        self.assertNotIn('-c', call['argv'])
+        _, call = self.launch('--', '--config', 'model_reasoning_effort="low"')
+        self.assertEqual(self.config(call)['model_reasoning_effort'], 'low')
+        _, call = self.launch('--', '-cmodel_reasoning_effort=max')
+        self.assertEqual(self.config(call)['model_reasoning_effort'], 'max')
+        _, call = self.launch('--', '-c', 'model=gpt-x')
+        self.assertEqual(call['argv'][call['argv'].index('-m') + 1], 'gpt-x')
+        for extra in (['-c', 'shell_tool=true'], ['-c', 'features.shell_tool=true'],
+                      ['-c', 'model_reasoning_effort.x=1'], ['-c', 'model_reasoning_effort=high,low'],
+                      ['--config=mcp_servers.x.command=sh'], ['-c', 'web_search="live"']):
+            with self.subTest(extra=extra):
+                self.out.unlink(missing_ok=True)
+                p, call = self.launch('--', *extra, ok=False)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIsNone(call)
+                self.assertIn('cannot be passed to the agent', p.stderr)
+
+    def test_pisar_server_keeps_the_users_home_and_git_setup_and_only_its_tools(self):
+        home = self.base / 'users-home'
+        env = {**self.agent_env, 'HOME': str(home)}
+        _, call = self.launch(env=env)
+        server = self.config(call)['mcp_servers']['pisar']
+        self.assertEqual(server['env']['HOME'], str(home))
+        self.assertNotIn('GIT_CONFIG_GLOBAL', server['env'])
+        self.assertEqual(call['env']['HOME'], str(self.state.resolve() / 'agents' / 'codex' / 'home'))
+        self.assertEqual(server['enabled_tools'], ['pisar', 'git', 'lesson_accept', 'lesson_review'])
 
     def test_mcp_servers_are_only_the_root_file_and_the_pisar_server(self):
         _, call = self.launch()
@@ -162,11 +195,6 @@ class CodexAgentTests(Fixture):
         _, call = self.launch(env=env)
         self.assertTrue(Path(call['env']['PISAR_RUWANA_BIN']).is_absolute())
         self.assertTrue(os.path.isabs(self.config(call)['mcp_servers']['pisar']['env']['PISAR_RUWANA_BIN']))
-
-    def test_global_git_identity_is_kept_and_nothing_else_is_inherited(self):
-        _, call = self.launch()
-        self.assertIn('GIT_CONFIG_GLOBAL', call['env'])
-
 
 if __name__ == '__main__':
     unittest.main()

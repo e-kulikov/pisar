@@ -20,6 +20,8 @@ class McpClient:
     def __init__(self, test, args, elicit=None):
         self.test = test
         self.elicit = elicit  # None: no elicitation capability; else the action the user answers with
+        self.answer_hook = None  # called with (client, question) instead of the default answer
+        self.others = []  # messages for other request ids, received while waiting
         self.asked = []
         self.next = 0
         env = dict(test.env)
@@ -48,11 +50,15 @@ class McpClient:
             message = self.read()
             if message.get('method') == 'elicitation/create':
                 self.asked.append(message['params']['message'])
-                answer = {'action': self.elicit or 'decline'}
-                self.send({'jsonrpc': '2.0', 'id': message['id'], 'result': answer})
+                if self.answer_hook:
+                    self.answer_hook(self, message)
+                else:
+                    answer = {'action': self.elicit or 'decline'}
+                    self.send({'jsonrpc': '2.0', 'id': message['id'], 'result': answer})
                 continue
             if message.get('id') == ident:
                 return message
+            self.others.append(message)
 
     def call(self, name, args):
         return self.request('tools/call', {'name': name, 'arguments': {'args': args}})['result']
@@ -97,7 +103,7 @@ class McpTests(Fixture):
         self.assertEqual(init['result']['serverInfo']['name'], 'pisar')
         self.assertEqual(init['result']['capabilities'], {'tools': {}})
         tools = client.request('tools/list')['result']['tools']
-        self.assertEqual(sorted(t['name'] for t in tools), ['git', 'lesson_accept', 'pisar'])
+        self.assertEqual(sorted(t['name'] for t in tools), ['git', 'lesson_accept', 'lesson_review', 'pisar'])
 
     def test_unknown_method_is_a_json_rpc_error(self):
         client = self.server()
@@ -173,6 +179,74 @@ class McpTests(Fixture):
             with self.subTest(args=args):
                 _, error = client.text('git', args)
                 self.assertTrue(error)
+
+    def test_git_refuses_abbreviated_and_unlisted_options(self):
+        # git accepts unambiguous prefixes of long options, so a blocklist of full spellings is not enough.
+        client = self.server()
+        for args in (['diff', '--outpu=/tmp/x'], ['log', '--out=/tmp/x'], ['diff', '--ext-d'],
+                     ['diff', '--ext-diff'], ['log', '--ext'], ['diff', '--textc'], ['log', '--textconv'],
+                     ['diff', '--no-ind', '/etc/hosts'], ['diff', '-O/etc/passwd'], ['log', '-O/etc/passwd'],
+                     ['commit', '-F', '/etc/passwd'], ['commit', '--file=/etc/passwd'],
+                     ['commit', '--template=/etc/passwd'], ['add', '--pathspec-from-file=/etc/passwd'],
+                     ['commit', '-C', 'HEAD'], ['commit', '-c', 'HEAD'], ['status', '--porcelain=v9'],
+                     ['status', '-c', 'core.pager=sh'], ['mv', '--exec', 'sh', 'a', 'b'],
+                     ['log', '--no-walk=sorted', '--foo'], ['diff', '--no-index'], ['add', '--interactive'],
+                     ['add', '-p'], ['status', '--mystery']):
+            with self.subTest(args=args):
+                _, error = client.text('git', args)
+                self.assertTrue(error)
+
+    def test_git_allows_the_listed_read_and_write_options(self):
+        client = self.server()
+        (self.alpha / 'new.md').write_text('Synthetic.\n')
+        for args in (['status', '--short', '--branch'], ['status', '-uno'], ['status', '--untracked-files=all'],
+                     ['diff', '--stat'], ['diff', '--cached', '--name-only'], ['log', '-n', '1', '--oneline'],
+                     ['log', '-3', '--format=%H'], ['log', '--max-count=1', '--', 'work']):
+            with self.subTest(args=args):
+                _, error = client.text('git', args)
+                self.assertFalse(error)
+
+    def test_elicitation_edge_cases_never_accept_by_accident(self):
+        # An answer for another request, an answer carrying an error, a closed connection and a second
+        # tools/call while the question is pending must never run the accept.
+        def other_id(client, question):
+            client.send({'jsonrpc': '2.0', 'id': 'someone-else', 'result': {'action': 'accept'}})
+            client.send({'jsonrpc': '2.0', 'id': question['id'], 'result': {'action': 'decline'}})
+
+        def with_error(client, question):
+            client.send({'jsonrpc': '2.0', 'id': question['id'], 'error': {'code': 1, 'message': 'x'},
+                         'result': {'action': 'accept'}})
+
+        def closed(client, question):
+            client.process.stdin.close()
+
+        def nested(client, question):
+            client.send({'jsonrpc': '2.0', 'id': 'second', 'method': 'tools/call', 'params': {
+                'name': 'lesson_accept', 'arguments': {'args': ['--batch', 'missing']}}})
+            client.send({'jsonrpc': '2.0', 'id': question['id'], 'result': {'action': 'decline'}})
+
+        for name, hook in (('other-id', other_id), ('error', with_error), ('eof', closed), ('nested', nested)):
+            with self.subTest(case=name):
+                client = self.server(elicit='accept')
+                client.answer_hook = hook
+                text, error = client.text('lesson_accept', ['--batch', 'missing'])
+                self.assertTrue(error)
+                self.assertIn('not confirmed by the user', text)
+                self.assertNotIn('unknown lesson batch', text)
+                self.assertEqual(len(client.asked), 1)
+                if name == 'nested':
+                    second = [m for m in client.others if m.get('id') == 'second'][0]
+                    self.assertIn('error', second)
+                    self.assertNotIn('unknown lesson batch', json.dumps(second))
+
+    def test_malformed_requests_get_an_error_and_the_server_keeps_serving(self):
+        client = self.server()
+        for params in ([1, 2], {'name': 'pisar', 'arguments': []}, {'name': 'pisar', 'arguments': {'args': 'x'}}):
+            with self.subTest(params=params):
+                client.send({'jsonrpc': '2.0', 'id': 50, 'method': 'tools/call', 'params': params})
+                answer = client.read()
+                self.assertTrue('error' in answer or answer['result'].get('isError'), answer)
+                self.assertEqual(client.request('ping')['result'], {})
 
     def test_git_reads_and_commits_only_inside_the_root(self):
         client = self.server()

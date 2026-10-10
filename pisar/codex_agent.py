@@ -16,6 +16,7 @@ import sys
 from . import settings
 from .agent import mcp_config, prompt_text
 from .operations import Runtime, outside_git
+from . import codex_plugin
 from .config import config_home
 from .safety import WikiError
 
@@ -33,19 +34,27 @@ ENV_NAMES = ('PATH', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'SSL_CERT
 # The MCP server's environment: the pisar locations, Git and the user's configuration
 # directory (pisar settings), never the Codex home. Written into the Codex configuration.
 SERVER_ENV = ('PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE',
-              'XDG_CONFIG_HOME', 'GIT_CONFIG_GLOBAL')
+              'HOME', 'XDG_CONFIG_HOME')
 # Options that would change the confinement; caller arguments may not pass them. A model
 # (-m/--model) may be passed and replaces the configured one.
-REFUSED = frozenset(('--config', '--enable', '--disable', '--profile', '--sandbox', '--add-dir', '--cd',
+REFUSED = frozenset(('--enable', '--disable', '--profile', '--sandbox', '--add-dir', '--cd',
                      '--remote', '--worktree', '--approve-for-me', '--oss', '--local-provider',
                      '--ask-for-approval', '--approval', '--search', '--full-auto', '--yolo'))
-REFUSED_SHORT = frozenset(('-c', '-p', '-s', '-C', '-a'))
+REFUSED_SHORT = frozenset(('-p', '-s', '-C', '-a'))
+# The config keys a caller may set (-c key=value), with the values they accept.
+OVERRIDES = {'model': r'[A-Za-z0-9._/-]+', 'model_reasoning_effort': r'[a-z]+'}
 REFUSED_PREFIX = ('--dangerously',)
 # Native tools and features the main session does not get. Shell, subagents and plugins
 # could run programs or read outside the root; the pisar server replaces the shell.
 DISABLED_FEATURES = ('shell_tool', 'multi_agent', 'apps', 'plugins', 'browser_use', 'computer_use',
                      'image_generation', 'hooks', 'goals')
 PROFILE = 'pisar'
+# The tools the pisar server offers (see mcp.py); Codex shows and calls only these.
+SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review')
+
+
+# Codex-specific wording appended to the shared agent prompt: the tools that stand in for Bash.
+TOOLS_NOTE = codex_plugin.TOOLS
 
 
 class Inline(dict):
@@ -138,9 +147,18 @@ def _refused(arg):
             or (not arg.startswith('--') and arg[:2] in REFUSED_SHORT))
 
 
+def _override(pair):
+    """(key, value) of one ``key=value`` config override, when it is one of OVERRIDES; else Refused."""
+    key, sep, value = pair.partition('=')
+    value = value.strip('"')
+    if not sep or key not in OVERRIDES or not re.fullmatch(OVERRIDES[key], value):
+        raise WikiError(f'codex: this config override cannot be passed to the agent: {key}')
+    return key, value
+
+
 def checked_arguments(extra):
-    """(model or None, arguments to pass). Refuses anything that would widen the confinement."""
-    model, passed = None, []
+    """(overrides, arguments to pass): the model and effort may be set; anything else is refused."""
+    overrides, passed = {}, []
     items = list(extra)
     while items:
         arg = items.pop(0)
@@ -148,29 +166,28 @@ def checked_arguments(extra):
             value = arg.split('=', 1)[1] if arg.startswith('--model=') else (items.pop(0) if items else '')
             if not value:
                 raise WikiError('codex: --model needs a value')
-            model = value
+            overrides['model'] = value
         elif arg.startswith('-m') and not arg.startswith('--') and len(arg) > 2:
-            model = arg[2:]
+            overrides['model'] = arg[2:]
+        elif arg in ('-c', '--config') or arg.startswith('--config='):
+            value = arg.split('=', 1)[1] if arg.startswith('--config=') else (items.pop(0) if items else '')
+            key, value = _override(value)
+            overrides[key] = value
+        elif arg.startswith('-c') and not arg.startswith('--') and len(arg) > 2:
+            key, value = _override(arg[2:])
+            overrides[key] = value
         elif _refused(arg):
             raise WikiError(f'codex: this option cannot be passed to the agent: {arg.split("=", 1)[0]}')
         else:
             passed.append(arg)
-    return model, passed
-
-
-def git_config():
-    """The user's global Git configuration, so commits keep the user's identity; nothing else."""
-    real = Path(os.path.expanduser('~')) / '.gitconfig'
-    return str(real) if real.is_file() else os.devnull
+    return overrides, passed
 
 
 def server_environment(root, state, ruwana):
     """Environment of the pisar MCP server and of every pisar or git it runs."""
     env = {k: os.environ[k] for k in SERVER_ENV if k in os.environ}
     env.update(PISAR_ROOT=str(root), PISAR_STATE_DIR=str(state), PISAR_RUWANA_BIN=str(ruwana),
-               XDG_CONFIG_HOME=str(config_home()),
-               GIT_CONFIG_GLOBAL=os.environ.get('GIT_CONFIG_GLOBAL') or git_config(),
-               GIT_CONFIG_NOSYSTEM='1', GIT_PAGER='cat', PAGER='cat', GIT_EDITOR='true',
+               XDG_CONFIG_HOME=str(config_home()), GIT_PAGER='cat', PAGER='cat', GIT_EDITOR='true',
                GIT_TERMINAL_PROMPT='0', PYTHONDONTWRITEBYTECODE='1')
     return env
 
@@ -178,14 +195,16 @@ def server_environment(root, state, ruwana):
 def write_config(config, root, state, ruwana, effort, mcp):
     """Write CONFIG (and the instructions it names) into the isolated CODEX_HOME."""
     instructions = config / INSTRUCTIONS
-    instructions.write_text(prompt_text(), encoding='utf-8')
+    instructions.write_text(prompt_text() + '\n' + TOOLS_NOTE, encoding='utf-8')
     os.chmod(instructions, 0o600)
     command, environment = pisar_command()
     pisar_args = ['--root', str(root), '--state-dir', str(state), '--ruwana', ruwana, 'mcp-serve']
-    server_env = {**server_environment(root, state, ruwana), **environment,
-                  'HOME': str(config / HOME)}
+    # The server keeps the user's HOME (Git identity, ruwana and pisar settings); only the Codex
+    # processes it starts get the private home.
+    server_env = {**server_environment(root, state, ruwana), **environment}
     server = {'command': command[0], 'args': [*command[1:], *pisar_args],
-              'env': Inline({k: v for k, v in server_env.items()})}
+              'env': Inline({k: v for k, v in server_env.items()}),
+              'enabled_tools': list(SERVER_TOOLS)}
     tree = {
         'approval_policy': 'on-request',
         'web_search': 'disabled',
@@ -194,7 +213,8 @@ def write_config(config, root, state, ruwana, effort, mcp):
         **({'model_reasoning_effort': effort} if effort else {}),
         'features': {name: False for name in DISABLED_FEATURES},
         'permissions': {PROFILE: {
-            'filesystem': {':root': 'read', str(state / 'lessons'): 'write'},
+            # Reads: the root and what Codex needs to start; writes: the lesson drafts only.
+            'filesystem': {':minimal': 'read', str(root): 'read', str(state / 'lessons'): 'write'},
             'network': {'enabled': False},
         }},
         'mcp_servers': {**mcp, SERVER: server},
@@ -233,11 +253,13 @@ def launch(root, state_dir, ruwana, extra=()):
     for directory in (config, home, lessons):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
-    override, passed = checked_arguments(extra)
+    overrides, passed = checked_arguments(extra)
     main = settings.agent_options('codex')
-    model = override or main['model']
+    model = overrides.get('model', main['model'])
+    effort = overrides.get('model_reasoning_effort', main['effort'])
     ruwana = _ruwana_path(str(ruwana))
-    write_config(config, root, runtime.base, ruwana, main['effort'], user_servers(root))
+    write_config(config, root, runtime.base, ruwana, effort, user_servers(root))
+    codex_plugin.write_skills(config)
     env = environment(config, home, root, runtime.base, ruwana)
     os.chdir(root)
     os.execve(executable, [executable, '--no-daemon', *(['-m', model] if model else []), *passed], env)

@@ -8,11 +8,12 @@ list. Tools are the same list as CLAUDE_ALLOWED in agent.py, plus
 ``lesson_accept``, which the user must confirm through an MCP elicitation.
 """
 import json
-import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 from . import __version__
+from . import codex_reviewer
 from .codex_agent import pisar_command, server_environment
 from .safety import WikiError
 
@@ -28,13 +29,49 @@ PISAR = (('spaces',), ('check',), ('search',), ('read',), ('inventory',), ('capt
 ACCEPT = ('lesson', 'accept')
 # Global options belong to this server; the agent may never pass them, anywhere in its arguments.
 GLOBAL = ('--root', '--state-dir', '--ruwana', '--agent', '--skill', '--version')
-# Git: read-only inspection, staging, commit and renaming of tracked files. Options that run
-# programs, read outside the repository or change its configuration are refused.
-GIT = {'status': (), 'diff': ('--no-ext-diff', '--no-textconv'), 'log': ('--no-ext-diff', '--no-textconv'),
-       'add': (), 'commit': (), 'mv': ()}
-GIT_REFUSED = ('-c', '-C', '--config', '--git-dir', '--work-tree', '--exec', '--upload-pack',
-               '--receive-pack', '--output', '--no-index', '--namespace', '--super-prefix', '--ext-diff',
-               '--textconv', '--exec-path', '--attr-source', '--shallow-file', '--literal-pathspecs-only')
+# Git: each subcommand has its own list of options. Only these exact spellings (or the
+# patterns) are passed; git also accepts unambiguous prefixes of long options, so nothing is
+# matched by prefix. A value-taking option consumes the next argument. Read-only subcommands
+# always get --no-ext-diff --no-textconv (no helper program runs); -c, -C and every other
+# option are refused, as is anything that reads files or runs programs (-F, -O, --output,
+# --no-index, --exec-path, --interactive, ...).
+GIT = {
+    'status': dict(
+        exact={'-s', '--short', '-b', '--branch', '--porcelain', '-z', '-v', '--verbose', '--long',
+               '--ahead-behind', '--no-ahead-behind', '--no-renames', '--renames', '--column',
+               '--no-column', '--ignored', '-u', '--untracked-files'},
+        values=set(), patterns=(r'-u(no|normal|all)', r'--untracked-files=(no|normal|all)',
+                                r'--porcelain=v[12]', r'--ignored=(traditional|matching|no)'),
+        fixed=()),
+    'diff': dict(
+        exact={'--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--cached',
+               '--staged', '-p', '-u', '--patch', '--no-color', '--no-prefix', '--compact-summary',
+               '--raw', '--exit-code', '--quiet'},
+        values=set(), patterns=(r'-U\d+', r'--unified=\d+'),
+        fixed=('--no-ext-diff', '--no-textconv')),
+    'log': dict(
+        exact={'--oneline', '--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '-p',
+               '--patch', '--graph', '--decorate', '--no-decorate', '--reverse', '--first-parent',
+               '--no-merges', '--merges', '--all', '--no-color', '--abbrev-commit', '--no-abbrev-commit',
+               '--raw'},
+        values={'-n', '--max-count', '--since', '--until', '--after', '--before', '--author', '--grep',
+                '--format', '--pretty', '--date'},
+        patterns=(r'-\d+', r'--max-count=\d+', r'--(since|until|after|before|author|grep|format|pretty|date)=.*'),
+        fixed=('--no-ext-diff', '--no-textconv')),
+    'add': dict(
+        exact={'-A', '--all', '-u', '--update', '-N', '--intent-to-add', '-f', '--force', '-v', '--verbose',
+               '--dry-run', '-n', '--ignore-removal'},
+        values=set(), patterns=(), fixed=()),
+    'commit': dict(
+        exact={'-a', '--all', '--amend', '--no-edit', '--allow-empty', '--no-verify', '-n', '-q', '--quiet',
+               '-v', '--verbose', '-o', '--only', '-i', '--include'},
+        values={'-m', '--message'}, patterns=(r'--message=.*',), fixed=()),
+    'mv': dict(
+        exact={'-f', '--force', '-k', '-n', '--dry-run', '-v', '--verbose'},
+        values=set(), patterns=(), fixed=()),
+}
+# Refused for every subcommand, before its own list is consulted.
+GIT_BLOCKED = ('-c', '-C', '--config', '--git-dir', '--work-tree', '--exec')
 SCHEMA_ARGS = {'type': 'object', 'properties': {'args': {'type': 'array', 'items': {'type': 'string'}}},
                'required': ['args'], 'additionalProperties': False}
 
@@ -51,6 +88,8 @@ TOOLS = (
     _tool('lesson_accept', 'Write a reviewed lesson revision into its destination space. The user is asked '
                            'to confirm first; the arguments are those of `pisar lesson accept`, e.g. '
                            '["--batch", "ID", "--keep", "F1"].'),
+    _tool('lesson_review', 'Have the senior reviewer check the current revision of a lesson batch and record '
+                           'its verdict. Arguments: ["--batch", "ID"].'),
 )
 
 
@@ -71,6 +110,20 @@ def check_pisar(args):
     return list(args)
 
 
+def _git_option(rule, token, following):
+    """(tokens to pass, following arguments left) for one option token; Refused when not allowed."""
+    name = token.split('=', 1)[0]
+    if token in rule['exact']:
+        return [token], following
+    if token in rule['values'] and following:
+        return [token, following[0]], following[1:]
+    if '=' in token and name in rule['values'] and any(re.fullmatch(p, token) for p in rule['patterns']):
+        return [token], following
+    if any(re.fullmatch(p, token) for p in rule['patterns']):
+        return [token], following
+    raise Refused(f'git: option not allowed: {name}')
+
+
 def check_git(args):
     """The argument list for `git ARGS` (the subcommand first), or Refused."""
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not args:
@@ -78,10 +131,22 @@ def check_git(args):
     subcommand, rest = args[0], args[1:]
     if subcommand not in GIT:
         raise Refused(f'git: not an allowed subcommand: {subcommand}')
-    for arg in rest:
-        if any(arg.startswith(prefix) for prefix in GIT_REFUSED):
-            raise Refused(f'git: option or argument not allowed: {arg.split("=", 1)[0]}')
-    return [subcommand, *GIT[subcommand], *rest]
+    rule = GIT[subcommand]
+    checked = []
+    while rest:
+        token = rest.pop(0)
+        if token == '--':
+            checked.append(token)
+            checked.extend(rest)  # pathspecs only after this point
+            break
+        if not token.startswith('-'):
+            checked.append(token)
+            continue
+        if token in GIT_BLOCKED or any(token.startswith(blocked + '=') for blocked in GIT_BLOCKED):
+            raise Refused(f'git: option not allowed: {token.split("=", 1)[0]}')
+        passed, rest = _git_option(rule, token, rest)
+        checked.extend(passed)
+    return [subcommand, *rule['fixed'], *checked]
 
 
 class Server:
@@ -133,6 +198,9 @@ class Server:
         except (WikiError, ValueError, TypeError) as error:
             self.send({'jsonrpc': '2.0', 'id': ident, 'error': {'code': -32602, 'message': str(error)}})
             return
+        except Exception:  # malformed parameters (not objects, ...): an error answer, never a dead server
+            self.send({'jsonrpc': '2.0', 'id': ident, 'error': {'code': -32602, 'message': 'invalid parameters'}})
+            return
         self.send({'jsonrpc': '2.0', 'id': ident, 'result': result})
 
     def call(self, method, params):
@@ -160,7 +228,9 @@ class Server:
                                                '-c', 'core.pager=cat', *check_git(args)]))
             if name == 'lesson_accept':
                 return self.text(self.accept(args))
-        except Refused as error:
+            if name == 'lesson_review':
+                return self.text(self.review(args))
+        except WikiError as error:
             return self.text(str(error), error=True)
         raise _Unknown(f'tool {name}')
 
@@ -189,7 +259,11 @@ class Server:
         return out
 
     def elicit(self, message):
-        """Ask the user through the client; True only for an explicit accept."""
+        """Ask the user through the client; True only for an explicit accept.
+
+        While the question is pending, every other request is refused without running, and
+        answers for other ids are ignored; the end of the connection counts as no.
+        """
         if 'elicitation' not in self.client:
             return False
         self.next_id += 1
@@ -197,12 +271,25 @@ class Server:
         self.send({'jsonrpc': '2.0', 'id': ident, 'method': 'elicitation/create',
                    'params': {'message': message, 'requestedSchema': {'type': 'object', 'properties': {}}}})
         while (answer := self.read()) is not None:
-            if answer.get('id') == ident and 'method' not in answer:
-                result = answer.get('result') or {}
-                return answer.get('error') is None and result.get('action') == 'accept'
+            if not isinstance(answer, dict):
+                continue
             if 'method' in answer:
-                self.dispatch(answer)
+                if answer.get('id') is not None:
+                    self.send({'jsonrpc': '2.0', 'id': answer['id'], 'error': {
+                        'code': -32000, 'message': 'a confirmation is pending; try again later'}})
+                continue
+            if answer.get('id') != ident:
+                continue
+            if answer.get('error') is not None or not isinstance(answer.get('result'), dict):
+                return False
+            return answer['result'].get('action') == 'accept'
         return False
+
+    def review(self, args):
+        if not isinstance(args, list) or len(args) != 2 or args[0] != '--batch' or not args[1]:
+            raise Refused('lesson_review: arguments are ["--batch", "ID"]')
+        result = codex_reviewer.review(self.root, self.state, args[1])
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     def accept(self, args):
         if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
