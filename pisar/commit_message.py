@@ -36,8 +36,8 @@ STDERR_LIMIT = 16 * 1024  # drained and discarded: a writer's diagnostics are ne
 TRAILER = 'Pisar-Operation'
 TYPES = ('feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'build', 'ci', 'chore', 'revert')
 SUBJECT = re.compile(rf'(?:{"|".join(TYPES)})(?:\([a-z0-9][a-z0-9._/-]*\))?!?: \S.*')
-# Absolute local paths: a leading slash after a space or a quote, a home shorthand, a drive letter.
-ABSOLUTE_PATH = re.compile(r'(?<![\w.:/~-])(?:/[\w.@-]+/|~/|[A-Za-z]:\\)')
+# Local paths (best effort): a leading slash at a word boundary, a home shorthand, a drive letter, file: and path: URLs.
+ABSOLUTE_PATH = re.compile(r'(?:^|[\s"\'`(\[<=,;])(?:/[\w.@-]|~/|[A-Za-z]:\\)|\b(?:file|path):/', re.M)
 SECRET_CATEGORIES = ('private-key', 'jwt', 'api-token', 'credential')
 # Commands that create commits, as (command, action); their --what and --why are checked before any write.
 COMMITTING = (('save', None), ('capture', None), ('triage', 'accept'), ('lesson', 'accept'),
@@ -91,9 +91,10 @@ def _context(args):
     if getattr(args, 'context_file', None) is None:
         return None if getattr(args, 'context', None) is None else plain(args.context, '--context', CONTEXT_LIMIT)
     path = Path(args.context_file)
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         raise WikiError('--context-file is not a readable file')
-    data = path.read_bytes()[:4 * CONTEXT_LIMIT + 1]
+    with path.open('rb') as stream:
+        data = stream.read(4 * CONTEXT_LIMIT + 1)  # Bounded: a larger file fails the length check below.
     try:
         text = data.decode('utf-8')
     except UnicodeDecodeError:
@@ -108,7 +109,9 @@ def explain(args):
     what = plain(args.what, '--what', WHAT_LIMIT) if getattr(args, 'what', None) is not None else None
     why = plain(args.why, '--why', WHY_LIMIT) if getattr(args, 'why', None) is not None else None
     require(what, why)
-    return _REQUEST.set(dict(what=what, why=why, context=_context(args)))
+    # The context only ever reaches the writer: with the writer disabled it is neither read nor checked.
+    context = _context(args) if settings.commit_message()['enabled'] else None
+    return _REQUEST.set(dict(what=what, why=why, context=context))
 
 
 @contextlib.contextmanager

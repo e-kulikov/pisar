@@ -8,11 +8,13 @@ import tempfile
 import unittest
 from unittest import mock
 
+from argparse import Namespace
 from pisar import commit_message, config, gitops, operations, settings
 from pisar.operations import Runtime
 from pisar.safety import WikiError
 from pisar.spaces import Wiki
 from .support import Fixture, git
+from .test_spacecmd import SpaceCommandFixture
 
 # A fake `claude`: records its call (argv, environment names, working directory, stdin) into the
 # file named by fake.json, then behaves as FAKE_MODE says. The writer output is in fake.json too.
@@ -309,6 +311,29 @@ class Commits(Writer):
         self.assertEqual(self.calls(), [])
         self.assertEqual(git(self.root, 'log', '-1', '--format=%s'), 'wiki: plain')
 
+    def test_disabled_save_adds_the_explanation_verbatim_and_keeps_the_subject(self):
+        plan = self.plan('explained')
+        self.cli('--ruwana', 'ruwana', 'save', '--plan', plan, '--what', 'Record the launch call',
+                 '--why', 'The team agreed to launch.')
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(git(self.root, 'log', '-1', '--format=%B').split('\n')[0], 'wiki: explained')
+        self.assertIn('Record the launch call\n\nThe team agreed to launch.', git(self.root, 'log', '-1', '--format=%B'))
+
+    def test_whitespace_only_explanation_is_refused_before_any_write(self):
+        plan = self.plan('blank')
+        before = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli('--ruwana', 'ruwana', 'save', '--plan', plan, '--what', '   ', '--why', 'b', ok=False)
+        self.assertIn('--what must not be empty', failed.stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), before)
+
+    def test_context_and_context_file_are_mutually_exclusive(self):
+        plan = self.plan('both')
+        summary = self.base / 'summary.txt'
+        summary.write_text('Drafted first.')
+        failed = self.cli('--ruwana', 'ruwana', 'save', '--plan', plan, '--what', 'a', '--why', 'b',
+                          '--context', 'x', '--context-file', str(summary), ok=False)
+        self.assertIn('not allowed with', failed.stderr)
+
     def test_space_create_is_refused_without_what_when_enabled(self):
         self.enable()
         failed = self.cli('space', 'create', '--domain', 'work', '--kind', 'project', '--title', 'Launch Plan',
@@ -319,3 +344,149 @@ class Commits(Writer):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CommittingCommands(unittest.TestCase):
+    def leaves(self):
+        """(command, action) of every parser that takes --what, read from the real command line."""
+        from argparse import _SubParsersAction
+        from pisar import cli
+        found = set()
+        top = cli.parser()
+        for action in top._actions:
+            if not isinstance(action, _SubParsersAction):
+                continue
+            for command, parser in action.choices.items():
+                if any('--what' in a.option_strings for a in parser._actions):
+                    found.add((command, None))
+                for sub in parser._actions:
+                    if isinstance(sub, _SubParsersAction):
+                        for name, leaf in sub.choices.items():
+                            if any('--what' in a.option_strings for a in leaf._actions):
+                                found.add((command, name))
+        return found
+
+    def test_the_explanation_flags_are_exactly_on_the_committing_commands(self):
+        self.assertEqual(self.leaves(), set(commit_message.COMMITTING))
+
+    def test_every_committing_command_refuses_a_missing_explanation_when_enabled(self):
+        for command, action in commit_message.COMMITTING:
+            with self.subTest(command=command, action=action), \
+                    mock.patch.object(settings, 'commit_message', return_value=dict(
+                        config.COMMIT_MESSAGE_DEFAULTS, enabled=True)):
+                args = Namespace(command=command, action=action, what=None, why=None, context=None,
+                                 context_file=None)
+                with self.assertRaisesRegex(WikiError, '--what'):
+                    commit_message.explain(args)
+
+
+class Explanations(Writer):
+    def args(self, **values):
+        base = dict(command='save', action=None, what='Record the call', why='It was agreed.', context=None,
+                    context_file=None)
+        return Namespace(**{**base, **values})
+
+    def enabled(self):
+        return mock.patch.object(settings, 'commit_message', return_value=self.options())
+
+    def test_whitespace_only_flags_are_refused(self):
+        with self.assertRaisesRegex(WikiError, '--what must not be empty'):
+            commit_message.explain(self.args(what='   '))
+
+    def test_context_text_reaches_the_writer_input(self):
+        self.compose_with = None
+        with mock.patch.dict(os.environ, {'PATH': self.path}):
+            commit_message.compose(dict(paths=['a.md'], spaces=[], diff='', tree='0' * 40), 'writer-op',
+                                   dict(what='a', why='b', context='Drafted the note first.'),
+                                   self.options(), self.root, self.state)
+        self.assertIn('Drafted the note first.', self.calls()[-1]['stdin'])
+
+    def test_context_is_bounded_utf8_and_a_regular_file(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        big = directory / 'big.txt'
+        big.write_text('x' * 9000)
+        binary = directory / 'binary.txt'
+        binary.write_bytes(b'\xff\xfe\x00bad')
+        link = directory / 'link.txt'
+        link.symlink_to(big)
+        with self.enabled():
+            for path, reason in ((big, 'too long'), (binary, 'not UTF-8'), (link, 'not a readable file'),
+                                 (directory / 'missing.txt', 'not a readable file')):
+                with self.subTest(path=path.name), self.assertRaisesRegex(WikiError, reason):
+                    commit_message.explain(self.args(context=None, context_file=str(path)))
+
+    def test_context_is_ignored_and_unchecked_while_the_writer_is_disabled(self):
+        with mock.patch.object(settings, 'commit_message', return_value=self.options(enabled=False)):
+            token = commit_message.explain(self.args(context=None, context_file='/no/such/file'))
+            commit_message.reset(token)
+        self.assertEqual(commit_message.current()['context'], None)
+
+    def test_the_absolute_path_forms_are_refused_and_relative_ones_accepted(self):
+        for text in ('see /etc', 'in /root', 'file:///home/x/y', 'path:/home/x/y', 'at /home/user',
+                     'C:\\Users\\x', 'moved ~/notes.md'):
+            with self.subTest(text=text), self.assertRaisesRegex(WikiError, 'absolute local path'):
+                commit_message.plain(text, '--why', 200)
+        for text in ('work/alpha/notes/launch.md', 'see https://example.com/docs', 'Q1/2026 review',
+                     'and/or the plan'):
+            with self.subTest(text=text):
+                self.assertEqual(commit_message.plain(text, '--why', 200), text)
+
+
+class StoredMessages(Writer):
+    def test_a_different_tree_gets_a_new_message_and_the_stored_one_is_not_reused(self):
+        runtime = Runtime(self.state, self.root)
+        journal = dict(root=str(self.root), operation_id='stored-tree', commits=[], heads={}, artifacts=[], status='incomplete',
+                       pending=None)
+        runtime.store(journal)
+        texts = iter(['feat(work): first\n\nOne.', 'feat(work): second\n\nTwo.'])
+        calls = []
+
+        def compose(changes, operation, explained, options, root, base):
+            calls.append(changes['tree'])
+            return f'{next(texts)}\n\nPisar-Operation: {operation}'
+        with mock.patch.object(settings, 'commit_message', return_value=self.options()), \
+                mock.patch.object(gitops, 'diff_text', return_value='+x\n'), \
+                mock.patch.object(commit_message, 'compose', compose):
+            write = operations.commit_writer(Wiki(self.root), runtime, journal, self.root)
+            first = write(dict(paths=['work/alpha/a.md'], old='1' * 40, tree='a' * 40))
+            again = write(dict(paths=['work/alpha/a.md'], old='1' * 40, tree='a' * 40))
+            changed = write(dict(paths=['work/alpha/a.md'], old='1' * 40, tree='b' * 40))
+        self.assertEqual(first, again)
+        self.assertEqual(calls, ['a' * 40, 'b' * 40])
+        self.assertIn('second', changed)
+        self.assertEqual(runtime.load('stored-tree')['messages'][str(self.root)]['tree'], 'b' * 40)
+
+
+class MultiRepoWriter(Writer, SpaceCommandFixture):
+    """The writer fails for the parent after the child was committed and checkpointed."""
+
+    def test_a_writer_failure_for_the_parent_keeps_the_child_commit_and_the_rerun_adds_no_duplicate(self):
+        from pisar import spacecmd
+        bare = self.origin()
+        config_file = Path(self.env['XDG_CONFIG_HOME']) / 'pisar' / 'config.toml'
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        config_file.write_text('[commit_message]\nenabled = true\n')
+        self.env = {**self.env, 'PATH': self.path}  # the fake writer, not a real claude
+        real = commit_message.compose
+        seen = []
+
+        def compose(changes, operation, explained, options, root, base):
+            seen.append(changes['paths'])
+            if len(seen) == 2:
+                raise WikiError('the commit message writer exited with status 3; nothing was committed')
+            return real(changes, operation, explained, options, root, base)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        with mock.patch.dict(os.environ, {'PATH': self.path, 'HOME': self.env['HOME']}), \
+                mock.patch.object(commit_message, 'compose', compose), \
+                commit_message.request('Add the acme domain', 'The team works with Acme.'):
+            with self.assertRaises(WikiError):
+                spacecmd.domain_add(Wiki(self.root), self.state, 'acme', 'Acme', str(bare), 'para')
+        child = self.root / 'acme'
+        child_commits = git(child, 'rev-list', '--count', 'HEAD')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(int(child_commits), 2)  # the seed commit and the one the first attempt made
+        self.cli('--ruwana', 'ruwana', 'domain', 'add', '--id', 'acme', '--title', 'Acme',
+                 '--repo', str(bare), '--what', 'Add the acme domain', '--why', 'The team works with Acme.')
+        self.assertEqual(git(child, 'rev-list', '--count', 'HEAD'), child_commits)  # no duplicate child commit
+        self.assertNotEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertTrue(self.data('check')['ok'])

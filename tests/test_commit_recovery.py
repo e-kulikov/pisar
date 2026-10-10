@@ -115,6 +115,19 @@ class CommitRecovery(Fixture):
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
         self.assertEqual(self.journal('no-intent')['status'], 'incomplete')
 
+    def test_a_resume_that_makes_no_new_commit_clears_a_stale_pending_record(self):
+        plan = self.plan('stale')
+        self.cli('--ruwana', 'ruwana', 'save', '--plan', plan)
+        runtime = operations.Runtime(self.state, self.root)
+        journal = runtime.load('stale')
+        journal['status'] = 'incomplete'
+        journal['pending'] = dict(repo=str(self.root), commit=git(self.root, 'rev-parse', 'HEAD~1'),
+                                  parent=git(self.root, 'rev-parse', 'HEAD~2'))
+        runtime.store(journal)
+        self.cli('--ruwana', 'ruwana', 'save', '--plan', plan)
+        self.assertIsNone(self.journal('stale')['pending'])
+        self.assert_checkpointed('stale')
+
     def test_journal_of_the_old_format_without_pending_still_resumes_by_subject(self):
         plan = self.plan('legacy')
         self.interrupt(plan, 'after-ref')
@@ -192,3 +205,57 @@ class SpaceRecovery(SpaceCommandFixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SpaceRecoveryRegressions(SpaceCommandFixture):
+    def test_resume_accepts_a_child_commit_checkpointed_before_its_baseline_after_was_stored(self):
+        bare = self.origin()
+        args = ('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', str(bare))
+        self.cli(*args)
+        git(self.root, 'reset', '-q', '--soft', 'HEAD~1')  # the parent commit never happened
+        runtime = Runtime(self.state, self.root)
+        journal = runtime.load('domain-add-acme')
+        journal['status'] = 'incomplete'
+        journal['children'][0].pop('after')  # the crash came before the baseline was stored
+        journal['commits'] = [c for c in journal['commits'] if c['repo'] != str(self.root)]
+        journal['heads'][str(self.root)] = git(self.root, 'rev-parse', 'HEAD')
+        runtime.store(journal)
+        self.assertTrue(self.data(*args)['changed'])
+        resumed = runtime.load('domain-add-acme')
+        self.assertEqual(resumed['status'], 'complete')
+        self.assertEqual(len({c['commit'] for c in resumed['commits']}), len(resumed['commits']))
+        self.assertIn(git(self.root / 'acme', 'rev-parse', 'HEAD'), git(self.root, 'ls-tree', 'HEAD', 'acme').split())
+        self.clean()
+
+
+class LandedCommits(Fixture):
+    def test_a_foreign_commit_with_the_pisar_subject_is_not_ours_in_a_new_journal(self):
+        from pisar import lesson
+        before = git(self.root, 'rev-parse', 'HEAD')
+        git(self.root, 'commit', '-q', '--allow-empty', '-m', 'wiki: lesson-x')
+        journal = dict(operation_id='lesson-x', heads={str(self.root): before}, pending=None,
+                       commits=[], artifacts=[], status='incomplete')
+        self.assertIsNone(operations.landed_commit(self.root, journal))
+        self.assertFalse(lesson.acceptance_started(Wiki(self.root), journal))
+
+    def test_a_recorded_pending_commit_is_recognised_by_its_id_in_the_lesson_check(self):
+        from pisar import lesson
+        before = git(self.root, 'rev-parse', 'HEAD')
+        git(self.root, 'commit', '-q', '--allow-empty', '-m', 'Written by hand')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        journal = dict(operation_id='lesson-y', heads={str(self.root): before}, commits=[], artifacts=[],
+                       status='incomplete', pending=dict(repo=str(self.root), commit=head, parent=before))
+        self.assertEqual(operations.landed_commit(self.root, journal), head)
+        self.assertTrue(lesson.acceptance_started(Wiki(self.root), journal))
+
+
+class SpaceMoveRecovery(SpaceRecovery):
+    def test_crash_after_the_space_move_update_ref_is_recognised_by_its_id(self):
+        self.cli('space', 'create', '--domain', 'work', '--kind', 'project', '--title', 'Launch Plan')
+        self.crash(self.root, 'after-ref', lambda: spacecmd.relocate(
+            Wiki(self.root), self.state, 'move', 'work/launch-plan', to='area'), edit='Written by hand')
+        self.assertEqual(git(self.root, 'log', '-1', '--format=%s'), 'Written by hand')
+        self.cli('space', 'move', 'work/launch-plan', '--to', 'area')
+        self.assertEqual(self.spaces()['work/launch-plan']['kind'], 'area')
+        self.assertEqual(git(self.root, 'log', '--format=%s').count('Written by hand'), 1)
+        self.clean()

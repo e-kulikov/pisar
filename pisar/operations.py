@@ -236,6 +236,13 @@ def checkpoint(runtime, journal, repo, commit):
     runtime.store(journal)
 
 
+def clear_pending(runtime, journal):
+    """Drop a pending record that no commit of this run needs (a retry that found its tree already committed)."""
+    if journal.get('pending') is not None:
+        journal['pending'] = None
+        runtime.store(journal)
+
+
 def landed_commit(repo, journal, recorded=None):
     """The commit this operation moved REPO to before its checkpoint, or None when HEAD is not one of ours.
 
@@ -334,7 +341,8 @@ def commit_writer(wiki, runtime, journal, repo):
     """The message maker of one commit of REPO (see gitops.commit).
 
     Deterministic messages need no journal. With the writer enabled, the message is stored in the journal
-    before the commit object exists, and a retry of the same tree reuses it: never a second message."""
+    before the commit object exists, and a retry of the same tree reuses it: never a second message for the
+    same commit. A different tree is a different commit: it gets a new message, which replaces the stored one."""
     from . import commit_message  # Lazy: commit_message imports research, which imports this module.
     explanation = commit_message.current()
     options = settings.commit_message()
@@ -404,6 +412,8 @@ def apply_files(wiki, runtime, journal):
                                message=commit_writer(wiki, runtime, journal, repo))
         if commit:
             checkpoint(runtime, journal, repo, commit)
+        else:
+            clear_pending(runtime, journal)
         for (parent, link), child in links.items():
             pinned = pins.get(link) if parent == repo else None
             head = gitops.run(child, 'rev-parse', 'HEAD').strip() if pinned else pinned

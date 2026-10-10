@@ -203,11 +203,15 @@ enabled = true
 model = "sonnet"
 effort = "medium"
 timeout = 120
-``` The writer's output must be a Conventional Commits subject of at most 72 characters,
+```
+
+The writer's output must be a Conventional Commits subject of at most 72 characters,
 an optional body of at most 2000 characters, free of absolute local paths and
 secret-like values. pisar appends the trailer `Pisar-Operation: OPERATION-ID` itself.
 Invalid output, a failing or timed-out writer, or a missing `claude` stops the commit:
-nothing is written and no fallback message is used. Each commit's message is generated
+nothing is committed and no fallback message is used. The files of the operation stay
+in the working tree and its journal stays incomplete; rerun the same command (same
+operation ID) once the cause is fixed. Each commit's message is generated
 once and stored in the journal before the commit exists, so a retry reuses it.
 Author and committer identity are not set by pisar; they come from Git's configuration.
 

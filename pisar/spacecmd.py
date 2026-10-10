@@ -139,9 +139,11 @@ def _files(directory):
 
 
 def _landed(wiki, runtime, journal, repo, sha):
-    """Checkpoint SHA as the commit of REPO it is (no-op for None)."""
+    """Checkpoint SHA as the commit of REPO it is; None (nothing was committed) clears a stale intent."""
     if sha:
         operations.checkpoint(runtime, journal, repo, sha)
+    else:
+        operations.clear_pending(runtime, journal)
     return sha
 
 
@@ -180,7 +182,9 @@ def _verify(wiki, runtime, op, journal, repos):
         repo = root / child['path']
         head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
         if head not in (child['base'], child.get('after')):
-            if operations.landed_commit(repo, journal, recorded=child['base']) is None:
+            # Checkpointed but not yet stored as 'after': the journaled head is ours even without a pending record.
+            ours = head == journal.get('heads', {}).get(str(repo))
+            if not ours and operations.landed_commit(repo, journal, recorded=child['base']) is None:
                 raise WikiError(f'Git HEAD of {child["path"]} changed since the interrupted operation {op}')
             _landed(wiki, runtime, journal, repo, head)
         own = [(root / t).relative_to(repo).as_posix() for t in expected if (root / t).is_relative_to(repo)]
