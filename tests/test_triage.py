@@ -252,3 +252,157 @@ class TriageTests(Fixture):
         self.assertTrue((acme / 'inbox/routed-call.md').is_file())
         self.assertFalse((self.alpha / 'inbox').exists())
         self.assertEqual(self.data('read', 'wiki:acme/alpha:routed-call')['metadata']['space_ids'], ['acme/alpha'])
+
+    def inbox_item(self, batch):
+        inbox = self.state / 'inbox'
+        inbox.mkdir(parents=True, exist_ok=True)
+        source = inbox / f'{batch}.txt'
+        source.write_text(f'Synthetic original for {batch}')
+        self.data('triage', 'prepare', '--batch', batch)
+        ident = self.data('triage', 'report', '--batch', batch)['items'][0]['id']
+        return source, ident
+
+    def wiki_files(self):
+        return {str(p.relative_to(self.root)) for p in self.root.rglob('*') if '.git' not in p.parts}
+
+    def test_reject_removes_inbox_file_and_keeps_byte_identical_processed_copy(self):
+        source, ident = self.inbox_item('reject-inbox')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        files = self.wiki_files()
+        rejected = self.data('triage', 'reject', '--batch', 'reject-inbox', '--item', ident)
+        self.assertEqual(rejected['item']['status'], 'rejected')
+        self.assertFalse(source.exists())
+        processed = Path(rejected['item']['processed_path'])
+        self.assertEqual(processed.read_bytes(), b'Synthetic original for reject-inbox')
+        self.assertEqual(sorted(p.name for p in processed.parent.iterdir()), ['original'])
+        self.assertEqual(self.wiki_files(), files)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        report = self.data('triage', 'report', '--batch', 'reject-inbox')
+        self.assertEqual(report['items'][0]['status'], 'rejected')
+        self.assertIn('rejected', (Path(report['directory']) / 'report.md').read_text())
+
+    def test_reject_of_external_source_marks_rejected_and_never_deletes_it(self):
+        plan, item = self.routing()
+        self.prepare(plan)
+        result = self.action('reject', 'routed-call', 'morning-one', '--reason', 'Not for the wiki')
+        self.assertEqual(result['item']['status'], 'rejected')
+        self.assertTrue(Path(item['source']).exists())
+        self.assertEqual(Path(result['item']['processed_path']).read_bytes(), Path(item['source']).read_bytes())
+        self.assertIn('not deleted', result['note'])
+        report = (Path(self.data('triage', 'report', '--batch', 'morning-one')['directory']) / 'report.md').read_text()
+        self.assertIn('not deleted', report)
+        self.assertIn('Not for the wiki', report)
+
+    def test_interrupted_reject_after_copy_before_unlink_retries_without_duplicates(self):
+        from pisar import triage
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source, ident = self.inbox_item('reject-crash')
+        with patch.object(Path, 'unlink', side_effect=OSError('synthetic crash before unlink')):
+            with self.assertRaises(WikiError):
+                triage.reject(Wiki(self.root), self.state, 'reject-crash', ident)
+        self.assertTrue(source.exists())
+        self.assertEqual(self.data('triage', 'report', '--batch', 'reject-crash')['items'][0]['status'], 'rejecting')
+        retried = self.data('triage', 'reject', '--batch', 'reject-crash', '--item', ident)
+        self.assertEqual(retried['item']['status'], 'rejected')
+        self.assertFalse(source.exists())
+        processed = Path(retried['item']['processed_path'])
+        self.assertEqual(sorted(p.name for p in processed.parent.iterdir()), ['original'])
+        self.assertEqual(processed.read_bytes(), b'Synthetic original for reject-crash')
+
+    def test_interrupted_reject_after_unlink_before_status_retries_and_completed_reject_is_idempotent(self):
+        from pisar import triage
+        from pisar.spaces import Wiki
+        source, ident = self.inbox_item('reject-late')
+        persist = triage.persist
+
+        def crash_before_rejected(directory, manifest):
+            if manifest['items'][0]['status'] == 'rejected':
+                raise RuntimeError('synthetic crash after unlink before status persist')
+            return persist(directory, manifest)
+
+        with patch.object(triage, 'persist', crash_before_rejected):
+            with self.assertRaises(RuntimeError):
+                triage.reject(Wiki(self.root), self.state, 'reject-late', ident)
+        self.assertFalse(source.exists())
+        first = self.data('triage', 'reject', '--batch', 'reject-late', '--item', ident)
+        self.assertEqual(first['item']['status'], 'rejected')
+        again = self.data('triage', 'reject', '--batch', 'reject-late', '--item', ident)
+        self.assertEqual(again, first)
+        self.assertEqual(sorted(p.name for p in Path(first['item']['processed_path']).parent.iterdir()), ['original'])
+
+    def test_reject_refused_when_source_bytes_changed_and_removes_nothing(self):
+        source, ident = self.inbox_item('reject-changed')
+        source.write_text('changed after prepare')
+        failed = self.cli('triage', 'reject', '--batch', 'reject-changed', '--item', ident, ok=False)
+        self.assertIn('hash conflict', failed.stderr)
+        self.assertEqual(source.read_text(), 'changed after prepare')
+        self.assertFalse((self.state / 'processed/reject-changed').exists())
+        self.assertEqual(self.data('triage', 'report', '--batch', 'reject-changed')['items'][0]['status'], 'pending')
+
+    def test_reject_refused_from_applying_incomplete_and_complete(self):
+        for status in ('applying', 'incomplete', 'complete'):
+            batch = f'reject-{status}'
+            source, ident = self.inbox_item(batch)
+            manifest_path = next(self.state.rglob(f'triage/{batch}/manifest.json'))
+            manifest = json.loads(manifest_path.read_text())
+            manifest['items'][0]['status'] = status
+            manifest_path.write_text(json.dumps(manifest))
+            failed = self.cli('triage', 'reject', '--batch', batch, '--item', ident, ok=False)
+            self.assertIn('cannot reject', failed.stderr)
+            self.assertTrue(source.exists())
+            self.assertEqual(json.loads(manifest_path.read_text())['items'][0]['status'], status)
+
+    def test_reject_works_from_deferred_and_then_blocks_accept_reroute_and_defer(self):
+        source, ident = self.inbox_item('reject-deferred')
+        self.data('triage', 'defer', '--batch', 'reject-deferred', '--item', ident)
+        self.data('triage', 'reject', '--batch', 'reject-deferred', '--item', ident)
+        self.assertFalse(source.exists())
+        for action, flags in (('accept', []), ('reroute', ['--space', 'work/alpha']), ('defer', [])):
+            failed = self.cli('triage', action, '--batch', 'reject-deferred', '--item', ident, *flags, ok=False)
+            self.assertIn('rejected', failed.stderr)
+        self.assertEqual(self.data('triage', 'report', '--batch', 'reject-deferred')['items'][0]['status'], 'rejected')
+
+    def test_accept_after_reject_is_refused_for_external_source(self):
+        plan, item = self.routing()
+        self.prepare(plan)
+        self.action('reject')
+        self.cli('triage', 'accept', '--batch', 'morning-one', '--item', 'routed-call', ok=False)
+        self.assertFalse((self.alpha / 'inbox/routed-call.md').exists())
+        self.assertTrue(Path(item['source']).exists())
+
+    def test_rejected_source_is_not_reintroduced_by_a_new_batch_with_the_same_hash(self):
+        plan, item = self.routing()
+        self.prepare(plan)
+        self.action('reject')
+        second = self.base / 'routing-again.json'
+        second.write_text(plan.read_text())
+        self.cli('triage', 'prepare', '--batch', 'next-morning', '--plan', second, ok=False)
+        self.assertFalse((self.state / 'triage/next-morning').exists())
+        # Re-running the prepared batch returns the same snapshot, with the item still rejected.
+        self.assertEqual(self.prepare(plan)['status'], 'prepared')
+        self.assertEqual(self.data('triage', 'report', '--batch', 'morning-one')['items'][0]['status'], 'rejected')
+
+    def test_reason_is_trimmed_bounded_stored_in_report_and_never_written_to_wiki(self):
+        _, ident = self.inbox_item('reject-reason')
+        self.data('triage', 'reject', '--batch', 'reject-reason', '--item', ident, '--reason', '  Duplicate of the call  ')
+        report = self.data('triage', 'report', '--batch', 'reject-reason')
+        self.assertEqual(report['items'][0]['reason'], 'Duplicate of the call')
+        self.assertIn('Duplicate of the call', (Path(report['directory']) / 'report.md').read_text())
+        self.assertFalse(any('Duplicate of the call' in p.read_text(errors='ignore')
+                             for p in self.root.rglob('*') if p.is_file() and '.git' not in p.parts))
+        _, empty = self.inbox_item('reject-empty')
+        self.data('triage', 'reject', '--batch', 'reject-empty', '--item', empty, '--reason', '   ')
+        self.assertIsNone(self.data('triage', 'report', '--batch', 'reject-empty')['items'][0]['reason'])
+        _, long = self.inbox_item('reject-long')
+        self.cli('triage', 'reject', '--batch', 'reject-long', '--item', long, '--reason', 'x' * 501, ok=False)
+        self.cli('triage', 'reject', '--batch', 'reject-long', '--item', long, '--reason', 'two\nlines', ok=False)
+        self.assertEqual(self.data('triage', 'report', '--batch', 'reject-long')['items'][0]['status'], 'pending')
+
+    def test_reject_cli_wiring_and_help(self):
+        help_text = self.run_pisar('triage', 'reject', '--help').stdout
+        self.assertIn('--batch', help_text)
+        self.assertIn('--item', help_text)
+        self.assertIn('--reason', help_text)
+        self.assertIn('reject', self.run_pisar('triage', '--help').stdout)

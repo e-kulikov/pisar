@@ -5,6 +5,9 @@ from .operations import (JOURNAL_FORMAT, Runtime, legacy_error, atomic_bytes, ca
                          read_plan, save, source_bytes, validate_plan, verify_capture, write_json)
 from .safety import WikiError, concrete_id, safe_path, sha256
 
+REASON_LIMIT = 500
+REJECTED = ('rejecting', 'rejected')
+
 
 def batch_dir(runtime, batch):
     concrete_id(batch, 'batch_id')
@@ -32,6 +35,10 @@ def persist(directory, manifest):
              'Proposals remain external until explicit accept. No semantic routing is performed.', '']
     for item in manifest['items']:
         lines.append(f'- `{item["id"]}`: {item["status"]}; destination `{item.get("space_id") or "unknown"}`; original `{item["source"]}`')
+        if item['status'] in REJECTED:
+            if item.get('reason'):
+                lines.append(f'  Reason: {item["reason"]}')
+            lines.append(f'  Rejected: {reject_note(item)}')
         if item.get('error'):
             lines.append(f'  Error: {item["error"]}')
     atomic_bytes(safe_path(directory, 'report.md'), ('\n'.join(lines) + '\n').encode())
@@ -76,6 +83,7 @@ def prepare(wiki, directory, batch, plan_path=None, inbox=None):
                 return public(dest, prior)
         entries, snapshots, drafts = [], {}, {}
         ids = set()
+        rejected = rejected_hashes(runtime, wiki.root)
         sources, hashes = set(), set()
         for item in items:
             if not isinstance(item, dict):
@@ -90,6 +98,9 @@ def prepare(wiki, directory, batch, plan_path=None, inbox=None):
             source, data, digest = source_bytes(source, item['sha256'])
             if source in sources or digest in hashes:
                 raise WikiError('duplicate source identity/content in batch; keep one canonical item')
+            if digest in rejected:
+                other, other_item = rejected[digest]
+                raise WikiError(f'source already rejected as {other}/{other_item}; remove it from the routing or inbox')
             sources.add(source)
             hashes.add(digest)
             space_id = item.get('space_id')
@@ -132,6 +143,39 @@ def report(wiki, directory, batch):
         return public(dest, manifest)
 
 
+def rejected_hashes(runtime, root):
+    """Content hashes already rejected in any batch of this runtime namespace: never reintroduced."""
+    found = {}
+    if not (runtime.base / 'triage').is_dir():
+        return found
+    for path in sorted((runtime.base / 'triage').glob('*/manifest.json')):
+        manifest = json.loads(path.read_text(encoding='utf-8'))
+        if manifest.get('format') != JOURNAL_FORMAT or manifest.get('root') != str(root):
+            continue
+        for item in manifest['items']:
+            if item['status'] in REJECTED:
+                found.setdefault(item['sha256'], (manifest['batch_id'], item['id']))
+    return found
+
+
+def reason_text(reason):
+    """Optional one-line note: trimmed, empty means none, bounded, never written to the wiki."""
+    if reason is None:
+        return None
+    text = reason.strip()
+    if len(text) > REASON_LIMIT:
+        raise WikiError(f'reject reason exceeds {REASON_LIMIT} characters')
+    if not all(ch.isprintable() for ch in text):
+        raise WikiError('reject reason must be one printable line')
+    return text or None
+
+
+def reject_note(entry):
+    if entry.get('archive_inbox'):
+        return 'global inbox original removed after its verified processed copy was kept'
+    return 'external original not deleted: pisar does not own this file'
+
+
 def entry_for(manifest, ident):
     concrete_id(ident, 'item_id')
     matches = [e for e in manifest['items'] if e['id'] == ident]
@@ -160,6 +204,8 @@ def reroute(wiki, directory, batch, ident, space_id):
     with runtime.lock():
         dest, manifest = load(runtime, batch)
         entry = entry_for(manifest, ident)
+        if entry['status'] in REJECTED:
+            raise WikiError(f'cannot reroute rejected item {ident}')
         if entry['status'] not in ('pending', 'deferred'):
             raise WikiError(f'cannot reroute {entry["status"]} item; retry accept with its original inputs or diagnose/roll back partial work')
         draft = checked_draft(dest, entry)
@@ -180,11 +226,62 @@ def defer(wiki, directory, batch, ident):
     with runtime.lock():
         dest, manifest = load(runtime, batch)
         entry = entry_for(manifest, ident)
+        if entry['status'] in REJECTED:
+            raise WikiError(f'cannot defer rejected item {ident}')
         if entry['status'] not in ('pending', 'deferred'):
             raise WikiError(f'cannot defer {entry["status"]} item; retry accept with its original inputs or diagnose/roll back partial work')
         entry['status'] = 'deferred'
         persist(dest, manifest)
         return dict(batch_id=batch, item=entry)
+
+
+def reject(wiki, directory, batch, ident, reason=None):
+    """Drop an external-proposal item without touching any knowledge repository.
+
+    Order mirrors accept's archive step: verify bytes, keep a verified processed copy, then unlink
+    the global inbox original. A crash leaves status `rejecting`, and retrying completes it."""
+    text = reason_text(reason)
+    runtime = Runtime(directory, wiki.root)
+    with runtime.lock():
+        dest, manifest = load(runtime, batch)
+        if manifest['status'] != 'prepared':
+            raise WikiError('batch preparation incomplete; rerun prepare')
+        entry = entry_for(manifest, ident)
+        processed = outside_git(entry['processed_path'])
+        if processed != safe_path(runtime.base, f'processed/{batch}/{ident}/original'):
+            raise WikiError('processed namespace path conflict')
+        if entry['status'] in REJECTED:
+            if text is not None and text != entry.get('reason'):
+                raise WikiError(f'{batch}/{ident}: already rejected with a different reason')
+        elif entry['status'] not in ('pending', 'deferred'):
+            raise WikiError(f'cannot reject {entry["status"]} item; retry accept with its original inputs or diagnose/roll back partial work')
+        source = outside_git(entry['source'])
+        # A crash after the inbox unlink leaves only the processed copy; verify whichever still exists.
+        current = source if source.exists() else processed
+        if entry['status'] == 'rejected':
+            source_bytes(processed, entry['sha256'])
+            return dict(batch_id=batch, item=entry, note=reject_note(entry))
+        _, data, digest = source_bytes(current, entry['sha256'])
+        if entry['status'] != 'rejecting':
+            entry.update(status='rejecting', reason=text)
+            persist(dest, manifest)
+        try:
+            if processed.exists():
+                source_bytes(processed, digest)
+            else:
+                atomic_bytes(processed, data)
+                source_bytes(processed, digest)
+            if entry.get('archive_inbox') and source.exists():
+                source_bytes(source, digest)
+                source.unlink()
+        except (WikiError, OSError, ValueError) as error:
+            entry['error'] = str(error)
+            persist(dest, manifest)
+            raise WikiError(f'{batch}/{ident}: reject incomplete, retry reject: {error}') from None
+        entry['status'] = 'rejected'
+        entry.pop('error', None)
+        persist(dest, manifest)
+        return dict(batch_id=batch, item=entry, note=reject_note(entry))
 
 
 def accept(wiki, directory, batch, ident, binary='ruwana'):
@@ -198,6 +295,8 @@ def accept(wiki, directory, batch, ident, binary='ruwana'):
         expected_processed = safe_path(runtime.base, f'processed/{batch}/{ident}/original')
         if processed != expected_processed:
             raise WikiError('processed namespace path conflict')
+        if entry['status'] in REJECTED:
+            raise WikiError(f'{batch}/{ident}: item is rejected; accept refused')
         if entry['status'] == 'complete':
             source_bytes(processed, entry['sha256'])
             verify_capture(wiki, runtime, wiki.space(entry['space_id']), ident, entry['source'], entry['sha256'])
