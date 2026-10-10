@@ -304,9 +304,17 @@ class TriageTests(Fixture):
                 triage.reject(Wiki(self.root), self.state, 'reject-crash', ident)
         self.assertTrue(source.exists())
         self.assertEqual(self.data('triage', 'report', '--batch', 'reject-crash')['items'][0]['status'], 'rejecting')
+        report = Path(self.data('triage', 'report', '--batch', 'reject-crash')['directory']) / 'report.md'
+        self.assertNotIn('removed', report.read_text())
+        self.assertIn('reject in progress', report.read_text())
+        for action, flags in (('accept', []), ('reroute', ['--space', 'work/alpha']), ('defer', [])):
+            failed = self.cli('triage', action, '--batch', 'reject-crash', '--item', ident, *flags, ok=False)
+            self.assertIn('rejected', failed.stderr)
+        self.assertEqual(self.data('triage', 'report', '--batch', 'reject-crash')['items'][0]['status'], 'rejecting')
         retried = self.data('triage', 'reject', '--batch', 'reject-crash', '--item', ident)
         self.assertEqual(retried['item']['status'], 'rejected')
         self.assertFalse(source.exists())
+        self.assertIn('removed', report.read_text())
         processed = Path(retried['item']['processed_path'])
         self.assertEqual(sorted(p.name for p in processed.parent.iterdir()), ['original'])
         self.assertEqual(processed.read_bytes(), b'Synthetic original for reject-crash')
@@ -331,6 +339,61 @@ class TriageTests(Fixture):
         again = self.data('triage', 'reject', '--batch', 'reject-late', '--item', ident)
         self.assertEqual(again, first)
         self.assertEqual(sorted(p.name for p in Path(first['item']['processed_path']).parent.iterdir()), ['original'])
+
+    def test_retry_reason_must_match_stored_reason_and_missing_reason_keeps_it(self):
+        from pisar import triage
+        from pisar.spaces import Wiki
+        source, ident = self.inbox_item('reject-reason-retry')
+        persist = triage.persist
+
+        def crash_before_rejected(directory, manifest):
+            if manifest['items'][0]['status'] == 'rejected':
+                raise RuntimeError('synthetic crash before rejected status')
+            return persist(directory, manifest)
+
+        with patch.object(triage, 'persist', crash_before_rejected):
+            with self.assertRaises(RuntimeError):
+                triage.reject(Wiki(self.root), self.state, 'reject-reason-retry', ident, 'first note')
+        failed = self.cli('triage', 'reject', '--batch', 'reject-reason-retry', '--item', ident,
+                          '--reason', 'second note', ok=False)
+        self.assertIn('different reason', failed.stderr)
+        retried = self.data('triage', 'reject', '--batch', 'reject-reason-retry', '--item', ident)
+        self.assertEqual(retried['item']['reason'], 'first note')
+        self.assertEqual(retried['item']['status'], 'rejected')
+        self.cli('triage', 'reject', '--batch', 'reject-reason-retry', '--item', ident,
+                 '--reason', 'second note', ok=False)
+        self.assertEqual(self.data('triage', 'reject', '--batch', 'reject-reason-retry', '--item', ident,
+                                   '--reason', 'first note')['item']['reason'], 'first note')
+
+    def test_completed_reject_retry_verifies_processed_copy_and_fails_when_it_changed(self):
+        source, ident = self.inbox_item('reject-tampered')
+        first = self.data('triage', 'reject', '--batch', 'reject-tampered', '--item', ident)
+        Path(first['item']['processed_path']).write_text('tampered processed copy')
+        failed = self.cli('triage', 'reject', '--batch', 'reject-tampered', '--item', ident, ok=False)
+        self.assertIn('hash conflict', failed.stderr)
+        self.assertEqual(Path(first['item']['processed_path']).read_text(), 'tampered processed copy')
+
+    def test_reject_refuses_inbox_symlink_and_removes_nothing(self):
+        source, ident = self.inbox_item('reject-symlink')
+        target = self.base / 'symlink-target.txt'
+        target.write_text('Synthetic original for reject-symlink')
+        source.unlink()
+        source.symlink_to(target)
+        failed = self.cli('triage', 'reject', '--batch', 'reject-symlink', '--item', ident, ok=False)
+        self.assertIn('symlink', failed.stderr)
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(target.read_text(), 'Synthetic original for reject-symlink')
+        self.assertFalse((self.state / 'processed/reject-symlink').exists())
+
+    def test_reject_leaves_uncommitted_user_edit_byte_identical(self):
+        plan, item = self.routing()
+        self.prepare(plan)
+        draft = self.alpha / 'call.md'
+        draft.write_text('Uncommitted user edit that must survive')
+        status = git(self.root, 'status', '--porcelain')
+        self.action('reject')
+        self.assertEqual(draft.read_text(), 'Uncommitted user edit that must survive')
+        self.assertEqual(git(self.root, 'status', '--porcelain'), status)
 
     def test_reject_refused_when_source_bytes_changed_and_removes_nothing(self):
         source, ident = self.inbox_item('reject-changed')

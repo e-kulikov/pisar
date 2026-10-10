@@ -35,9 +35,11 @@ def persist(directory, manifest):
              'Proposals remain external until explicit accept. No semantic routing is performed.', '']
     for item in manifest['items']:
         lines.append(f'- `{item["id"]}`: {item["status"]}; destination `{item.get("space_id") or "unknown"}`; original `{item["source"]}`')
-        if item['status'] in REJECTED:
-            if item.get('reason'):
-                lines.append(f'  Reason: {item["reason"]}')
+        if item.get('reason'):
+            lines.append(f'  Reason: {item["reason"]}')
+        if item['status'] == 'rejecting':
+            lines.append('  Rejected: reject in progress; retry reject')
+        elif item['status'] == 'rejected':
             lines.append(f'  Rejected: {reject_note(item)}')
         if item.get('error'):
             lines.append(f'  Error: {item["error"]}')
