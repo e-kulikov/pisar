@@ -205,6 +205,16 @@ class Validation(unittest.TestCase):
                 with self.assertRaisesRegex(WikiError, key):
                     config.load(file)
 
+    def test_writer_agent_is_validated_against_the_writer_set_not_the_agents_list(self):
+        # Another agent added to AGENTS (for its own options) must not become a valid writer.
+        with mock.patch.object(config, 'AGENTS', ('claude', 'codex')):
+            file = self.config_file('[commit_message]\nagent = "codex"\n')
+            with self.assertRaisesRegex(WikiError, 'supported: claude'):
+                config.load(file)
+
+    def test_every_writer_agent_has_a_backend_and_every_backend_is_a_writer_agent(self):
+        self.assertEqual(set(config.COMMIT_MESSAGE_AGENTS), set(commit_message.BACKENDS))
+
     def test_valid_commit_message_table_loads(self):
         file = self.config_file('[commit_message]\nenabled = true\nagent = "claude"\nmodel = "sonnet"\n'
                         'effort = "low"\ntimeout = 60\nprompt_file = "/abs/prompt.md"\n')

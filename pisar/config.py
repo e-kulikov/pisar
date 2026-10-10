@@ -16,6 +16,8 @@ AGENT_KEYS = ('model', 'effort')
 COMMIT_MESSAGE_DEFAULTS = dict(enabled=False, agent='claude', model='sonnet', effort='medium', timeout=120,
                                prompt_file=None)
 COMMIT_MESSAGE_TIMEOUT = (10, 600)
+# The agents that can write commit messages; commit_message.BACKENDS must have exactly these names.
+COMMIT_MESSAGE_AGENTS = ('claude',)
 
 
 def config_home():
@@ -104,8 +106,9 @@ def _validate_commit_message(file, value):
         raise _error(file, 'commit_message.enabled', 'must be true or false')
     if 'agent' in value:
         _string(file, 'commit_message.agent', value['agent'])
-        if value['agent'] not in AGENTS:
-            raise _error(file, 'commit_message.agent', f'unsupported agent: {value["agent"]}')
+        if value['agent'] not in COMMIT_MESSAGE_AGENTS:
+            raise _error(file, 'commit_message.agent', f'unsupported writer agent: {value["agent"]} '
+                                                       f'(supported: {", ".join(COMMIT_MESSAGE_AGENTS)})')
     for key in ('model', 'effort'):
         if key in value:
             _string(file, f'commit_message.{key}', value[key])
