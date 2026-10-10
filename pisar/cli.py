@@ -2,7 +2,8 @@ import argparse
 import json
 import sys
 from types import SimpleNamespace
-from . import __version__, agent, config_command, guard, lesson_command, research_command, settings, spacecmd
+from . import (__version__, agent, commit_message, config_command, guard, lesson_command, research_command,
+               settings, spacecmd)
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -74,6 +75,11 @@ def parser():
     spacecmd.add_parser(commands)
     lesson_command.add_parser(commands)
     research_command.add_parser(commands)
+    for command, action in commit_message.COMMITTING:
+        leaf = commands.choices[command]
+        if action is not None:
+            leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[action]
+        commit_message.add_flags(leaf)
     return p
 
 
@@ -91,7 +97,9 @@ def main(argv=None):
         p.error('--agent cannot be combined with a command')
     if not args.agent and not args.command:
         p.error('a command is required (or --agent)')
+    token = None
     try:
+        token = commit_message.explain(args)  # Refuses a missing explanation before any write.
         if args.agent:
             agent.launch(agent.selected(args.agent), settings.root(args.root),
                          settings.state_dir(args.state_dir), settings.ruwana(args.ruwana), extra)
@@ -167,3 +175,5 @@ def main(argv=None):
     except (WikiError, OSError, ValueError, RuntimeError) as error:
         print(f'pisar: {error}', file=sys.stderr)
         return 1
+    finally:
+        commit_message.reset(token)

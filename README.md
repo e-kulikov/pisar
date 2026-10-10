@@ -185,6 +185,32 @@ makes, and retries and the rollback procedure below use those recorded ids, neve
 the commit text. A commit with the same subject that pisar did not record is
 refused.
 
+### Commit messages
+
+Commands that commit (`save`, `capture`, `triage accept`, `lesson accept`,
+`domain add` and `space create|move|archive|restore`) accept `--what` (a short summary of the change) and
+`--why` (the reason for it). With the default configuration (`[commit_message]
+enabled = false`) they are optional and added verbatim to the deterministic message
+below the subject. With `enabled = true` (in `$XDG_CONFIG_HOME/pisar/config.toml`), pisar refuses
+those commands unless both are given, and a tool-less `claude -p` writer turns them,
+the staged diff and the affected spaces into the message. The writer's settings are
+`model`, `effort`, `timeout` (10 to 600 seconds) and an optional absolute
+`prompt_file`:
+
+```toml
+[commit_message]
+enabled = true
+model = "sonnet"
+effort = "medium"
+timeout = 120
+``` The writer's output must be a Conventional Commits subject of at most 72 characters,
+an optional body of at most 2000 characters, free of absolute local paths and
+secret-like values. pisar appends the trailer `Pisar-Operation: OPERATION-ID` itself.
+Invalid output, a failing or timed-out writer, or a missing `claude` stops the commit:
+nothing is written and no fallback message is used. Each commit's message is generated
+once and stored in the journal before the commit exists, so a retry reuses it.
+Author and committer identity are not set by pisar; they come from Git's configuration.
+
 ## Running an agent
 
 ```sh

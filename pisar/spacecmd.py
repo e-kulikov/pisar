@@ -148,7 +148,8 @@ def _landed(wiki, runtime, journal, repo, sha):
 def _commit(wiki, runtime, journal, repo, paths, op):
     """gitops.commit journaled as it lands: the intent before the branch moves, the commit right after."""
     return _landed(wiki, runtime, journal, repo, gitops.commit(
-        repo, paths, op, intent=operations.pending_intent(runtime, journal)))
+        repo, paths, op, intent=operations.pending_intent(runtime, journal),
+        message=operations.commit_writer(wiki, runtime, journal, repo)))
 
 
 def _verify(wiki, runtime, op, journal, repos):
@@ -595,7 +596,8 @@ def relocate(wiki, state_dir, action, value, to=None):
             marker = rel(new / '.wiki.toml')
             _landed(wiki, runtime, journal, repo, gitops.commit_move(
                 repo, rel(old), rel(new), op, replace={marker: (new / '.wiki.toml').read_bytes()},
-                intent=operations.pending_intent(runtime, journal)))
+                intent=operations.pending_intent(runtime, journal),
+                message=operations.commit_writer(wiki, runtime, journal, repo)))
 
         touched = sorted({old.relative_to(root).as_posix(), new.relative_to(root).as_posix()})
         old_rel, new_rel = old.relative_to(root).as_posix(), new.relative_to(root).as_posix()

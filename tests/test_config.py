@@ -58,6 +58,12 @@ class ConfigTests(Fixture):
             'agents.claude.reviewer.model': {'value': 'opus', 'source': 'default'},
             'agents.claude.reviewer.effort': {'value': 'high', 'source': 'default'},
             'agents.claude.researcher.model': {'value': 'sonnet', 'source': 'default'},
+            'commit_message.enabled': {'value': False, 'source': 'default'},
+            'commit_message.agent': {'value': 'claude', 'source': 'default'},
+            'commit_message.model': {'value': 'sonnet', 'source': 'default'},
+            'commit_message.effort': {'value': 'medium', 'source': 'default'},
+            'commit_message.timeout': {'value': 120, 'source': 'default'},
+            'commit_message.prompt_file': {'value': None, 'source': 'default'},
             'agents.claude.researcher.effort': {'value': 'medium', 'source': 'default'},
         })
 
@@ -89,6 +95,12 @@ effort = "max"
             'agents.claude.reviewer.effort': ('high', 'default'),
             'agents.claude.researcher.model': ('sonnet', 'default'),
             'agents.claude.researcher.effort': ('max', 'config'),
+            'commit_message.enabled': (False, 'default'),
+            'commit_message.agent': ('claude', 'default'),
+            'commit_message.model': ('sonnet', 'default'),
+            'commit_message.effort': ('medium', 'default'),
+            'commit_message.timeout': (120, 'default'),
+            'commit_message.prompt_file': (None, 'default'),
         }
         self.assertEqual({k: (v['value'], v['source']) for k, v in settings.items()}, expected)
 

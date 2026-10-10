@@ -40,7 +40,7 @@ class CommitRecovery(Fixture):
 
         def run(repo, *args, **kwargs):
             if args and args[0] == 'commit-tree' and edit is not None:
-                args = (*args[:-1], edit)
+                kwargs = {**kwargs, 'input': f'{edit}\n'.encode()}  # the message is read from stdin
             if args and args[0] == 'update-ref' and window == 'before-ref' and armed[0]:
                 armed[0] = False
                 raise WikiError('interrupted between commit-tree and update-ref')
@@ -142,7 +142,7 @@ class SpaceRecovery(SpaceCommandFixture):
                 armed[0] = False
                 raise WikiError('interrupted between commit-tree and update-ref')
             if mine and edit is not None and args[:1] == ('commit-tree',):
-                args = (*args[:-1], edit)
+                kwargs = {**kwargs, 'input': f'{edit}\n'.encode()}  # the message is read from stdin
             result = real_run(target, *args, **kwargs)
             if mine and window == 'after-ref' and args[:1] == ('update-ref',):
                 armed[0] = False

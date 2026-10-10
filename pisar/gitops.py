@@ -140,7 +140,21 @@ def sync_index(repo, paths):
     run(repo, 'reset', '-q', '--', *paths, check=False)
 
 
-def commit(repo, paths, operation_id, verified=None, pins=None, intent=None):
+def diff_text(repo, old, new, limit):
+    """The patch from OLD to NEW, at most LIMIT bytes (a marker says when it was cut); never filtered."""
+    process = subprocess.Popen(git_command(repo, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', old, new),
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment())
+    data = process.stdout.read(limit + 1)  # Reads to EOF unless the patch is larger than the limit.
+    truncated = len(data) > limit
+    if truncated:
+        process.kill()
+    process.wait()
+    process.stdout.close()
+    text = data[:limit].decode('utf-8', errors='replace')
+    return text + '\n[diff truncated]\n' if truncated else text
+
+
+def commit(repo, paths, operation_id, verified=None, pins=None, intent=None, message=None):
     """Commit PATHS without ever using the shared index.
 
     The tree is built in a private index read from HEAD; VERIFIED maps a path to the exact journaled
@@ -148,6 +162,8 @@ def commit(repo, paths, operation_id, verified=None, pins=None, intent=None):
     the operation (None leaves the entry unchanged); without PINS the child's current HEAD is used.
     Other files are taken from the working tree. A concurrent `git add` or an edit of the working file
     can therefore never enter the commit.
+    MESSAGE, when given, maps {repo, old, tree, paths} to the full message (computed once, before the
+    commit object exists); without it the message is the 'wiki: OPERATION' subject.
     INTENT, when given, receives {repo, commit, parent} after the commit object exists and before the
     branch moves: the caller journals it, so a crash after the move is recognised by id.
     The branch then advances by compare-and-swap, and the real index is made to agree for ONLY these
@@ -177,10 +193,10 @@ def commit(repo, paths, operation_id, verified=None, pins=None, intent=None):
         if tree == run(repo, 'rev-parse', f'{old}^{{tree}}').strip():
             sync_index(repo, paths)  # Already committed (a retry): finish the interrupted synchronization.
             return None
-        # Hooks and signing stay off: writes cannot run user publishing scripts. The 'wiki: OPERATION'
-        # subject is informational only: recovery recognises our commits by the ids in the journal.
-        new = run(repo, 'commit-tree', tree, '-p', old,
-                  '-m', f'wiki: {operation_id}').strip()
+        # Hooks and signing stay off: writes cannot run user publishing scripts. The subject is
+        # informational only: recovery recognises our commits by the ids in the journal.
+        text = message(dict(repo=repo, old=old, tree=tree, paths=paths)) if message else f'wiki: {operation_id}'
+        new = run(repo, 'commit-tree', tree, '-p', old, input=f'{text}\n'.encode()).strip()
         for relative, data in verified.items():
             if blob(repo, f'{new}:{relative}') != data:
                 raise WikiError(f'committed bytes of {relative} differ from the journal in {repo}')
@@ -202,7 +218,7 @@ def tree_entries(repo, revision, prefix):
     return entries
 
 
-def commit_move(repo, old, new, operation_id, replace=None, intent=None):
+def commit_move(repo, old, new, operation_id, replace=None, intent=None, message=None):
     """Commit the rename of OLD to NEW (repo-relative) by blob identity, and nothing else.
 
     The moved tree is never re-staged through Git attributes or filters: in a private index read
@@ -240,7 +256,8 @@ def commit_move(repo, old, new, operation_id, replace=None, intent=None):
                 raise WikiError(f'{target} is not part of the moved tree in {repo}')
         run(repo, 'update-index', '-z', '--index-info', input=''.join(lines).encode(), index=index)
         tree = run(repo, 'write-tree', index=index).strip()
-    new_commit = run(repo, 'commit-tree', tree, '-p', head, '-m', f'wiki: {operation_id}').strip()
+    text = message(dict(repo=repo, old=head, tree=tree, paths=[old, new])) if message else f'wiki: {operation_id}'
+    new_commit = run(repo, 'commit-tree', tree, '-p', head, input=f'{text}\n'.encode()).strip()
     # Verify before the branch moves: identical object ids (except the replaced paths) and exact bytes.
     after = {path: (mode, oid) for mode, oid, path in tree_entries(repo, new_commit, new)}
     for target, (mode, oid) in moved.items():

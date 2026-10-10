@@ -330,6 +330,33 @@ def pinned_commit(journal, child, wiki):
     return recorded
 
 
+def commit_writer(wiki, runtime, journal, repo):
+    """The message maker of one commit of REPO (see gitops.commit).
+
+    Deterministic messages need no journal. With the writer enabled, the message is stored in the journal
+    before the commit object exists, and a retry of the same tree reuses it: never a second message."""
+    from . import commit_message  # Lazy: commit_message imports research, which imports this module.
+    explanation = commit_message.current()
+    options = settings.commit_message()
+    operation = journal['operation_id']
+
+    def write(changes):
+        if not options['enabled']:
+            return commit_message.compose(changes, operation, explanation, options, wiki.root, runtime.base)
+        stored = journal.get('messages', {}).get(str(repo))
+        if stored and stored['tree'] == changes['tree']:
+            return stored['message']
+        paths = [str((repo / p).relative_to(wiki.root)) for p in changes['paths']]
+        spaces = sorted(s.address for s in wiki.spaces if any((repo / p).is_relative_to(s.path) for p in changes['paths']))
+        full = dict(paths=sorted(paths), spaces=spaces, tree=changes['tree'],
+                    diff=gitops.diff_text(repo, changes['old'], changes['tree'], commit_message.DIFF_LIMIT))
+        text = commit_message.compose(full, operation, explanation, options, wiki.root, runtime.base)
+        journal.setdefault('messages', {})[str(repo)] = dict(tree=changes['tree'], message=text)
+        runtime.store(journal)
+        return text
+    return write
+
+
 def apply_files(wiki, runtime, journal):
     remove_leftovers(wiki, journal)
     validate_artifacts(wiki, journal)
@@ -373,7 +400,8 @@ def apply_files(wiki, runtime, journal):
         pins = {link: pinned_commit(journal, child, wiki)
                 for (parent, link), child in links.items() if parent == repo}
         commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins,
-                               intent=pending_intent(runtime, journal))
+                               intent=pending_intent(runtime, journal),
+                               message=commit_writer(wiki, runtime, journal, repo))
         if commit:
             checkpoint(runtime, journal, repo, commit)
         for (parent, link), child in links.items():
