@@ -85,7 +85,6 @@ def prepare(wiki, directory, batch, plan_path=None, inbox=None):
                 return public(dest, prior)
         entries, snapshots, drafts = [], {}, {}
         ids = set()
-        rejected = rejected_hashes(runtime, wiki.root)
         sources, hashes = set(), set()
         for item in items:
             if not isinstance(item, dict):
@@ -100,9 +99,6 @@ def prepare(wiki, directory, batch, plan_path=None, inbox=None):
             source, data, digest = source_bytes(source, item['sha256'])
             if source in sources or digest in hashes:
                 raise WikiError('duplicate source identity/content in batch; keep one canonical item')
-            if digest in rejected:
-                other, other_item = rejected[digest]
-                raise WikiError(f'source already rejected as {other}/{other_item}; remove it from the routing or inbox')
             sources.add(source)
             hashes.add(digest)
             space_id = item.get('space_id')
@@ -143,21 +139,6 @@ def report(wiki, directory, batch):
     with runtime.lock():
         dest, manifest = load(runtime, batch)
         return public(dest, manifest)
-
-
-def rejected_hashes(runtime, root):
-    """Content hashes already rejected in any batch of this runtime namespace: never reintroduced."""
-    found = {}
-    if not (runtime.base / 'triage').is_dir():
-        return found
-    for path in sorted((runtime.base / 'triage').glob('*/manifest.json')):
-        manifest = json.loads(path.read_text(encoding='utf-8'))
-        if manifest.get('format') != JOURNAL_FORMAT or manifest.get('root') != str(root):
-            continue
-        for item in manifest['items']:
-            if item['status'] in REJECTED:
-                found.setdefault(item['sha256'], (manifest['batch_id'], item['id']))
-    return found
 
 
 def reason_text(reason):

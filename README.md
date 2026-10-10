@@ -662,8 +662,8 @@ from `pending` or `deferred` only, writes nothing to any knowledge repository, a
 hash-verified processed copy before it removes a global inbox original. An external
 original is only marked `rejected`: pisar does not own that file, so it is never deleted,
 and the report says so. The reason is trimmed, at most 500 characters, shown in the report,
-and never written to the wiki. A rejected item cannot be accepted, and a prepare that
-meets the same content hash again is refused.
+and never written to the wiki. A rejected item cannot be accepted. Rejection is
+final only within its batch: a later batch with the same content is prepared as a new item.
 
 Only `accept --item ID` applies that item and commits its intended paths. Source
 and draft hashes are revalidated; ambiguous or changed inputs stay unapplied.

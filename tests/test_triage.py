@@ -435,17 +435,26 @@ class TriageTests(Fixture):
         self.assertFalse((self.alpha / 'inbox/routed-call.md').exists())
         self.assertTrue(Path(item['source']).exists())
 
-    def test_rejected_source_is_not_reintroduced_by_a_new_batch_with_the_same_hash(self):
+    def test_reject_is_terminal_inside_its_batch_and_same_content_prepares_in_a_new_batch(self):
         plan, item = self.routing()
         self.prepare(plan)
         self.action('reject')
-        second = self.base / 'routing-again.json'
-        second.write_text(plan.read_text())
-        self.cli('triage', 'prepare', '--batch', 'next-morning', '--plan', second, ok=False)
-        self.assertFalse((self.state / 'triage/next-morning').exists())
         # Re-running the prepared batch returns the same snapshot, with the item still rejected.
         self.assertEqual(self.prepare(plan)['status'], 'prepared')
         self.assertEqual(self.data('triage', 'report', '--batch', 'morning-one')['items'][0]['status'], 'rejected')
+        # A new batch is a new decision: the same content is prepared normally again.
+        second = self.base / 'routing-again.json'
+        second.write_text(plan.read_text())
+        self.prepare(second, 'next-morning')
+        self.assertEqual(self.data('triage', 'report', '--batch', 'next-morning')['items'][0]['status'], 'pending')
+
+    def test_same_content_dropped_again_into_the_inbox_is_prepared_in_a_new_batch(self):
+        source, ident = self.inbox_item('reject-again')
+        self.data('triage', 'reject', '--batch', 'reject-again', '--item', ident)
+        self.assertFalse(source.exists())
+        source.write_text(f'Synthetic original for reject-again')
+        self.data('triage', 'prepare', '--batch', 'reject-again-two')
+        self.assertEqual(self.data('triage', 'report', '--batch', 'reject-again-two')['items'][0]['status'], 'pending')
 
     def test_reason_is_trimmed_bounded_stored_in_report_and_never_written_to_wiki(self):
         _, ident = self.inbox_item('reject-reason')
