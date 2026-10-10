@@ -178,10 +178,12 @@ PISAR_ROOT=/absolute/knowledge pisar inventory --include work
 
 The knowledge formats are independent of the executable's name and remain
 stable: domain markers are named `.domain.toml`, space descriptors `.wiki.toml`,
-stable document references are `wiki:DOMAIN/SPACE:DOCUMENT`, and every commit
-pisar makes has the subject
-`wiki: OPERATION-ID`. Retries recognize their own commits by that subject and the
-rollback procedure below selects commits with it.
+stable document references are `wiki:DOMAIN/SPACE:DOCUMENT`. Every commit pisar
+makes has the subject `wiki: OPERATION-ID`, but that subject is informational only:
+the operation journal in the runtime directory records the id of each commit it
+makes, and retries and the rollback procedure below use those recorded ids, never
+the commit text. A commit with the same subject that pisar did not record is
+refused.
 
 ## Running an agent
 
@@ -736,8 +738,10 @@ exact task file in the **owning repository**, where its Git path may differ from
 that root-relative project. A submodule task commit needs a separate parent
 gitlink commit. Leave existing task files and status intact during rollback.
 
-Set `OWNER_REPO` to an absolute owning-repository path and `OPERATION` to the
-recorded operation ID, then run the following in Bash. It stages inverse patches
+Set `OWNER_REPO` to an absolute owning-repository path, `OPERATION` to the
+recorded operation ID and `PISAR_ROOT` to the knowledge root, then run the
+following in Bash. It reverts the commits recorded in the operation journal for
+that repository (not commits found by their subject). It stages inverse patches
 only for knowledge files; task files and all current submodule gitlinks are
 excluded. It stops on dirty trees or a conflicting later knowledge edit. Review
 the staged diff before committing.
@@ -746,17 +750,30 @@ the staged diff before committing.
 set -euo pipefail
 : "${OWNER_REPO:?Set the absolute owning repository path}"
 : "${OPERATION:?Set the recorded operation id}"
+: "${PISAR_ROOT:?Set the absolute knowledge root}"
+STATE="${PISAR_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pisar}"
+ROOT="$(realpath "$PISAR_ROOT")"
+NAMESPACE="$(printf %s "$ROOT" | python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:24])')"
+JOURNAL="$STATE/roots/$NAMESPACE/operations/$OPERATION.json"
 cd "$OWNER_REPO"
 test -z "$(git status --porcelain)"
-git log --format='%h %s' --grep="^wiki: $OPERATION\$"
+# The commits pisar recorded for this repository, oldest first (recorded ids, not commit text).
+mapfile -t commits < <(python3 -c '
+import json, os, sys
+journal, root, owner = sys.argv[1:4]
+for record in json.load(open(journal, encoding="utf-8"))["commits"]:
+    if os.path.join(root, record["repo"]) == owner:
+        print(record["commit"])
+' "$JOURNAL" "$ROOT" "$OWNER_REPO")
+git log --format='%h %s' --no-walk "${commits[@]}"
 excludes=(':(exclude,glob)**/.ruwana/**' ':(exclude,literal).ruwana')
 while IFS= read -r -d '' entry; do
   if [[ "$entry" == '160000 '* ]]; then
     excludes+=(":(exclude,literal)${entry#*$'\t'}")
   fi
 done < <(git ls-files --stage -z)
-for sha in $(git log --format=%H --grep="^wiki: $OPERATION\$"); do
-  git show --format= --binary "$sha" -- . "${excludes[@]}" \
+for ((i = ${#commits[@]} - 1; i >= 0; i--)); do
+  git show --format= --binary "${commits[i]}" -- . "${excludes[@]}" \
     | git apply -R --index --allow-empty
 done
 git diff --cached --stat
