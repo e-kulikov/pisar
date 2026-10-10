@@ -63,6 +63,9 @@ class McpClient:
     def call(self, name, args):
         return self.request('tools/call', {'name': name, 'arguments': {'args': args}})['result']
 
+    def call_with(self, name, arguments):
+        return self.request('tools/call', {'name': name, 'arguments': arguments})['result']
+
     def text(self, name, args):
         result = self.call(name, args)
         return result['content'][0]['text'], bool(result.get('isError'))
@@ -103,7 +106,7 @@ class McpTests(Fixture):
         self.assertEqual(init['result']['serverInfo']['name'], 'pisar')
         self.assertEqual(init['result']['capabilities'], {'tools': {}})
         tools = client.request('tools/list')['result']['tools']
-        self.assertEqual(sorted(t['name'] for t in tools), ['git', 'lesson_accept', 'lesson_review', 'pisar'])
+        self.assertEqual(sorted(t['name'] for t in tools), sorted(mcp.TOOL_NAMES))
 
     def test_unknown_method_is_a_json_rpc_error(self):
         client = self.server()

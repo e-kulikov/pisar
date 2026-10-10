@@ -32,6 +32,8 @@ class CodexSkillTests(Fixture):
         text = codex_plugin.skill_texts()['lessons']
         self.assertIn('`lesson_review`', text)
         self.assertIn('`lesson_accept`', text)
+        self.assertIn('`lesson_draft_write`', text)
+        self.assertNotIn('edit tool', text)
         self.assertNotIn('pisar:lesson-reviewer', text)
         self.assertNotIn('`pisar lesson accept`', text)
         self.assertNotIn('pisar lesson accept --batch', text)

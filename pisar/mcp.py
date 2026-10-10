@@ -8,14 +8,17 @@ list. Tools are the same list as CLAUDE_ALLOWED in agent.py, plus
 ``lesson_accept``, which the user must confirm through an MCP elicitation.
 """
 import json
+import os
 import re
 from pathlib import Path
 import subprocess
 import sys
 from . import __version__
-from . import codex_reviewer
+from . import codex_reviewer, lesson
 from .codex_agent import pisar_command, server_environment
-from .safety import WikiError
+from .operations import atomic_bytes
+from .safety import WikiError, concrete_id, sha256
+from .spaces import Wiki
 
 PROTOCOL = '2025-06-18'
 MAX_OUTPUT = 1024 * 1024
@@ -90,7 +93,17 @@ TOOLS = (
                            '["--batch", "ID", "--keep", "F1"].'),
     _tool('lesson_review', 'Have the senior reviewer check the current revision of a lesson batch and record '
                            'its verdict. Arguments: ["--batch", "ID"].'),
+    _tool('lesson_draft_read', 'Read the draft of an open lesson batch: its text and sha256.',
+          {'type': 'object', 'properties': {'batch': {'type': 'string'}}, 'required': ['batch'],
+           'additionalProperties': False}),
+    _tool('lesson_draft_write', 'Replace the whole draft of an open lesson batch. Pass the sha256 of the text '
+                                'you last read; the write is refused if the draft changed since.',
+          {'type': 'object', 'properties': {'batch': {'type': 'string'}, 'sha256': {'type': 'string'},
+                                            'text': {'type': 'string'}},
+           'required': ['batch', 'sha256', 'text'], 'additionalProperties': False}),
 )
+TOOL_NAMES = tuple(tool['name'] for tool in TOOLS)
+DRAFT_LIMIT = 256 * 1024  # bytes of one draft
 
 
 class Refused(WikiError):
@@ -230,6 +243,8 @@ class Server:
                 return self.text(self.accept(args))
             if name == 'lesson_review':
                 return self.text(self.review(args))
+            if name in ('lesson_draft_read', 'lesson_draft_write'):
+                return self.text(self.draft(name, arguments))
         except WikiError as error:
             return self.text(str(error), error=True)
         raise _Unknown(f'tool {name}')
@@ -284,6 +299,40 @@ class Server:
                 return False
             return answer['result'].get('action') == 'accept'
         return False
+
+    def draft(self, name, arguments):
+        """The draft of one open lesson batch: read it, or replace it when the digest still matches."""
+        allowed = {'batch'} if name == 'lesson_draft_read' else {'batch', 'sha256', 'text'}
+        if set(arguments) - allowed:
+            raise Refused(f'{name}: unknown arguments: {", ".join(sorted(set(arguments) - allowed))}')
+        batch = arguments.get('batch')
+        if not isinstance(batch, str):
+            raise Refused(f'{name}: batch must be a lesson batch id')
+        handle = lesson.Batch(Wiki(self.root), self.state, concrete_id(batch, 'batch'))
+        meta = handle.load()
+        path = handle.file('draft.md')
+        if os.path.islink(path):
+            raise Refused('the draft is not a regular file')
+        current = path.read_bytes() if path.is_file() else b''
+        if name == 'lesson_draft_read':
+            try:
+                text = current.decode('utf-8')
+            except UnicodeDecodeError:
+                raise Refused('the draft is not UTF-8') from None
+            return json.dumps({'batch': batch, 'sha256': sha256(current), 'text': text}, ensure_ascii=False, indent=2)
+        text, digest = arguments.get('text'), arguments.get('sha256')
+        if not isinstance(text, str) or not isinstance(digest, str):
+            raise Refused(f'{name}: text and sha256 are required')
+        data = text.encode('utf-8')
+        if len(data) > DRAFT_LIMIT:
+            raise Refused(f'{name}: the draft is too large (more than {DRAFT_LIMIT} bytes)')
+        with handle.runtime.lock():
+            handle.require_open(meta)
+            handle.require_not_accepting()
+            if sha256(current) != digest:
+                raise Refused(f'{name}: the draft changed since it was read; read it again and merge')
+            atomic_bytes(path, data)
+        return json.dumps({'batch': batch, 'sha256': sha256(data)}, ensure_ascii=False, indent=2)
 
     def review(self, args):
         if not isinstance(args, list) or len(args) != 2 or args[0] != '--batch' or not args[1]:

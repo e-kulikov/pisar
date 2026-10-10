@@ -50,7 +50,7 @@ DISABLED_FEATURES = ('shell_tool', 'multi_agent', 'apps', 'plugins', 'browser_us
                      'image_generation', 'hooks', 'goals')
 PROFILE = 'pisar'
 # The tools the pisar server offers (see mcp.py); Codex shows and calls only these.
-SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review')
+SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review', 'lesson_draft_read', 'lesson_draft_write')
 
 
 # Codex-specific wording appended to the shared agent prompt: the tools that stand in for Bash.

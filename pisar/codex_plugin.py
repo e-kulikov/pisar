@@ -16,12 +16,14 @@ SKILLS = ('pisar', 'lessons', 'research')
 CLAUDE_SKILLS = 'plugin/claude/skills'
 TOOLS = '''## Tools in this session
 
-Shell commands are not available. Run pisar with the `pisar` tool: `args` is the
-list that follows `pisar`, for example `["search", "--space", "work/alpha", "launch"]`.
+You have no shell and no file tools. Run pisar with the `pisar` tool: `args` is
+the list that follows `pisar`, for example `["search", "--space", "work/alpha", "launch"]`.
+Read documents with the `pisar` tool (`read`), and change them only through pisar.
 Run git with the `git` tool: `args` starts with the subcommand, for example
-`["mv", "old.md", "new.md"]`. Accept a lesson only with the `lesson_accept` tool; it
-asks the user to confirm. Review a lesson revision with the `lesson_review` tool.
-Read files with your file tools, and write only the lesson draft directory.
+`["mv", "old.md", "new.md"]`. Draft a lesson with `lesson_draft_read` and
+`lesson_draft_write` (pass the sha256 you last read), not by editing draft.md.
+Accept a lesson only with the `lesson_accept` tool; it asks the user to confirm.
+Review a lesson revision with the `lesson_review` tool.
 '''
 REVIEW_STEP = '''5. Review is mandatory: call the `lesson_review` tool with `["--batch", "ID"]`.
    It sends the current revision (its text and sha256) to the senior reviewer,
@@ -53,6 +55,10 @@ def _replace_block(text, start, end, block):
 
 
 def _lessons(text):
+    draft = 'Write the note into that\n   file with your edit tool (only the lessons workspace is writable).'
+    if draft not in text:
+        raise WikiError('bundled skill changed: draft step')
+    text = text.replace(draft, 'Write the note with the `lesson_draft_write` tool, after reading it with\n   `lesson_draft_read`.')
     text = _replace_block(text, '5. Review is mandatory:', '6. `pisar lesson show', REVIEW_STEP)
     text = _replace_block(text, '7. When the user agrees, run', '8. If the user gives up', ACCEPT_STEP)
     if "act. `pisar lesson accept` always asks for" not in text:

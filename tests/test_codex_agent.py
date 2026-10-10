@@ -153,7 +153,8 @@ class CodexAgentTests(Fixture):
         self.assertEqual(server['env']['HOME'], str(home))
         self.assertNotIn('GIT_CONFIG_GLOBAL', server['env'])
         self.assertEqual(call['env']['HOME'], str(self.state.resolve() / 'agents' / 'codex' / 'home'))
-        self.assertEqual(server['enabled_tools'], ['pisar', 'git', 'lesson_accept', 'lesson_review'])
+        self.assertEqual(server['enabled_tools'], ['pisar', 'git', 'lesson_accept', 'lesson_review',
+                                                   'lesson_draft_read', 'lesson_draft_write'])
 
     def test_mcp_servers_are_only_the_root_file_and_the_pisar_server(self):
         _, call = self.launch()

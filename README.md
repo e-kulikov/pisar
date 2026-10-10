@@ -192,8 +192,9 @@ pisar --agent claude -- -c           # arguments after -- go to the agent itself
 ```
 
 `--agent` starts an AI agent confined to this repository, so it behaves as a
-knowledge assistant. Today only `claude` (Claude Code, which must be on `PATH`)
-is supported. It is used instead of a command:
+knowledge assistant. Two agents are supported: `claude` (Claude Code) and `codex`
+(Codex CLI, see [Codex](#codex)); the executable must be on `PATH`. It is used
+instead of a command:
 
 - It runs in the root, with its own configuration directory
   `<state-dir>/agents/claude` (mode 0700, outside every Git repository). Log in
@@ -242,6 +243,75 @@ is supported. It is used instead of a command:
 In an interactive session a command outside the allowlist asks for confirmation;
 non-interactively it is refused. The allowlist narrows what the agent may do, it
 is not a sandbox: it can still read and edit files in the repository.
+
+## Codex
+
+```sh
+pisar --agent codex                  # start Codex CLI in the knowledge root
+pisar --agent codex -- -m MODEL      # a model for this session only
+pisar --agent codex -- -c model_reasoning_effort=high
+```
+
+`--agent codex` gives the same confinement as `--agent claude`, through Codex's
+own mechanisms and a pisar MCP server where Codex has no equivalent. Verified
+with `codex-cli 0.162.0`; **that is the minimum tested version**.
+
+**Log in once** to the isolated Codex home (it is not your own `~/.codex`). The
+default state directory is `$XDG_DATA_HOME/pisar`, so for the default setup:
+
+```sh
+CODEX_HOME=~/.local/share/pisar/agents/codex HOME=~/.local/share/pisar/agents/codex/home codex login
+```
+
+Alternatively set `OPENAI_API_KEY` or `CODEX_API_KEY`; both are passed through.
+Codex's own shell is disabled, so it reaches the knowledge only through the
+`pisar`, `git`, `lesson_accept` and `lesson_review` tools.
+
+- `default_agent = "codex"` and `agents.codex.model|effort` (main session) and
+  `agents.codex.reviewer|researcher.model|effort` in the config file, shown by
+  `pisar config show`. Defaults: reviewer `gpt-6.1-sol` / `high`, researcher
+  `gpt-5.5` / `medium`; the main session uses Codex's own model unless set.
+  These model names come from `codex debug models` on 0.162.0; change them if
+  your account does not have them.
+- `research_agent = "claude"` (default) or `"codex"` selects the researcher behind
+  `pisar research`. It is independent of `default_agent`.
+- The bundled skills `pisar`, `lessons` and `research` are written to
+  `<state-dir>/agents/codex/skills` on every launch, with the tools section that
+  explains the MCP tools.
+
+### Parity with the Claude agent
+
+| Claude feature | Codex mechanism | Test (`tests/`) |
+| --- | --- | --- |
+| 1 `--agent`, `default_agent` | `codex --no-daemon` in the root, `CODEX_HOME` = `<state>/agents/codex`, private `HOME` below it | `test_codex_agent.CodexAgentTests.test_starts_codex_in_the_root_with_an_isolated_codex_home_in_the_state_dir`; `test_codex_settings.test_codex_is_a_supported_agent_and_default_agent` |
+| 2 replaced system prompt | `model_instructions_file` = `agent-prompt.md` plus a short note on the MCP tools | `test_codex_agent.test_instructions_are_the_packaged_agent_prompt` |
+| 3 tool restriction | `features.shell_tool`, `multi_agent`, `apps`, `plugins`, `browser_use`, `computer_use`, `image_generation`, `hooks`, `goals` off; `web_search` disabled; the server offers `enabled_tools` only | `test_codex_agent.test_main_session_has_no_shell_subagents_plugins_or_web_search`; `test_pisar_server_keeps_the_users_home_and_git_setup_and_only_its_tools` |
+| 4 command allowlist/denylist | `pisar mcp-serve`: tools `pisar` (command prefixes), `git` (per-subcommand option lists) — no execpolicy, see below | `test_codex_mcp.McpTests.test_pisar_refuses_bare_pisar_arbitrary_binaries_and_mv`, `test_git_refuses_bare_git_aliases_config_push_and_programs`, `test_git_refuses_abbreviated_and_unlisted_options`; `test_agent.CodexAllowlistTests` |
+| 5 `lesson accept` asks the user | `lesson_accept` tool: an MCP elicitation the user must accept; fails closed | `test_codex_mcp.test_accept_runs_only_after_an_explicit_user_accept`, `test_accept_is_refused_unless_the_user_accepts`, `test_elicitation_edge_cases_never_accept_by_accident` |
+| 6 edit only lesson drafts | no file-editing tool is offered; `lesson_draft_read` / `lesson_draft_write` change only the draft of an open batch, guarded by the sha256 of the text last read; the profile also allows writing only `<state>/lessons` | `test_codex_drafts.*`; `test_codex_agent.test_permissions_profile_writes_only_the_lesson_drafts` |
+| 7 isolated configuration | `CODEX_HOME` and `HOME` under the state directory; explicit environment; `WIKI_ROOT` never passed | `test_codex_agent.test_child_gets_an_explicit_environment_and_never_wiki_root_or_ambient_secrets` |
+| 8 plugin: skills and reviewer | skills in `$CODEX_HOME/skills`; reviewer = `lesson_review` tool running a tool-less, read-only `codex exec` with the reviewer model and effort | `test_codex_plugin.*`; `test_codex_reviewer.*` |
+| 9 strict MCP | the root's `.mcp.json` (regular file only) translated to `mcp_servers`; nothing from user config | `test_codex_agent.test_root_mcp_file_is_translated_and_symlinks_are_ignored` |
+| 10 model and effort | `-m` and `model_reasoning_effort` from the config; `-- -m` / `-- -c model_reasoning_effort=` win | `test_codex_agent.test_model_and_effort_come_from_the_config_and_caller_arguments_win`; `test_only_the_listed_config_overrides_are_accepted_and_effort_can_be_set` |
+| 11 web research | `pisar/research_codex.py`: `codex exec`, `web_search = "live"`, read-only, no shell or MCP; same guard, bounds and record | `test_research_codex.*` |
+| 12 environment isolation | explicit allowlist for every Codex process | `test_codex_agent.test_child_gets_an_explicit_environment...`; `test_research_codex.test_environment_is_an_allowlist...` |
+| 13 fake-executable tests | `codex` fake for argv, environment and files; real checks with `PISAR_TEST_CODEX=1` (configuration only, no model call) | `test_codex_*.py`, `test_codex_smoke.py` |
+
+**Differences in mechanism.** Codex's `.rules` execpolicy is not default-deny (an
+unmatched command is not refused), so the restriction is the MCP server's
+allowlist with Codex's shell disabled. Codex has no plugin directory like
+`--plugin-dir`; the skills are copied, not generated. Subagents are not used:
+the reviewer is a separate `codex exec`. Codex offers no file or shell
+tool here, so the agent reads documents through `pisar read` and edits lesson
+drafts only through `lesson_draft_read`/`lesson_draft_write`; Codex's permission
+profile reads the root and writes only the lesson workspace. The Codex
+prompt has an extra section about the tools, appended to the shared prompt.
+Repository hooks still run on `git commit`, as they do for Claude.
+
+**Not verified here.** The model-visible behaviour of the real session (approval
+UI, elicitation prompt, a real `lesson accept`) needs an interactive run. Run
+`PISAR_TEST_CODEX=1 python -m unittest tests.test_codex_smoke` for the
+configuration checks against your `codex`.
 
 ## Read, discover, and validate
 
@@ -934,6 +1004,9 @@ so the question leaves the machine. pisar never contacts a service itself.
   Foundry `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_BASE_URL`,
   `ANTHROPIC_FOUNDRY_RESOURCE`. `CLAUDE_CONFIG_DIR` is set by pisar. Everything
   else, including `PISAR_*`, `WIKI_ROOT` and unrelated secrets, is dropped.
+- **Researcher.** `research_agent = "codex"` in the config file uses a Codex
+  researcher instead (see [Codex](#codex)); the guard, bounds and record below
+  are the same.
 - **Model and effort**: `--model`/`--effort`, else `[agents.claude.researcher]`
   in the config file, else `sonnet` and `medium`; values are passed verbatim.
 - **Result.** The answer is validated strictly (unknown fields, empty claims,
