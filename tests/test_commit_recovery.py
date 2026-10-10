@@ -203,9 +203,6 @@ class SpaceRecovery(SpaceCommandFixture):
         self.assertTrue(self.data('check')['ok'])
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class SpaceRecoveryRegressions(SpaceCommandFixture):
     def test_resume_accepts_a_child_commit_checkpointed_before_its_baseline_after_was_stored(self):
@@ -249,13 +246,17 @@ class LandedCommits(Fixture):
         self.assertTrue(lesson.acceptance_started(Wiki(self.root), journal))
 
 
-class SpaceMoveRecovery(SpaceRecovery):
+class SpaceMoveRecovery(SpaceCommandFixture):
     def test_crash_after_the_space_move_update_ref_is_recognised_by_its_id(self):
         self.cli('space', 'create', '--domain', 'work', '--kind', 'project', '--title', 'Launch Plan')
-        self.crash(self.root, 'after-ref', lambda: spacecmd.relocate(
+        SpaceRecovery.crash(self, self.root, 'after-ref', lambda: spacecmd.relocate(
             Wiki(self.root), self.state, 'move', 'work/launch-plan', to='area'), edit='Written by hand')
         self.assertEqual(git(self.root, 'log', '-1', '--format=%s'), 'Written by hand')
         self.cli('space', 'move', 'work/launch-plan', '--to', 'area')
         self.assertEqual(self.spaces()['work/launch-plan']['kind'], 'area')
         self.assertEqual(git(self.root, 'log', '--format=%s').count('Written by hand'), 1)
         self.clean()
+
+
+if __name__ == '__main__':
+    unittest.main()
