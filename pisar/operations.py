@@ -219,11 +219,55 @@ def validate_artifacts(wiki, journal):
             raise WikiError('journal artifact hash mismatch')
 
 
+def pending_intent(runtime, journal):
+    """The hook gitops.commit calls before it moves a branch: the new commit id is journaled first."""
+    def intent(record):
+        journal['pending'] = record
+        runtime.store(journal)
+    return intent
+
+
+def checkpoint(runtime, journal, repo, commit):
+    """Record COMMIT in REPO as landed: the commit list, the recorded head and no pending record, in one write."""
+    if not any(c['repo'] == str(repo) and c['commit'] == commit for c in journal['commits']):
+        journal['commits'].append(dict(repo=str(repo), commit=commit))
+    journal['heads'][str(repo)] = commit
+    journal['pending'] = None
+    runtime.store(journal)
+
+
+def landed_commit(repo, journal, recorded=None):
+    """The commit this operation moved REPO to before its checkpoint, or None when HEAD is not one of ours.
+
+    RECORDED is the head the operation expects (default: the journaled head). A journal with the
+    'pending' key (every journal written by this version) recognises its commit by id only: HEAD must be
+    the journaled commit, whose parent is the expected head. A journal without the key predates the
+    record; only there is the pisar subject accepted, and never for a journal written by this version."""
+    if recorded is None:
+        recorded = journal['heads'].get(str(repo))
+    head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+    if head == recorded:
+        return None
+    parent = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
+    if 'pending' not in journal:
+        subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
+        return head if parent == recorded and subject == f'wiki: {journal["operation_id"]}' else None
+    record = journal['pending']
+    if record is None:
+        return None
+    if not isinstance(record, dict) or set(record) != {'repo', 'commit', 'parent'} or \
+            not all(isinstance(value, str) for value in record.values()):
+        raise WikiError(f'journal commit record of {repo} is malformed; refusing to guess')
+    if record['repo'] == str(repo) and record['commit'] == head and record['parent'] == parent == recorded:
+        return head
+    return None
+
+
 def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), extra=None):
     for item in artifacts:
         item['temp'] = f'.pisar-{ident}-{item["after"][:16]}.tmp'  # Ownership of an interrupted write.
     journal = dict(schema_version=1, format=JOURNAL_FORMAT, root=str(wiki.root), operation_id=ident,
-                   fingerprint=fingerprint(payload), status='incomplete',
+                   fingerprint=fingerprint(payload), status='incomplete', pending=None,
                    artifacts=artifacts, commits=[], tasks={}, heads={})
     repos, _ = groups(wiki, artifacts)
     for repo in extra_repos:
@@ -298,18 +342,14 @@ def apply_files(wiki, runtime, journal):
         if previous_head is None:
             raise WikiError('repository was not part of prepared operation')
         if current_head != previous_head:
-            # A crash can occur after Git commits and before the journal checkpoint.
-            parent_head = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
-            subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
+            # A crash can occur after Git moves the branch and before the journal checkpoint.
+            landed = landed_commit(repo, journal)
             changed = set(gitops.run(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines())
-            if parent_head != previous_head or subject != f'wiki: {journal["operation_id"]}' or not changed <= allowed:
+            if landed is None or not changed <= allowed:
                 raise WikiError(f'Git HEAD changed outside operation: {repo}')
-            journal['heads'][str(repo)] = current_head
             # Every recovered commit is recorded (a repository can be committed to more than once);
             # parent pinning then uses the latest one.
-            if not any(c['repo'] == str(repo) and c['commit'] == current_head for c in journal['commits']):
-                journal['commits'].append(dict(repo=str(repo), commit=current_head))
-            runtime.store(journal)
+            checkpoint(runtime, journal, repo, landed)
         gitops.clean_except(repo, allowed)
         for _, relative in gitops.dirty(repo):
             if (repo, relative) in links:
@@ -332,9 +372,10 @@ def apply_files(wiki, runtime, journal):
                 verified[(wiki.root / item['path']).relative_to(repo).as_posix()] = base64.b64decode(item['data'])
         pins = {link: pinned_commit(journal, child, wiki)
                 for (parent, link), child in links.items() if parent == repo}
-        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins)
+        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins,
+                               intent=pending_intent(runtime, journal))
         if commit:
-            journal['commits'].append(dict(repo=str(repo), commit=commit))
+            checkpoint(runtime, journal, repo, commit)
         for (parent, link), child in links.items():
             pinned = pins.get(link) if parent == repo else None
             head = gitops.run(child, 'rev-parse', 'HEAD').strip() if pinned else pinned
