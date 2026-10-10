@@ -155,6 +155,12 @@ class CodexAgentTests(Fixture):
         self.assertEqual(call['env']['HOME'], str(self.state.resolve() / 'agents' / 'codex' / 'home'))
         self.assertEqual(server['enabled_tools'], ['pisar', 'git', 'lesson_accept', 'lesson_review',
                                                    'lesson_draft_read', 'lesson_draft_write'])
+        # A review or research run takes up to research.TIMEOUT, and lesson_accept waits for the user.
+        self.assertGreater(server['tool_timeout_sec'], 1800)
+        # The server enforces its own allowlist, and lesson_accept asks the user itself; without this
+        # every call would stop for an approval prompt, unlike the Claude allowlist.
+        self.assertEqual(server['default_tools_approval_mode'], 'approve')
+        self.assertNotIn('startup_timeout_sec', server)
 
     def test_mcp_servers_are_only_the_root_file_and_the_pisar_server(self):
         _, call = self.launch()

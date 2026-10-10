@@ -256,8 +256,10 @@ pisar --agent codex -- -c model_reasoning_effort=high
 own mechanisms and a pisar MCP server where Codex has no equivalent. Verified
 with `codex-cli 0.162.0`; **that is the minimum tested version**.
 
-**Log in once** to the isolated Codex home (it is not your own `~/.codex`). The
-default state directory is `$XDG_DATA_HOME/pisar`, so for the default setup:
+**Log in once** to the isolated Codex home (it is not your own `~/.codex`). One login
+serves the main session, the lesson reviewer and the researcher; they all read the
+login of that home. The default state directory is `$XDG_DATA_HOME/pisar`, so for
+the default setup:
 
 ```sh
 CODEX_HOME=~/.local/share/pisar/agents/codex HOME=~/.local/share/pisar/agents/codex/home codex login
@@ -301,17 +303,27 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
 unmatched command is not refused), so the restriction is the MCP server's
 allowlist with Codex's shell disabled. Codex has no plugin directory like
 `--plugin-dir`; the skills are copied, not generated. Subagents are not used:
-the reviewer is a separate `codex exec`. Codex offers no file or shell
+the reviewer and the researcher are separate `codex exec` runs that share the
+login of the main session but ignore its configuration
+(`--ignore-user-config --ignore-rules`) and pass their own confinement with
+flags and `-c` overrides. Codex offers no file or shell
 tool here, so the agent reads documents through `pisar read` and edits lesson
 drafts only through `lesson_draft_read`/`lesson_draft_write`; Codex's permission
 profile reads the root and writes only the lesson workspace. The Codex
 prompt has an extra section about the tools, appended to the shared prompt.
 Repository hooks still run on `git commit`, as they do for Claude.
 
-**Not verified here.** The model-visible behaviour of the real session (approval
-UI, elicitation prompt, a real `lesson accept`) needs an interactive run. Run
-`PISAR_TEST_CODEX=1 python -m unittest tests.test_codex_smoke` for the
-configuration checks against your `codex`.
+**Lesson accept needs the interactive session.** The pisar server tells Codex
+that it can ask for confirmation, and `lesson_accept` asks through that channel.
+Codex's `exec` mode declines such a question at once (checked with a mock model),
+so `lesson_accept` refuses there: nothing is accepted unless the user answers
+`accept`. The confirmation dialog itself is in the Codex TUI; it was not run
+interactively here, so check it once in your own session. The configuration
+checks run with `PISAR_TEST_CODEX=1 python -m unittest tests.test_codex_smoke`.
+
+The pisar server's tools are approved by default (`default_tools_approval_mode`),
+because the server enforces the same allowlist as the Claude agent; the only tool
+that still needs the user is `lesson_accept`.
 
 ## Read, discover, and validate
 

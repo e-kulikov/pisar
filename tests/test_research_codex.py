@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import stat
-import tomllib
 from unittest import mock
 
 from pisar import research
@@ -21,7 +20,8 @@ def fake_codex(log, answer):
 import json, os, sys
 question = sys.stdin.read()
 with open({str(log)!r}, "w") as stream:
-    json.dump({{"argv": sys.argv[1:], "home": os.environ.get("CODEX_HOME"), "question": question,
+    json.dump({{"argv": sys.argv[1:], "home": os.environ.get("CODEX_HOME"),
+               "env_home": os.environ.get("HOME"), "question": question,
                "env": sorted(os.environ)}}, stream)
 out = sys.argv[sys.argv.index("-o") + 1]
 body = {answer!r}
@@ -74,17 +74,21 @@ class CodexResearchTests(Fixture):
     def test_researcher_is_web_search_only_with_no_shell_tools_or_servers(self):
         self.install()
         self.ask()
-        home = self.state.resolve() / 'agents' / 'codex' / 'researcher'
+        main = self.state.resolve() / 'agents' / 'codex'
         call = self.call()
-        self.assertEqual(call['home'], str(home))
-        self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
-        config = tomllib.loads((home / 'config.toml').read_text())
-        self.assertEqual(config['web_search'], 'live')
-        self.assertEqual(config['sandbox_mode'], 'read-only')
-        self.assertEqual(config['mcp_servers'], {})
-        for name in ('shell_tool', 'multi_agent', 'apps', 'plugins', 'hooks', 'browser_use'):
-            self.assertIs(config['features'][name], False, name)
-        self.assertIn('web researcher', (home / 'instructions.md').read_text())
+        self.assertEqual(call['home'], str(main), 'the researcher reads the login of the main session')
+        self.assertEqual(call['env_home'], str(main / 'home'))
+        argv = call['argv']
+        self.assertIn('web_search="live"', argv)
+        self.assertIn('--ignore-user-config', argv)
+        self.assertIn('--ignore-rules', argv)
+        self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+        pairs = list(zip(argv, argv[1:]))
+        for feature in ('shell_tool', 'multi_agent', 'apps', 'plugins', 'hooks', 'browser_use'):
+            self.assertIn(('--disable', feature), pairs)
+        setting = next(a for a in argv if a.startswith('model_instructions_file='))
+        self.assertIn('web researcher', Path(json.loads(setting.split('=', 1)[1])).read_text())
+        self.assertEqual(stat.S_IMODE(Path(json.loads(setting.split('=', 1)[1])).stat().st_mode), 0o600)
 
     def test_arguments_and_question_are_passed_without_being_read_as_options(self):
         self.install()
@@ -130,8 +134,7 @@ class CodexResearchTests(Fixture):
         self.install()
         record = self.ask()
         self.assertEqual((record['model'], record['effort']), ('m2', 'low'))
-        home = self.state.resolve() / 'agents' / 'codex' / 'researcher'
-        self.assertEqual(tomllib.loads((home / 'config.toml').read_text())['model_reasoning_effort'], 'low')
+        self.assertIn('model_reasoning_effort="low"', self.call()['argv'])
 
     def test_claude_stays_the_default_researcher(self):
         self.config_file.write_text('')

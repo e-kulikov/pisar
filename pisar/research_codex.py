@@ -8,52 +8,39 @@ stdin; the answer is written to a file that matches the research output schema.
 """
 import json
 import os
-from pathlib import Path
 import shutil
+from pathlib import Path
 from . import codex_agent, research, settings
-from .operations import outside_git
 from .safety import WikiError
 
-HOME = 'researcher'
+DIRECTORY = 'researcher'
 ANSWER = 'answer.json'
 SCHEMA_FILE = 'schema.json'
 INSTRUCTIONS_FILE = 'instructions.md'
 
 
-def _write(path, text):
-    path.write_text(text, encoding='utf-8')
-    os.chmod(path, 0o600)
-
-
-def prepare(base, model, effort):
-    """The researcher's CODEX_HOME under the runtime directory BASE, with its configuration and schema."""
-    home = outside_git(Path(base) / 'agents' / codex_agent.EXECUTABLE / HOME)
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(home, 0o700)
+def prepare(base):
+    """The researcher's instructions and output schema, in its own directory outside Git."""
+    home = codex_agent.helper_home(base, DIRECTORY)
     instructions = home / INSTRUCTIONS_FILE
-    _write(instructions, research.PROMPT)
-    features = {name: False for name in codex_agent.DISABLED_FEATURES}
-    tree = {'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'live',
-            'model_instructions_file': str(instructions),
-            **({'model_reasoning_effort': effort} if effort else {}),
-            'features': features, 'mcp_servers': {}}
-    _write(home / codex_agent.CONFIG, codex_agent.render(tree))
-    _write(home / SCHEMA_FILE, json.dumps(research.SCHEMA))
+    instructions.write_text(research.PROMPT, encoding='utf-8')
+    os.chmod(instructions, 0o600)
+    schema = home / SCHEMA_FILE
+    schema.write_text(json.dumps(research.SCHEMA), encoding='utf-8')
+    os.chmod(schema, 0o600)
     return home
 
 
-def environment(home):
-    """The explicit child environment: an allowlist, and the researcher's own CODEX_HOME and HOME."""
-    env = {k: os.environ[k] for k in codex_agent.ENV_NAMES if k in os.environ}
-    env.update(CODEX_HOME=str(home), HOME=str(home))
-    return env
+def environment(base):
+    """The login of the main session (its CODEX_HOME) with a private HOME; nothing else of the user's."""
+    main = codex_agent.helper_home(base)
+    return codex_agent.exec_environment(main, main / codex_agent.HOME)
 
 
-def command(executable, home, model, cwd):
-    """The argument list; the answer file is ANSWER in CWD, the question arrives on stdin."""
-    return [executable, 'exec', '--ephemeral', '--skip-git-repo-check', '-s', 'read-only',
-            '--output-schema', str(home / SCHEMA_FILE), '-o', str(Path(cwd) / ANSWER), '-C', cwd,
-            *(['-m', model] if model else []), '-']
+def command(executable, home, model, effort, cwd):
+    """The argument list; the answer is ANSWER in CWD, the question arrives on stdin."""
+    return codex_agent.exec_argv(executable, cwd, Path(cwd) / ANSWER, home / SCHEMA_FILE,
+                                 home / INSTRUCTIONS_FILE, model, effort, 'live')
 
 
 def answer(output):

@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import unittest
-from pathlib import Path
 
 from pisar import codex_agent
 from .support import Fixture
@@ -39,6 +38,7 @@ class CodexSmokeTests(Fixture):
         text = self.codex('mcp', 'get', 'pisar')
         self.assertIn('enabled_tools: pisar, git, lesson_accept, lesson_review, lesson_draft_read, lesson_draft_write', text)
         self.assertIn('mcp-serve', text)
+        self.assertIn(f'tool_timeout_sec: {codex_agent.SERVER_TOOL_TIMEOUT}', text)
 
     def test_real_codex_has_the_shell_and_subagent_features_off(self):
         text = self.codex('features', 'list')

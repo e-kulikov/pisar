@@ -2,8 +2,6 @@
 import json
 import os
 from pathlib import Path
-import stat
-import tomllib
 from unittest import mock
 
 from pisar import codex_reviewer, lesson
@@ -18,7 +16,8 @@ def fake_reviewer(mode, log):
 import json, os, re, sys
 prompt = sys.stdin.read()
 with open({str(log)!r}, "w") as stream:
-    json.dump({{"argv": sys.argv[1:], "home": os.environ.get("CODEX_HOME"), "prompt": prompt,
+    json.dump({{"argv": sys.argv[1:], "home": os.environ.get("CODEX_HOME"),
+               "env_home": os.environ.get("HOME"), "prompt": prompt,
                "env": sorted(os.environ)}}, stream)
 mode = {mode!r}
 if mode == "fail":
@@ -92,22 +91,27 @@ class CodexReviewerTests(Fixture):
         self.assertIn(LESSON_TEXT.strip(), call['prompt'])
         self.assertIn(f'sha256 {check["sha256"]}', call['prompt'])
 
-    def test_reviewer_has_its_own_home_with_no_tools_no_network_and_no_servers(self):
+    def test_reviewer_shares_the_login_and_ignores_user_configuration_but_not_its_confinement(self):
         self.install('ok')
         self.start_batch()
         self.review()
-        home = self.state.resolve() / 'agents' / 'codex' / 'reviewer'
+        main = self.state.resolve() / 'agents' / 'codex'
         call = self.call()
-        self.assertEqual(call['home'], str(home))
-        self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
-        config = tomllib.loads((home / 'config.toml').read_text())
-        self.assertEqual(config['sandbox_mode'], 'read-only')
-        self.assertEqual(config['approval_policy'], 'never')
-        self.assertEqual(config['web_search'], 'disabled')
-        self.assertEqual(config['mcp_servers'], {})
-        for name in ('shell_tool', 'multi_agent', 'apps', 'plugins', 'hooks'):
-            self.assertIs(config['features'][name], False, name)
-        self.assertIn('You review a draft note', (home / 'instructions.md').read_text())
+        self.assertEqual(call['home'], str(main), 'the reviewer must read the login of the main session')
+        self.assertEqual(call['env_home'], str(main / 'home'))
+        argv = call['argv']
+        for flag in ('--ignore-user-config', '--ignore-rules', '--ephemeral'):
+            self.assertIn(flag, argv)
+        for setting in ('web_search="disabled"', 'approval_policy="never"'):
+            self.assertIn(setting, argv)
+        self.assertIn('-s', argv)
+        self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+        pairs = list(zip(argv, argv[1:]))
+        for feature in ('shell_tool', 'multi_agent', 'apps', 'plugins', 'hooks'):
+            self.assertIn(('--disable', feature), pairs)
+        setting = next(a for a in argv if a.startswith('model_instructions_file='))
+        instructions = Path(json.loads(setting.split('=', 1)[1]))
+        self.assertIn('You review a draft note', instructions.read_text())
         self.assertNotIn('WIKI_ROOT', call['env'])
 
     def test_reviewer_model_and_effort_come_from_the_config(self):
@@ -116,11 +120,9 @@ class CodexReviewerTests(Fixture):
         self.install('ok')
         self.start_batch()
         self.review()
-        home = self.state.resolve() / 'agents' / 'codex' / 'reviewer'
         argv = self.call()['argv']
         self.assertEqual(argv[argv.index('-m') + 1], 'my-reviewer')
-        config = tomllib.loads((home / 'config.toml').read_text())
-        self.assertEqual(config['model_reasoning_effort'], 'low')
+        self.assertIn('model_reasoning_effort="low"', argv)
         event = json.loads((self.state / 'lessons' / self.batch / 'journal.json').read_text())['events'][-1]
         self.assertEqual(event['reviewer'], {'model': 'my-reviewer'})
 

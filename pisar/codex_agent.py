@@ -50,6 +50,9 @@ DISABLED_FEATURES = ('shell_tool', 'multi_agent', 'apps', 'plugins', 'browser_us
                      'image_generation', 'hooks', 'goals')
 PROFILE = 'pisar'
 # The tools the pisar server offers (see mcp.py); Codex shows and calls only these.
+# Codex's default tool timeout is shorter than a lesson review, a research run or a user's time
+# to read a lesson before accepting it; the pisar server's own bounds stay in force inside it.
+SERVER_TOOL_TIMEOUT = 3600
 SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review', 'lesson_draft_read', 'lesson_draft_write')
 
 
@@ -68,6 +71,8 @@ def _key(name):
 def _value(value):
     if isinstance(value, bool):
         return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value)
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, (list, tuple)):
@@ -204,7 +209,8 @@ def write_config(config, root, state, ruwana, effort, mcp):
     server_env = {**server_environment(root, state, ruwana), **environment}
     server = {'command': command[0], 'args': [*command[1:], *pisar_args],
               'env': Inline({k: v for k, v in server_env.items()}),
-              'enabled_tools': list(SERVER_TOOLS)}
+              'enabled_tools': list(SERVER_TOOLS), 'tool_timeout_sec': SERVER_TOOL_TIMEOUT,
+              'default_tools_approval_mode': 'approve'}
     tree = {
         'approval_policy': 'on-request',
         'web_search': 'disabled',
@@ -229,6 +235,40 @@ def environment(config, home, root, state, ruwana):
     env = {k: os.environ[k] for k in ENV_NAMES if k in os.environ}
     env.update(server_environment(root, state, ruwana), CODEX_HOME=str(config), HOME=str(home))
     return env
+
+
+def exec_argv(executable, cwd, answer, schema, instructions, model, effort, web_search):
+    """``codex exec`` for a helper run (lesson reviewer, researcher).
+
+    The helper uses the login of the main session (CODEX_HOME, see exec_environment) but none
+    of its configuration: --ignore-user-config skips that config.toml, --ignore-rules the rules,
+    and everything the helper needs is passed here: its own instructions, approval never, a
+    read-only sandbox, web search as the caller says, and every feature in DISABLED_FEATURES off.
+    The prompt arrives on stdin ("-"), the answer is written to ANSWER, matching SCHEMA.
+    """
+    features = [arg for name in DISABLED_FEATURES for arg in ('--disable', name)]
+    return [executable, 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+            '--skip-git-repo-check', '-s', 'read-only', '--output-schema', str(schema),
+            '-o', str(answer), '-C', str(cwd),
+            '-c', f'model_instructions_file={json.dumps(str(instructions))}',
+            '-c', 'approval_policy="never"', '-c', f'web_search="{web_search}"',
+            *(['-c', f'model_reasoning_effort="{effort}"'] if effort else []),
+            *features, *(['-m', model] if model else []), '-']
+
+
+def exec_environment(config, home):
+    """The helper's explicit environment: the main session's CODEX_HOME (the login), a private HOME."""
+    env = {k: os.environ[k] for k in ENV_NAMES if k in os.environ}
+    env.update(CODEX_HOME=str(config), HOME=str(home))
+    return env
+
+
+def helper_home(base, *parts):
+    """A directory for a helper's files (instructions, schema), private and outside Git."""
+    path = outside_git(Path(base) / 'agents' / EXECUTABLE / Path(*parts))
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
+    return path
 
 
 def _ruwana_path(ruwana):

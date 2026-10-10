@@ -18,7 +18,7 @@ from .operations import Runtime, atomic_bytes, outside_git
 from .safety import WikiError
 from .spaces import Wiki
 
-HOME = 'reviewer'
+DIRECTORY = 'reviewer'
 ANSWER = 'answer.json'
 OUTPUT_LIMIT = 256 * 1024
 FINDING = {'type': 'object', 'additionalProperties': False,
@@ -39,24 +39,20 @@ SCHEMA = {
 }
 
 
-def instructions(model, effort):
+def instructions_text(model, effort):
     """The reviewer prompt of the Claude plugin, without its frontmatter."""
     return claude_plugin.REVIEWER.format(model=model, effort=effort).split('\n---\n', 1)[1]
 
 
-def _config(home, model, effort):
-    """Reviewer configuration: no tools, no network, read-only, no approvals to ask."""
-    instructions_file = home / 'instructions.md'
-    instructions_file.write_text(instructions(model, effort), encoding='utf-8')
-    os.chmod(instructions_file, 0o600)
-    features = {name: False for name in codex_agent.DISABLED_FEATURES}
-    tree = {'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
-            'model_instructions_file': str(instructions_file),
-            **({'model_reasoning_effort': effort} if effort else {}),
-            'features': features, 'mcp_servers': {}}
-    file = home / codex_agent.CONFIG
-    file.write_text(codex_agent.render(tree), encoding='utf-8')
-    os.chmod(file, 0o600)
+def _files(home, model, effort):
+    """The reviewer's instructions and output schema, in its own directory outside Git."""
+    instructions = home / 'instructions.md'
+    instructions.write_text(instructions_text(model, effort), encoding='utf-8')
+    os.chmod(instructions, 0o600)
+    schema = home / 'schema.json'
+    schema.write_text(json.dumps(SCHEMA), encoding='utf-8')
+    os.chmod(schema, 0o600)
+    return instructions, schema
 
 
 def prompt(batch_meta, text, marker):
@@ -82,20 +78,14 @@ def review(root, state, ident):
     model, effort = settings.agent_option('codex', 'model', 'reviewer')[0], settings.agent_option(
         'codex', 'effort', 'reviewer')[0]
     base = Runtime(state, wiki.root).base
-    home = outside_git(base / 'agents' / codex_agent.EXECUTABLE / HOME)
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(home, 0o700)
-    _config(home, model or 'default', effort)
-    schema = home / 'schema.json'
-    schema.write_text(json.dumps(SCHEMA), encoding='utf-8')
+    main = codex_agent.helper_home(base)  # CODEX_HOME of the main session: where the login is
+    home = codex_agent.helper_home(base, DIRECTORY)
+    instructions, schema = _files(home, model or 'default', effort)
     marker = secrets.token_hex(8)
-    env = {k: os.environ[k] for k in codex_agent.ENV_NAMES if k in os.environ}
-    env.update(CODEX_HOME=str(home), HOME=str(home))
+    env = codex_agent.exec_environment(main, main / codex_agent.HOME)
     with tempfile.TemporaryDirectory(prefix='pisar-review-', dir=research.scratch_base(root, base)) as cwd:
         answer = Path(cwd) / ANSWER
-        argv = [executable, 'exec', '--ephemeral', '--skip-git-repo-check', '-s', 'read-only',
-                '--output-schema', str(schema), '-o', str(answer), '-C', cwd,
-                *(['-m', model] if model else []), '-']
+        argv = codex_agent.exec_argv(executable, cwd, answer, schema, instructions, model, effort, 'disabled')
         done = research.run_bounded(argv, prompt(current, text, marker), cwd, env)
         output = answer.read_bytes()[:OUTPUT_LIMIT] if answer.is_file() else b''
     if done.state == 'timeout':

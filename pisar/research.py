@@ -353,10 +353,10 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
     now = datetime.now(timezone.utc)
     ident = f'{now:%Y%m%dT%H%M%S}-{secrets.token_hex(4)}'
     if agent == 'codex':
-        home = research_codex.prepare(base, model, effort)
-        env = research_codex.environment(home)
+        home = research_codex.prepare(base)
+        env = research_codex.environment(base)
         with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
-            done = run_bounded(research_codex.command(executable, home, model, cwd), question, cwd, env)
+            done = run_bounded(research_codex.command(executable, home, model, effort, cwd), question, cwd, env)
             answer_file = Path(cwd) / research_codex.ANSWER
             output = answer_file.read_bytes()[:STDOUT_LIMIT] if answer_file.is_file() else b''
         name = 'codex'

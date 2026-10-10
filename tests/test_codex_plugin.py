@@ -1,6 +1,4 @@
 """The bundled skills for the Codex agent: the Claude skills, adapted to tools and written into CODEX_HOME."""
-import os
-from pathlib import Path
 import re
 import stat
 import unittest

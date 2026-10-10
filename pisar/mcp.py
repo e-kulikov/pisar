@@ -301,7 +301,11 @@ class Server:
         return False
 
     def draft(self, name, arguments):
-        """The draft of one open lesson batch: read it, or replace it when the digest still matches."""
+        """The draft of one open lesson batch: read it, or replace it when the digest still matches.
+
+        The write takes the batch lock first and reads everything it decides on inside it, so a
+        user's edit or a close made while it waits is seen, never overwritten.
+        """
         allowed = {'batch'} if name == 'lesson_draft_read' else {'batch', 'sha256', 'text'}
         if set(arguments) - allowed:
             raise Refused(f'{name}: unknown arguments: {", ".join(sorted(set(arguments) - allowed))}')
@@ -309,17 +313,10 @@ class Server:
         if not isinstance(batch, str):
             raise Refused(f'{name}: batch must be a lesson batch id')
         handle = lesson.Batch(Wiki(self.root), self.state, concrete_id(batch, 'batch'))
-        meta = handle.load()
         path = handle.file('draft.md')
-        if os.path.islink(path):
-            raise Refused('the draft is not a regular file')
-        current = path.read_bytes() if path.is_file() else b''
         if name == 'lesson_draft_read':
-            try:
-                text = current.decode('utf-8')
-            except UnicodeDecodeError:
-                raise Refused('the draft is not UTF-8') from None
-            return json.dumps({'batch': batch, 'sha256': sha256(current), 'text': text}, ensure_ascii=False, indent=2)
+            handle.load()
+            return json.dumps(self.draft_record(batch, path), ensure_ascii=False, indent=2)
         text, digest = arguments.get('text'), arguments.get('sha256')
         if not isinstance(text, str) or not isinstance(digest, str):
             raise Refused(f'{name}: text and sha256 are required')
@@ -327,12 +324,27 @@ class Server:
         if len(data) > DRAFT_LIMIT:
             raise Refused(f'{name}: the draft is too large (more than {DRAFT_LIMIT} bytes)')
         with handle.runtime.lock():
+            meta = handle.load()
             handle.require_open(meta)
             handle.require_not_accepting()
+            if os.path.islink(path):
+                raise Refused('the draft is not a regular file')
+            current = path.read_bytes() if path.is_file() else b''
             if sha256(current) != digest:
                 raise Refused(f'{name}: the draft changed since it was read; read it again and merge')
             atomic_bytes(path, data)
         return json.dumps({'batch': batch, 'sha256': sha256(data)}, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def draft_record(batch, path):
+        if os.path.islink(path):
+            raise Refused('the draft is not a regular file')
+        current = path.read_bytes() if path.is_file() else b''
+        try:
+            text = current.decode('utf-8')
+        except UnicodeDecodeError:
+            raise Refused('the draft is not UTF-8') from None
+        return {'batch': batch, 'sha256': sha256(current), 'text': text}
 
     def review(self, args):
         if not isinstance(args, list) or len(args) != 2 or args[0] != '--batch' or not args[1]:
@@ -347,6 +359,8 @@ class Server:
             raise Refused('lesson_accept: global options are not accepted; the server sets them')
         message = ('Accept this lesson and write it into the destination space?\n'
                    f'Batch and options: lesson accept {" ".join(args)}')
+        if 'elicitation' not in self.client:
+            raise Refused('lesson_accept: this client cannot ask for confirmation, so nothing was accepted')
         if not self.elicit(message):
             raise Refused('lesson_accept: not confirmed by the user; nothing was accepted')
         return self.capture([*self.pisar(), 'lesson', 'accept', *args])

@@ -147,8 +147,9 @@ class McpTests(Fixture):
         client = self.server(elicit=None)
         text, error = client.text('lesson_accept', ['--batch', 'missing'])
         self.assertTrue(error)
-        self.assertIn('not confirmed by the user', text)
+        self.assertIn('this client cannot ask for confirmation', text)
         self.assertNotIn('unknown lesson batch', text)
+        self.assertEqual(client.asked, [])
 
     def test_accept_is_refused_unless_the_user_accepts(self):
         for answer in ('decline', 'cancel'):

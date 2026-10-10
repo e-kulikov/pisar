@@ -5,13 +5,17 @@ Edit permission of the Claude agent: the draft of one open batch, never another 
 A write needs the sha256 of the text the agent last read, so a user's own edit is never
 overwritten silently.
 """
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from pisar import mcp
-from pisar.safety import sha256
+from pisar.operations import Runtime
+from pisar.safety import WikiError, sha256
 from .support import Fixture
 from .test_codex_mcp import McpClient
 
@@ -66,6 +70,42 @@ class DraftTests(Fixture):
         text, error = self.write('Agent text.\n', digest)
         self.assertTrue(error)
         self.assertEqual(target.read_text(), 'outside')
+
+    def race(self, change):
+        """Run CHANGE the moment the batch lock is taken, after the caller has read the draft."""
+        original = Runtime.lock
+
+        @contextlib.contextmanager
+        def lock(runtime):
+            change()
+            with original(runtime) as value:
+                yield value
+        return mock.patch.object(Runtime, 'lock', lock)
+
+    def in_process(self):
+        return mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), {})
+
+    def test_a_user_edit_made_while_the_write_waits_for_the_lock_is_never_overwritten(self):
+        digest = sha256(self.draft.read_bytes())
+
+        def edit():
+            self.draft.write_text('The user edited this.\n')
+        with self.race(edit), self.assertRaisesRegex(WikiError, 'changed since it was read'):
+            self.in_process().draft('lesson_draft_write', {'batch': self.batch, 'sha256': digest, 'text': 'Agent.\n'})
+        self.assertEqual(self.draft.read_bytes(), b'The user edited this.\n')
+
+    def test_a_batch_closed_while_the_write_waits_for_the_lock_is_not_written(self):
+        digest = sha256(self.draft.read_bytes())
+        meta_path = self.state / 'lessons' / self.batch / 'meta.json'
+
+        def close():
+            meta = json.loads(meta_path.read_text())
+            meta['status'] = 'discarded'
+            meta_path.write_text(json.dumps(meta))
+        before = self.draft.read_bytes()
+        with self.race(close), self.assertRaises(WikiError):
+            self.in_process().draft('lesson_draft_write', {'batch': self.batch, 'sha256': digest, 'text': 'Agent.\n'})
+        self.assertEqual(self.draft.read_bytes(), before)
 
     def test_accepted_or_unknown_batches_are_refused(self):
         result = self.client.call_with('lesson_draft_read', {'batch': 'no-such-batch'})
