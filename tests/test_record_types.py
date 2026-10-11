@@ -501,6 +501,60 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         self.assertEqual(self.marker.read_bytes(), text)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
 
+    COMPETING_PREFIX = (
+        'import os\n'
+        'import pisar.operations as operations\n'
+        'real_store = operations.Runtime.store\n'
+        'def store(self, journal):\n'
+        '    real_store(self, journal)\n'
+        '    temp = journal.get("temp")\n'
+        '    if temp and journal["status"] == "incomplete":\n'
+        '        path = os.path.join(journal["root"], os.path.dirname(journal["artifacts"][0]["path"]), temp)\n'
+        '        if not os.path.lexists(path):\n'
+        '            with open(path, "wb") as competing:\n'
+        '                competing.write(b"schema_version = 1\\n")\n'  # a prefix of the intended marker
+        'operations.Runtime.store = store\n')
+
+    def test_refused_collision_with_a_prefix_match_is_kept_across_retries(self):
+        competing = self.alpha / temp_name()
+        text, head = self.marker.read_bytes(), git(self.root, 'rev-parse', 'HEAD')
+        first = self.child_add(self.COMPETING_PREFIX, 'recipe-idea', '--description', 'One idea')
+        self.assertNotEqual(first.returncode, 0, first.stdout)
+        self.assertEqual(competing.read_bytes(), b'schema_version = 1\n')
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(competing.read_bytes(), b'schema_version = 1\n')
+        self.assertEqual(self.marker.read_bytes(), text)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_crash_right_after_the_exclusive_create_leaves_an_empty_file_the_retry_removes(self):
+        prelude = 'import os\nos.write = lambda fd, data: os._exit(9)\n'
+        crashed = self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        (leftover,) = self.alpha.glob('.pisar-*.tmp')
+        self.assertEqual(leftover.read_bytes(), b'')
+        self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
+        self.clean()
+        self.assertEqual(list(self.alpha.glob('.pisar-*')), [])
+
+    def test_old_style_journal_without_the_acquisition_record_keeps_a_nonempty_leftover(self):
+        prelude = (
+            'import os\n'
+            'real_write = os.write\n'
+            'def write(fd, data):\n'
+            '    real_write(fd, bytes(data)[: len(bytes(data)) // 2])\n'
+            '    os._exit(9)\n'
+            'os.write = write\n')
+        self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
+        (leftover,) = self.alpha.glob('.pisar-*.tmp')
+        partial = leftover.read_bytes()
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'):
+            data = json.loads(journal.read_text())
+            data.pop('temp_acquired', None)
+            journal.write_text(json.dumps(data))
+        self.assertTrue(partial)
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(leftover.read_bytes(), partial)
+
     def test_kill_during_the_write_leaves_a_prefix_that_the_retry_recovers(self):
         prelude = (
             'import os\n'

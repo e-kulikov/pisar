@@ -714,10 +714,10 @@ def _refuse_staged_extras(wiki, journal, op, repo, relative):
                             'write; nothing was changed. Unstage it (git restore --staged) and retry')
 
 
-def _write_reserved(marker, temp, data):
+def _write_reserved(marker, temp, data, acquired):
     """Write DATA over MARKER through TEMP, a file this call creates exclusively. An existing occupant is never
     unlinked or followed (O_EXCL and O_NOFOLLOW), so a file another process created after the journal named TEMP
-    makes the write refuse and stays as it is."""
+    makes the write refuse and stays as it is. ACQUIRED runs once the file is ours, before any byte is written."""
     path = marker.parent / temp
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
@@ -726,6 +726,7 @@ def _write_reserved(marker, temp, data):
         raise WikiError(f'{path.name} already exists beside {marker.name} and is reserved for this operation; '
                         'nothing was replaced. Move or remove it and retry') from None
     try:
+        acquired()
         view = memoryview(data)
         while view:  # os.write may store fewer bytes than asked: keep going until all are on disk
             view = view[os.write(fd, view):]
@@ -735,9 +736,10 @@ def _write_reserved(marker, temp, data):
     os.replace(path, marker)
 
 
-def _remove_leftover(wiki, repo, marker, temp, final):
-    """Remove the journaled temporary file of an interrupted marker write, and only when it is untracked and
-    holds nothing (an empty file) or exactly the bytes pisar was writing. Anything else is the user's."""
+def _remove_leftover(wiki, repo, marker, temp, final, acquired):
+    """Remove the journaled temporary file of an interrupted marker write. Only an untracked plain file goes:
+    one pisar acquired (ACQUIRED) whose bytes are a prefix of FINAL, or any empty file. A file pisar never
+    acquired (its exclusive create was refused, or the crash came first) is kept unless it is empty."""
     if not temp:
         return
     leftover = marker.parent / temp
@@ -750,7 +752,7 @@ def _remove_leftover(wiki, repo, marker, temp, final):
         raise WikiError(f'{relative} is tracked, so it is not a leftover of the interrupted operation; '
                         'nothing was changed')
     data = leftover.read_bytes()
-    if not final.encode('utf-8').startswith(data):  # empty, partial or complete: all pisar's own writes
+    if data and not (acquired and final.encode('utf-8').startswith(data)):
         raise WikiError(f'{relative} holds bytes pisar did not write; nothing was changed')
     leftover.unlink()
 
@@ -791,7 +793,8 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             # Validate the whole resume state before any cleanup: a refused resume changes nothing.
             _verify(wiki, op, resumed, [repo, *(parent for parent, _, _ in gitops.ancestors(repo, root))])
             _refuse_staged_extras(wiki, resumed, op, repo, rel_repo)
-            _remove_leftover(wiki, repo, marker, resumed.get('temp'), resumed['final'])
+            _remove_leftover(wiki, repo, marker, resumed.get('temp'), resumed['final'],
+                             resumed.get('temp_acquired', False))
         if not resumed:
             # Clean trees only, even when the declaration already exists: the command never edits a dirty space.
             _ensure_clean(repo)
@@ -826,8 +829,13 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'), temp=temp)
 
         def apply(journal):
+            def acquired():
+                # Persisted before the first byte: a leftover without this record was never ours to write.
+                journal['temp_acquired'] = True
+                runtime.store(journal)
+
             _write_reserved(marker, journal.get('temp') or f'.pisar-{_digest(op, rel)}.tmp',
-                            journal['final'].encode('utf-8'))
+                            journal['final'].encode('utf-8'), acquired)
             return [(repo, gitops.commit(repo, [rel_repo], op))]
 
         commits = _flow(wiki, runtime, op, intent, repo, [rel], apply, resumed, plan)
