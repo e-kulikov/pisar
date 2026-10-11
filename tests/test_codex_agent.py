@@ -86,7 +86,8 @@ class CodexAgentTests(Fixture):
         self.assertEqual(config['web_search'], 'disabled')
         self.assertEqual(config['approval_policy'], 'on-request')
         features = config['features']
-        for name in ('shell_tool', 'multi_agent', 'apps', 'plugins', 'browser_use', 'computer_use', 'hooks'):
+        for name in ('shell_tool', 'multi_agent', 'apps', 'plugins', 'browser_use', 'computer_use', 'hooks',
+                     'view_image'):
             self.assertIs(features[name], False, name)
 
     def test_permissions_profile_writes_only_the_lesson_drafts(self):
@@ -123,6 +124,23 @@ class CodexAgentTests(Fixture):
                 p, call = self.launch('--', *extra, ok=False)
                 self.assertNotEqual(p.returncode, 0)
                 self.assertIsNone(call)
+                self.assertIn('cannot be passed to the agent', p.stderr)
+
+    def test_caller_arguments_are_an_allowlist_and_nothing_else_reaches_codex(self):
+        # A subcommand or a config-loading switch would replace the confinement (exec --ignore-user-config).
+        refused = [['exec', '--ignore-user-config', '--ignore-rules', 'x'], ['exec'], ['review'], ['resume', '--last'],
+                   ['fork'], ['mcp', 'list'], ['plugin', 'list'], ['cloud'], ['login'], ['sandbox', 'x'],
+                   ['--ignore-user-config'], ['--ignore-rules'], ['--strict-config'], ['-p', 'x'], ['--profile=x'],
+                   ['--oss'], ['--local-provider', 'ollama'], ['--config-file', 'x'], ['-i', 'a.png'],
+                   ['--image', 'a.png'], ['some prompt'], ['--no-daemon'], ['--remote', 'ws://x'], ['--yolo'],
+                   ['--full-auto'], ['--search'], ['--dangerously-bypass-approvals-and-sandbox'],
+                   ['-c', 'model_providers.x.base_url="http://x"'], ['-c', 'sandbox_mode="danger-full-access"']]
+        for extra in refused:
+            with self.subTest(extra=extra):
+                self.out.unlink(missing_ok=True)
+                p, call = self.launch('--', *extra, ok=False)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIsNone(call, 'the agent must not start')
                 self.assertIn('cannot be passed to the agent', p.stderr)
 
     def test_only_the_listed_config_overrides_are_accepted_and_effort_can_be_set(self):

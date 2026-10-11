@@ -35,19 +35,12 @@ ENV_NAMES = ('PATH', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'SSL_CERT
 # directory (pisar settings), never the Codex home. Written into the Codex configuration.
 SERVER_ENV = ('PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE',
               'HOME', 'XDG_CONFIG_HOME')
-# Options that would change the confinement; caller arguments may not pass them. A model
-# (-m/--model) may be passed and replaces the configured one.
-REFUSED = frozenset(('--enable', '--disable', '--profile', '--sandbox', '--add-dir', '--cd',
-                     '--remote', '--worktree', '--approve-for-me', '--oss', '--local-provider',
-                     '--ask-for-approval', '--approval', '--search', '--full-auto', '--yolo'))
-REFUSED_SHORT = frozenset(('-p', '-s', '-C', '-a'))
 # The config keys a caller may set (-c key=value), with the values they accept.
 OVERRIDES = {'model': r'[A-Za-z0-9._/-]+', 'model_reasoning_effort': r'[a-z]+'}
-REFUSED_PREFIX = ('--dangerously',)
 # Native tools and features the main session does not get. Shell, subagents and plugins
 # could run programs or read outside the root; the pisar server replaces the shell.
 DISABLED_FEATURES = ('shell_tool', 'multi_agent', 'apps', 'plugins', 'browser_use', 'computer_use',
-                     'image_generation', 'hooks', 'goals')
+                     'image_generation', 'hooks', 'goals', 'view_image')
 PROFILE = 'pisar'
 # The tools the pisar server offers (see mcp.py); Codex shows and calls only these.
 # Codex's default tool timeout is shorter than a lesson review, a research run or a user's time
@@ -146,12 +139,6 @@ def _absolute(path):
     return path if os.path.isabs(path) else os.path.abspath(path)
 
 
-def _refused(arg):
-    name = arg.split('=', 1)[0]
-    return (name in REFUSED or arg.startswith(REFUSED_PREFIX)
-            or (not arg.startswith('--') and arg[:2] in REFUSED_SHORT))
-
-
 def _override(pair):
     """(key, value) of one ``key=value`` config override, when it is one of OVERRIDES; else Refused."""
     key, sep, value = pair.partition('=')
@@ -162,30 +149,41 @@ def _override(pair):
 
 
 def checked_arguments(extra):
-    """(overrides, arguments to pass): the model and effort may be set; anything else is refused."""
-    overrides, passed = {}, []
+    """(overrides, nothing else): the caller may set the model (-m/--model) and the keys in OVERRIDES.
+
+    This is an allowlist. Every other argument is refused before Codex starts, including subcommands
+    (exec, review, resume, mcp, ...) and switches that load or ignore configuration, profiles, sandbox
+    or approval modes, directories, images and prompts: any of them could replace the confinement.
+    """
+    overrides = {}
     items = list(extra)
     while items:
         arg = items.pop(0)
         if arg in ('-m', '--model') or arg.startswith('--model='):
             value = arg.split('=', 1)[1] if arg.startswith('--model=') else (items.pop(0) if items else '')
-            if not value:
-                raise WikiError('codex: --model needs a value')
+            if not re.fullmatch(OVERRIDES['model'], value):
+                raise WikiError('codex: --model needs a model name')
             overrides['model'] = value
         elif arg.startswith('-m') and not arg.startswith('--') and len(arg) > 2:
-            overrides['model'] = arg[2:]
-        elif arg in ('-c', '--config') or arg.startswith('--config='):
-            value = arg.split('=', 1)[1] if arg.startswith('--config=') else (items.pop(0) if items else '')
-            key, value = _override(value)
+            overrides['model'] = _override_value('model', arg[2:])
+        elif arg in ('-c', '--config'):
+            key, value = _override(items.pop(0) if items else '')
+            overrides[key] = value
+        elif arg.startswith('--config='):
+            key, value = _override(arg.split('=', 1)[1])
             overrides[key] = value
         elif arg.startswith('-c') and not arg.startswith('--') and len(arg) > 2:
             key, value = _override(arg[2:])
             overrides[key] = value
-        elif _refused(arg):
-            raise WikiError(f'codex: this option cannot be passed to the agent: {arg.split("=", 1)[0]}')
         else:
-            passed.append(arg)
-    return overrides, passed
+            raise WikiError(f'codex: this argument cannot be passed to the agent: {arg.split("=", 1)[0]}')
+    return overrides, []
+
+
+def _override_value(key, value):
+    if not re.fullmatch(OVERRIDES[key], value):
+        raise WikiError(f'codex: this value cannot be passed to the agent: {key}')
+    return value
 
 
 def server_environment(root, state, ruwana):
@@ -293,7 +291,7 @@ def launch(root, state_dir, ruwana, extra=()):
     for directory in (config, home, lessons):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
-    overrides, passed = checked_arguments(extra)
+    overrides, _ = checked_arguments(extra)
     main = settings.agent_options('codex')
     model = overrides.get('model', main['model'])
     effort = overrides.get('model_reasoning_effort', main['effort'])
@@ -302,4 +300,4 @@ def launch(root, state_dir, ruwana, extra=()):
     codex_plugin.write_skills(config)
     env = environment(config, home, root, runtime.base, ruwana)
     os.chdir(root)
-    os.execve(executable, [executable, '--no-daemon', *(['-m', model] if model else []), *passed], env)
+    os.execve(executable, [executable, '--no-daemon', *(['-m', model] if model else [])], env)
