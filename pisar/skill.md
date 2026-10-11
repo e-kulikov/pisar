@@ -302,6 +302,10 @@ names of clients, people, projects or internal systems and without quotes.
    default to `[agents.claude.researcher]` in the config file, else sonnet and
    medium; values are passed verbatim.
 
+`pisar mcp-serve` is not a command for you to run: the launcher (`pisar --agent`)
+starts it for an agent that reaches pisar through MCP tools. Those tools check
+the same arguments as the commands above.
+
 ## Rules of thumb
 
 1. Discover before acting: `spaces`, then `inventory` or `search`, then `read`.

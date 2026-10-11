@@ -10,9 +10,11 @@ from pathlib import Path
 from . import config
 
 ENVIRONMENT = {'root': 'PISAR_ROOT', 'state_dir': 'PISAR_STATE_DIR', 'ruwana': 'PISAR_RUWANA_BIN'}
-# Lesson reviewer and research subagents; the main session passes nothing when unset.
-ROLE_DEFAULTS = {'reviewer': {'model': 'opus', 'effort': 'high'},
-                 'researcher': {'model': 'sonnet', 'effort': 'medium'}}
+# Lesson reviewer and research subagents, per agent; the main session passes nothing when unset.
+ROLE_DEFAULTS = {'claude': {'reviewer': {'model': 'opus', 'effort': 'high'},
+                            'researcher': {'model': 'sonnet', 'effort': 'medium'}},
+                 'codex': {'reviewer': {'model': 'gpt-6.1-sol', 'effort': 'high'},
+                           'researcher': {'model': 'gpt-5.5', 'effort': 'medium'}}}
 
 
 def _environment(name):
@@ -67,6 +69,14 @@ def default_agent():
     return None, 'default'
 
 
+def research_agent():
+    """(agent, source) of the web researcher behind ``pisar research``; claude unless configured."""
+    configuration = config.load()
+    if 'research_agent' in configuration:
+        return configuration['research_agent'], 'config'
+    return 'claude', 'default'
+
+
 def agent_option(agent, key, role=None):
     """(value, source) of ``model`` or ``effort`` for the main session or a ROLE subagent."""
     options = config.load().get('agents', {}).get(agent, {})
@@ -74,7 +84,7 @@ def agent_option(agent, key, role=None):
         options = options.get(role, {})
     if key in options:
         return options[key], 'config'
-    return ROLE_DEFAULTS.get(role, {}).get(key), 'default'
+    return ROLE_DEFAULTS.get(agent, {}).get(role, {}).get(key), 'default'
 
 
 def agent_options(agent, role=None):
@@ -90,6 +100,8 @@ def show(flags):
         result[name] = dict(value=str(value), source=source)
     value, source = default_agent()
     result['default_agent'] = dict(value=value, source=source)
+    value, source = research_agent()
+    result['research_agent'] = dict(value=value, source=source)
     for agent in config.AGENTS:
         for role in (None, *config.ROLES):
             prefix = '.'.join(filter(None, ('agents', agent, role)))

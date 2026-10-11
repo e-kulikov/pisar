@@ -9,7 +9,7 @@ from pathlib import Path
 import tomllib
 from .safety import WikiError
 
-AGENTS = ('claude',)
+AGENTS = ('claude', 'codex')
 ROLES = ('reviewer', 'researcher')
 AGENT_KEYS = ('model', 'effort')
 
@@ -61,7 +61,7 @@ def _table(file, key, value, allowed):
 
 
 def _validate(file, data):
-    _table(file, '', data, ('default_agent', 'root', 'state_dir', 'ruwana', 'agents'))
+    _table(file, '', data, ('default_agent', 'research_agent', 'root', 'state_dir', 'ruwana', 'agents'))
     for key in ('root', 'state_dir'):
         if key in data:
             _string(file, key, data[key])
@@ -78,6 +78,10 @@ def _validate(file, data):
         _string(file, 'default_agent', data['default_agent'])
         if data['default_agent'] not in AGENTS:
             raise _error(file, 'default_agent', f'unsupported agent: {data["default_agent"]}')
+    if 'research_agent' in data:
+        _string(file, 'research_agent', data['research_agent'])
+        if data['research_agent'] not in AGENTS:
+            raise _error(file, 'research_agent', f'unsupported agent: {data["research_agent"]}')
     if 'agents' in data:
         _table(file, 'agents', data['agents'], AGENTS)
         for agent, options in data['agents'].items():

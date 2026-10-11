@@ -333,33 +333,50 @@ def run(root, state_dir, question, model=None, effort=None, source=None, confirm
                 'message': 'Nothing was sent: the question has findings (above). Show them to the user; '
                            'rephrase the question, or rerun the same command with --confirm-outbound '
                            'if the user agrees that this text leaves the machine.'}
-    executable = shutil.which('claude')
-    if executable is None:
-        raise WikiError('claude is not on PATH')
-    base = Runtime(state_dir, root).base
-    config = config_dir(base)
+    from . import research_codex  # imports this module's constants, so it is loaded on demand
+    agent = settings.research_agent()[0]
+    if agent == 'codex':
+        executable = research_codex.which()
+        base = Runtime(state_dir, root).base
+        model, effort = research_codex.model_and_effort(model, effort)
+    else:
+        executable = shutil.which('claude')
+        if executable is None:
+            raise WikiError('claude is not on PATH')
+        base = Runtime(state_dir, root).base
+        config = config_dir(base)
+        model = model or settings.agent_option('claude', 'model', 'researcher')[0]
+        effort = effort or settings.agent_option('claude', 'effort', 'researcher')[0]
     store = outside_git(base / 'research')
     store.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(store, 0o700)
-    model = model or settings.agent_option('claude', 'model', 'researcher')[0]
-    effort = effort or settings.agent_option('claude', 'effort', 'researcher')[0]
     now = datetime.now(timezone.utc)
     ident = f'{now:%Y%m%dT%H%M%S}-{secrets.token_hex(4)}'
-    env = child_environment(config)
-    with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
-        done = run_bounded(command(executable, model, effort), question, cwd, env)
-    output = done.stdout.decode('utf-8', errors='replace')
+    if agent == 'codex':
+        home = research_codex.prepare(base)
+        env = research_codex.environment(base)
+        with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
+            done = run_bounded(research_codex.command(executable, home, model, effort, cwd), question, cwd, env)
+            answer_file = Path(cwd) / research_codex.ANSWER
+            output = answer_file.read_bytes()[:STDOUT_LIMIT] if answer_file.is_file() else b''
+        name = 'codex'
+    else:
+        env = child_environment(config)
+        with tempfile.TemporaryDirectory(prefix='pisar-research-', dir=scratch_base(root, base)) as cwd:
+            done = run_bounded(command(executable, model, effort), question, cwd, env)
+        output = done.stdout.decode('utf-8', errors='replace')
+        name = 'claude'
     try:
         # Messages below are fixed text: nothing the model or claude printed is echoed.
         if done.state == 'timeout':
-            raise WikiError(f'claude did not finish within {TIMEOUT} seconds')
+            raise WikiError(f'{name} did not finish within {TIMEOUT} seconds')
         if done.state == 'orphan':
-            raise WikiError('claude left background processes holding its output; they were stopped')
+            raise WikiError(f'{name} left background processes holding its output; they were stopped')
         if done.state == 'overflow':
-            raise WikiError(f'claude output is too large (more than {STDOUT_LIMIT} bytes)')
+            raise WikiError(f'{name} output is too large (more than {STDOUT_LIMIT} bytes)')
         if done.returncode != 0:
-            raise WikiError(f'claude exited with status {done.returncode}')
-        result = validate(_payload(output))
+            raise WikiError(f'{name} exited with status {done.returncode}')
+        result = validate(research_codex.answer(output) if agent == 'codex' else _payload(output))
         record = {'schema_version': SCHEMA_VERSION, 'id': ident, 'question': question, 'model': model,
                   'effort': effort, 'retrieved_at': f'{now:%Y-%m-%dT%H:%M:%SZ}', 'untrusted': True,
                   'confirm_outbound': bool(confirm), **result}
