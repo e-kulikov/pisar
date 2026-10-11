@@ -110,6 +110,9 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     """Replace this process with the agent. Returns only by raising."""
     if agent not in AGENTS:
         raise WikiError(f'unsupported agent: {agent}')
+    if agent == 'codex':
+        from . import codex_agent
+        return codex_agent.launch(root, state_dir, ruwana, extra)
     root = Path(root).resolve()
     if not root.is_dir():
         raise WikiError(f'wiki root is not a directory: {root}')

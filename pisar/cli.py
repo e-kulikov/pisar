@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 from types import SimpleNamespace
-from . import (__version__, agent, commit_message, config_command, guard, lesson_command, research_command,
+from . import (__version__, agent, commit_message, config_command, guard, lesson_command, mcp, research_command,
                settings, spacecmd)
 from .documents import check, resolve
 from .safety import WikiError, sha256
@@ -59,15 +59,17 @@ def parser():
     save.add_argument('--plan', required=True)
     triage = commands.add_parser('triage', help='External global inbox routing')
     actions = triage.add_subparsers(dest='action', required=True)
-    for name in ('prepare', 'report', 'accept', 'reroute', 'defer'):
+    for name in ('prepare', 'report', 'accept', 'reroute', 'defer', 'reject'):
         sub = actions.add_parser(name)
         sub.add_argument('--batch', required=True)
         if name == 'prepare':
             source = sub.add_mutually_exclusive_group()
             source.add_argument('--plan', help='External routing JSON')
             source.add_argument('--inbox', help='External inbox directory, default runtime/inbox')
-        if name in ('accept', 'reroute', 'defer'):
+        if name in ('accept', 'reroute', 'defer', 'reject'):
             sub.add_argument('--item', required=True)
+        if name == 'reject':
+            sub.add_argument('--reason', help='Short note stored in the manifest and report, never in the wiki')
         if name == 'reroute':
             sub.add_argument('--space', required=True, help='New destination space address (domain/id)')
     config_command.add_parser(commands)
@@ -80,6 +82,7 @@ def parser():
         if action is not None:
             leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[action]
         commit_message.add_flags(leaf)
+    mcp.add_parser(commands)
     return p
 
 
@@ -110,6 +113,8 @@ def main(argv=None):
         args.root = settings.root(args.root)
         args.state_dir = settings.state_dir(args.state_dir)
         args.ruwana = settings.ruwana(args.ruwana)
+        if args.command == 'mcp-serve':
+            return mcp.run(args)
         if args.command == 'guard':
             result = guard.run(args, args)
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -166,6 +171,8 @@ def main(argv=None):
                     result = triage.accept(wiki, args.state_dir, args.batch, args.item, args.ruwana)
                 elif args.action == 'reroute':
                     result = triage.reroute(wiki, args.state_dir, args.batch, args.item, args.space)
+                elif args.action == 'reject':
+                    result = triage.reject(wiki, args.state_dir, args.batch, args.item, args.reason)
                 else:
                     result = triage.defer(wiki, args.state_dir, args.batch, args.item)
             else:

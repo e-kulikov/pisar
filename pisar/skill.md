@@ -165,6 +165,7 @@ pisar triage report  --batch ID
 pisar triage accept  --batch ID --item ITEM
 pisar triage reroute --batch ID --item ITEM --space DOMAIN/ID
 pisar triage defer   --batch ID --item ITEM
+pisar triage reject  --batch ID --item ITEM [--reason TEXT]
 ```
 
 - `prepare` snapshots the inbox (or your routing JSON) into the state directory.
@@ -178,6 +179,9 @@ pisar triage defer   --batch ID --item ITEM
   approved. `reroute` changes the destination but does not approve; it discards
   any prepared semantic plan, so prepare a fresh one. `defer` leaves the item
   outside any repository.
+- `reject` (from `pending` or `deferred`) drops an item without touching any wiki.
+  A global inbox original is removed only after a verified processed copy exists;
+  an external original is never deleted. The reason is optional and stays out of the wiki.
 - Once an accept has started, `defer`/`reroute` are refused. Fix the cause and
   retry the same `accept`. Do not delete journals.
 
@@ -311,6 +315,10 @@ names of clients, people, projects or internal systems and without quotes.
    the records as `<id>.raw.txt` for diagnosis. `--model` and `--effort`
    default to `[agents.claude.researcher]` in the config file, else sonnet and
    medium; values are passed verbatim.
+
+`pisar mcp-serve` is not a command for you to run: the launcher (`pisar --agent`)
+starts it for an agent that reaches pisar through MCP tools. Those tools check
+the same arguments as the commands above.
 
 ## Rules of thumb
 

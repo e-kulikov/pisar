@@ -53,6 +53,7 @@ class ConfigTests(Fixture):
             'state_dir': {'value': str(data / 'pisar'), 'source': 'default'},
             'ruwana': {'value': 'ruwana', 'source': 'default'},
             'default_agent': {'value': None, 'source': 'default'},
+            'research_agent': {'value': 'claude', 'source': 'default'},
             'agents.claude.model': {'value': None, 'source': 'default'},
             'agents.claude.effort': {'value': None, 'source': 'default'},
             'agents.claude.reviewer.model': {'value': 'opus', 'source': 'default'},
@@ -65,6 +66,12 @@ class ConfigTests(Fixture):
             'commit_message.timeout': {'value': 120, 'source': 'default'},
             'commit_message.prompt_file': {'value': None, 'source': 'default'},
             'agents.claude.researcher.effort': {'value': 'medium', 'source': 'default'},
+            'agents.codex.model': {'value': None, 'source': 'default'},
+            'agents.codex.effort': {'value': None, 'source': 'default'},
+            'agents.codex.reviewer.model': {'value': 'gpt-6.1-sol', 'source': 'default'},
+            'agents.codex.reviewer.effort': {'value': 'high', 'source': 'default'},
+            'agents.codex.researcher.model': {'value': 'gpt-5.5', 'source': 'default'},
+            'agents.codex.researcher.effort': {'value': 'medium', 'source': 'default'},
         })
 
     def test_file_values_are_reported_with_config_source(self):
@@ -101,6 +108,13 @@ effort = "max"
             'commit_message.effort': ('medium', 'default'),
             'commit_message.timeout': (120, 'default'),
             'commit_message.prompt_file': (None, 'default'),
+            'research_agent': ('claude', 'default'),
+            'agents.codex.model': (None, 'default'),
+            'agents.codex.effort': (None, 'default'),
+            'agents.codex.reviewer.model': ('gpt-6.1-sol', 'default'),
+            'agents.codex.reviewer.effort': ('high', 'default'),
+            'agents.codex.researcher.model': ('gpt-5.5', 'default'),
+            'agents.codex.researcher.effort': ('medium', 'default'),
         }
         self.assertEqual({k: (v['value'], v['source']) for k, v in settings.items()}, expected)
 
@@ -184,7 +198,7 @@ effort = "max"
         self.refused('rot = "/x"\n', 'rot')
         self.refused('[agents.claude]\nmodle = "x"\n', 'agents.claude.modle')
         self.refused('[agents.claude.reviewer]\ntemperature = 1\n', 'agents.claude.reviewer.temperature')
-        self.refused('[agents.codex]\nmodel = "x"\n', 'agents.codex')
+        self.refused('[agents.gemini]\nmodel = "x"\n', 'agents.gemini')
         self.refused('[agents.claude.critic]\nmodel = "x"\n', 'agents.claude.critic')
 
     def test_wrong_types_are_errors(self):
