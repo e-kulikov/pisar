@@ -139,10 +139,34 @@ def _git_option(rule, token, following):
     raise Refused(f'git: option not allowed: {name}')
 
 
-def _git(root, *args):
-    """Output of a read-only git query in ROOT (no helper programs run for rev-parse)."""
-    done = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True, timeout=60)
-    return done.stdout.strip() if done.returncode == 0 else ''
+# Options given to every git process the server starts, before the subcommand: a repository's own
+# fsmonitor, pager and untracked cache are never run, and optional index locks are not taken.
+GIT_HARDENING = ('-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'core.untrackedCache=false',
+                 '--no-pager', '--no-optional-locks')
+# Read-only subcommands also never run repository hooks.
+GIT_QUERIES = ('status', 'diff', 'log')
+
+
+def git_command(root, validated):
+    """The argument list of a validated git command in ROOT, with the hardening for its subcommand."""
+    extra = ('-c', 'core.hooksPath=/dev/null') if validated[0] in GIT_QUERIES else ()
+    return ['git', '-C', str(root), *GIT_HARDENING, *extra, *validated]
+
+
+def query_environment():
+    """The minimal environment of the validator's git queries (no user or system git configuration)."""
+    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME') if k in os.environ}
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat')
+    return env
+
+
+def _git_query(root, *args, binary=False):
+    """Output of a read-only git query in ROOT, or b''/'' when git fails. Every validator query goes here."""
+    argv = ['git', '-C', str(root), *GIT_HARDENING, '-c', 'core.hooksPath=/dev/null', *args]
+    done = subprocess.run(argv, capture_output=True, timeout=60, env=query_environment(), stdin=subprocess.DEVNULL)
+    if done.returncode != 0:
+        return b'' if binary else ''
+    return done.stdout if binary else done.stdout.decode('utf-8', 'replace').strip()
 
 
 def _inside(path, base):
@@ -156,7 +180,7 @@ def _norm(path):
 
 def _git_dirs(directory):
     """Real git dir and common dir of the repository whose top level is DIRECTORY; [] when it is not one."""
-    lines = _git(directory, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir',
+    lines = _git_query(directory, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir',
                  '--git-common-dir').split('\n')
     if len(lines) != 3 or _norm(lines[0]) != _norm(directory):
         return []
@@ -165,8 +189,7 @@ def _git_dirs(directory):
 
 def _gitlinks(directory):
     """Paths of the submodules (gitlinks) recorded in the index of the repository DIRECTORY."""
-    done = subprocess.run(['git', '-C', str(directory), 'ls-files', '-s', '-z'], capture_output=True, timeout=60)
-    entries = done.stdout.split(b'\0')
+    entries = _git_query(directory, 'ls-files', '-s', '-z', binary=True).split(b'\0')
     return [entry.split(b'\t', 1)[1].decode('utf-8', 'surrogateescape')
             for entry in entries if entry.startswith(b'160000 ') and b'\t' in entry]
 
@@ -179,7 +202,7 @@ def _admin_paths(root):
     """
     real_root = os.path.realpath(root)
     pending = [real_root]
-    for line in _git(root, 'worktree', 'list', '--porcelain').split('\n'):
+    for line in _git_query(root, 'worktree', 'list', '--porcelain').split('\n'):
         if line.startswith('worktree '):
             pending.append(os.path.realpath(line[len('worktree '):]))
     found, seen = set(), set()
@@ -212,7 +235,7 @@ def _is_revision(root, operand):
     """
     if os.path.lexists(os.path.join(root, operand)):
         return False
-    return bool(_git(root, 'rev-parse', '--revs-only', '--no-flags', operand))
+    return bool(_git_query(root, 'rev-parse', '--revs-only', '--no-flags', operand))
 
 
 def check_path(operand, root, admin):
@@ -366,8 +389,7 @@ class Server:
             if name == 'pisar':
                 return self.text(self.capture([*self.pisar(), *check_pisar(args)]))
             if name == 'git':
-                return self.text(self.capture(['git', '-C', str(self.root), '-c', 'core.fsmonitor=false',
-                                               '-c', 'core.pager=cat', *check_git(args, self.root)]))
+                return self.text(self.capture(git_command(self.root, check_git(args, self.root))))
             if name == 'lesson_accept':
                 return self.text(self.accept(args))
             if name == 'lesson_review':
@@ -392,8 +414,9 @@ class Server:
 
     def capture(self, command):
         """Output of COMMAND; Refused with its output when it fails or does not finish."""
+        env = {**self.environment, 'GIT_OPTIONAL_LOCKS': '0'}
         try:
-            done = subprocess.run(command, cwd=self.root, env=dict(self.environment), stdin=subprocess.DEVNULL,
+            done = subprocess.run(command, cwd=self.root, env=env, stdin=subprocess.DEVNULL,
                                   capture_output=True, timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             raise Refused('the command did not finish in time') from None

@@ -89,6 +89,36 @@ class McpClient:
             stream.close()
 
 
+class LintTests(unittest.TestCase):
+    def test_only_the_shared_git_helpers_start_git_or_any_subprocess_with_a_shell(self):
+        """Every subprocess of mcp.py is started by one of the allowed functions, and never through a shell."""
+        import ast
+        import pisar
+        tree = ast.parse(Path(pisar.__file__).with_name('mcp.py').read_text(encoding='utf-8'))
+        allowed = {'_git_query', 'capture'}  # the query helper, and the final command of the tool
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+
+        def enclosing(node):
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return node.name
+            return '<module>'
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = ast.unparse(node.func)
+                if func.startswith('subprocess.') or func in ('os.system', 'os.popen') or func.startswith('os.exec') \
+                        or func.startswith('os.spawn'):
+                    self.assertIn(enclosing(node), allowed, f'{func} in {enclosing(node)}')
+                    self.assertFalse(any(k.arg == 'shell' and not (isinstance(k.value, ast.Constant)
+                                                                   and k.value.value is False)
+                                         for k in node.keywords), func)
+        self.assertNotIn('shell=True', ast.unparse(tree))
+
+
 class McpTests(Fixture):
     def setUp(self):
         super().setUp()
@@ -366,6 +396,40 @@ class McpTests(Fixture):
             with self.subTest(args=args), self.assertRaises(module_.Refused):
                 module_.check_git(args, self.root)
         module_.check_git(['add', 'work/team/alpha/call.md'], self.root)
+
+    def recording_fsmonitor(self, repository):
+        """Make REPOSITORY run a harmless recording fsmonitor program, which writes a marker file."""
+        marker = self.base / f'fsmonitor-marker-{len(list(self.base.glob("fsmonitor-marker-*")))}'
+        program = self.base / f'fsmonitor-{marker.name}.sh'
+        program.write_text(f'#!/bin/sh\ntouch {marker}\nexit 0\n')
+        program.chmod(0o755)
+        subprocess.run(['git', '-C', str(repository), 'config', 'core.fsmonitor', str(program)], check=True)
+        return marker
+
+    def test_validation_never_runs_a_configured_fsmonitor_in_root_or_submodule(self):
+        # Validation reads the index (submodule enumeration included); a repository's own fsmonitor
+        # program must never run for it, in the root or in an initialised submodule.
+        from pisar import mcp as module_
+        module, _ = self.custom_metadata_submodule()
+        root_marker = self.recording_fsmonitor(self.root)
+        module_marker = self.recording_fsmonitor(module)
+        for args in (['status', '--short'], ['diff', 'HEAD'], ['log', '-1']):
+            with self.subTest(args=args):
+                module_.check_git(args, self.root)
+        self.assertFalse(root_marker.exists(), 'validation ran the root fsmonitor')
+        self.assertFalse(module_marker.exists(), 'validation ran the submodule fsmonitor')
+
+    def test_the_real_tool_never_runs_a_configured_fsmonitor(self):
+        module, _ = self.custom_metadata_submodule()
+        root_marker = self.recording_fsmonitor(self.root)
+        module_marker = self.recording_fsmonitor(module)
+        client = self.server()
+        for args in (['status', '--short'], ['diff', '--stat']):
+            with self.subTest(args=args):
+                _, error = client.text('git', args)
+                self.assertFalse(error)
+        self.assertFalse(root_marker.exists())
+        self.assertFalse(module_marker.exists())
 
     def test_git_never_reads_through_a_symlink_to_an_outside_file(self):
         outside = self.base / 'outside-link.txt'
