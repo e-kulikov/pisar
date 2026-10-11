@@ -581,8 +581,11 @@ class AcceptTests(LessonCase):
         first = json.loads(self.accept(batch).stdout)
         record = next(self.state.glob(f'roots/*/operations/{batch}.json'))
         value = json.loads(record.read_text())
+        # The commit is only known by its id: the journal names it as pending, as a crash before the checkpoint leaves it.
         value.update(status='incomplete', commits=[], heads={
-            k: git(self.root, 'rev-parse', 'HEAD~1') for k in value['heads']})
+            k: git(self.root, 'rev-parse', 'HEAD~1') for k in value['heads']},
+            pending=dict(repo=str(self.root), commit=git(self.root, 'rev-parse', 'HEAD'),
+                         parent=git(self.root, 'rev-parse', 'HEAD~1')))
         record.write_text(json.dumps(value))
         meta = self.workspace(batch) / 'meta.json'
         info = json.loads(meta.read_text())

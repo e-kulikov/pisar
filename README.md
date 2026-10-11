@@ -178,10 +178,45 @@ PISAR_ROOT=/absolute/knowledge pisar inventory --include work
 
 The knowledge formats are independent of the executable's name and remain
 stable: domain markers are named `.domain.toml`, space descriptors `.wiki.toml`,
-stable document references are `wiki:DOMAIN/SPACE:DOCUMENT`, and every commit
-pisar makes has the subject
-`wiki: OPERATION-ID`. Retries recognize their own commits by that subject and the
-rollback procedure below selects commits with it.
+stable document references are `wiki:DOMAIN/SPACE:DOCUMENT`. Every commit pisar
+makes has the subject `wiki: OPERATION-ID`, but that subject is informational only:
+the operation journal in the runtime directory records the id of each commit it
+makes, and retries and the rollback procedure below use those recorded ids, never
+the commit text. A commit with the same subject that pisar did not record is
+refused.
+
+### Commit messages
+
+Commands that commit (`save`, `capture`, `triage accept`, `lesson accept`,
+`domain add` and `space create|move|archive|restore`) accept `--what` (a short summary of the change) and
+`--why` (the reason for it). With the default configuration (`[commit_message]
+enabled = false`) they are optional and added verbatim to the deterministic message
+below the subject. With `enabled = true` (in `$XDG_CONFIG_HOME/pisar/config.toml`), pisar refuses
+those commands unless both are given, and a tool-less writer turns them, the staged
+diff and the affected spaces into the message. The writer is `agent = "claude"` (the
+default, `claude -p`) or `agent = "codex"` (`codex exec`, read-only, no shell, web,
+MCP, plugins or hooks, its own CODEX_HOME and the Codex login of the main session).
+The writer's settings are `agent`, `model`, `effort`, `timeout` (10 to 600 seconds)
+and an optional absolute `prompt_file`:
+
+```toml
+[commit_message]
+enabled = true
+agent = "codex"
+# model and effort are optional; unset, the writer uses the defaults of its own agent
+# (Claude: sonnet and medium; Codex: the Codex researcher defaults, never a Claude name).
+timeout = 120
+```
+
+The writer's output must be a Conventional Commits subject of at most 72 characters,
+an optional body of at most 2000 characters, free of absolute local paths and
+secret-like values. pisar appends the trailer `Pisar-Operation: OPERATION-ID` itself.
+Invalid output, a failing or timed-out writer, or a missing `claude` or `codex` stops the commit:
+nothing is committed and no fallback message is used. The files of the operation stay
+in the working tree and its journal stays incomplete; rerun the same command (same
+operation ID) once the cause is fixed. Each commit's message is generated
+once and stored in the journal before the commit exists, so a retry reuses it.
+Author and committer identity are not set by pisar; they come from Git's configuration.
 
 ## Running an agent
 
@@ -192,8 +227,9 @@ pisar --agent claude -- -c           # arguments after -- go to the agent itself
 ```
 
 `--agent` starts an AI agent confined to this repository, so it behaves as a
-knowledge assistant. Today only `claude` (Claude Code, which must be on `PATH`)
-is supported. It is used instead of a command:
+knowledge assistant. Two agents are supported: `claude` (Claude Code) and `codex`
+(Codex CLI, see [Codex](#codex)); the executable must be on `PATH`. It is used
+instead of a command:
 
 - It runs in the root, with its own configuration directory
   `<state-dir>/agents/claude` (mode 0700, outside every Git repository). Log in
@@ -242,6 +278,90 @@ is supported. It is used instead of a command:
 In an interactive session a command outside the allowlist asks for confirmation;
 non-interactively it is refused. The allowlist narrows what the agent may do, it
 is not a sandbox: it can still read and edit files in the repository.
+
+## Codex
+
+```sh
+pisar --agent codex                  # start Codex CLI in the knowledge root
+pisar --agent codex -- -m MODEL      # a model for this session only
+pisar --agent codex -- -c model_reasoning_effort=high
+```
+
+`--agent codex` gives the same confinement as `--agent claude`, through Codex's
+own mechanisms and a pisar MCP server where Codex has no equivalent. Verified
+with `codex-cli 0.162.0`; **that is the minimum tested version**.
+
+**Log in once** to the isolated Codex home (it is not your own `~/.codex`). One login
+serves the main session, the lesson reviewer and the researcher; they all read the
+login of that home. The default state directory is `$XDG_DATA_HOME/pisar`, so for
+the default setup:
+
+```sh
+CODEX_HOME=~/.local/share/pisar/agents/codex HOME=~/.local/share/pisar/agents/codex/home codex login
+```
+
+Alternatively set `OPENAI_API_KEY` or `CODEX_API_KEY`; both are passed through.
+Codex's own shell is disabled, so it reaches the knowledge only through the
+`pisar`, `git`, `lesson_accept` and `lesson_review` tools.
+
+- `default_agent = "codex"` and `agents.codex.model|effort` (main session) and
+  `agents.codex.reviewer|researcher.model|effort` in the config file, shown by
+  `pisar config show`. Defaults: reviewer `gpt-6.1-sol` / `high`, researcher
+  `gpt-5.5` / `medium`; the main session uses Codex's own model unless set.
+  These model names come from `codex debug models` on 0.162.0; change them if
+  your account does not have them.
+- `research_agent = "claude"` (default) or `"codex"` selects the researcher behind
+  `pisar research`. It is independent of `default_agent`.
+- The bundled skills `pisar`, `lessons` and `research` are written to
+  `<state-dir>/agents/codex/skills` on every launch, with the tools section that
+  explains the MCP tools.
+
+### Parity with the Claude agent
+
+| Claude feature | Codex mechanism | Test (`tests/`) |
+| --- | --- | --- |
+| 1 `--agent`, `default_agent` | `codex --no-daemon` in the root, `CODEX_HOME` = `<state>/agents/codex`, private `HOME` below it | `test_codex_agent.CodexAgentTests.test_starts_codex_in_the_root_with_an_isolated_codex_home_in_the_state_dir`; `test_codex_settings.test_codex_is_a_supported_agent_and_default_agent` |
+| 2 replaced system prompt | `model_instructions_file` = `agent-prompt.md` plus a short note on the MCP tools | `test_codex_agent.test_instructions_are_the_packaged_agent_prompt` |
+| 3 tool restriction | `features.shell_tool`, `multi_agent`, `apps`, `plugins`, `browser_use`, `computer_use`, `image_generation`, `hooks`, `goals` off; `web_search` disabled; the server offers `enabled_tools` only | `test_codex_agent.test_main_session_has_no_shell_subagents_plugins_or_web_search`; `test_pisar_server_keeps_the_users_home_and_git_setup_and_only_its_tools` |
+| 4 command allowlist/denylist | `pisar mcp-serve`: tools `pisar` (command prefixes), `git` (per-subcommand option lists) — no execpolicy, see below | `test_codex_mcp.McpTests.test_pisar_refuses_bare_pisar_arbitrary_binaries_and_mv`, `test_git_refuses_bare_git_aliases_config_push_and_programs`, `test_git_refuses_abbreviated_and_unlisted_options`; `test_agent.CodexAllowlistTests` |
+| 5 `lesson accept` asks the user | `lesson_accept` tool: an MCP elicitation the user must accept; fails closed | `test_codex_mcp.test_accept_runs_only_after_an_explicit_user_accept`, `test_accept_is_refused_unless_the_user_accepts`, `test_elicitation_edge_cases_never_accept_by_accident` |
+| 6 edit only lesson drafts | the shell is off and the agent is told not to edit files directly (Codex 0.162.0 has no config key for `apply_patch`, which some models offer; its writes are confined to the lesson workspace by the profile); the draft tools are the only path for drafts: `lesson_draft_read` / `lesson_draft_write` change only the draft of an open batch, guarded by the sha256 of the text last read; the profile also allows writing only `<state>/lessons` | `test_codex_drafts.*`; `test_codex_agent.test_permissions_profile_writes_only_the_lesson_drafts` |
+| 7 isolated configuration | `CODEX_HOME` and `HOME` under the state directory; explicit environment; `WIKI_ROOT` never passed | `test_codex_agent.test_child_gets_an_explicit_environment_and_never_wiki_root_or_ambient_secrets` |
+| 8 plugin: skills and reviewer | skills in `$CODEX_HOME/skills`; reviewer = `lesson_review` tool running a tool-less, read-only `codex exec` with the reviewer model and effort | `test_codex_plugin.*`; `test_codex_reviewer.*` |
+| 9 strict MCP | the root's `.mcp.json` (regular file only) translated to `mcp_servers`; nothing from user config | `test_codex_agent.test_root_mcp_file_is_translated_and_symlinks_are_ignored` |
+| 10 model and effort | `-m` and `model_reasoning_effort` from the config; `-- -m` / `-- -c model_reasoning_effort=` win | `test_codex_agent.test_model_and_effort_come_from_the_config_and_caller_arguments_win`; `test_only_the_listed_config_overrides_are_accepted_and_effort_can_be_set` |
+| 11 web research | `pisar/research_codex.py`: `codex exec`, `web_search = "live"`, read-only, no shell or MCP; same guard, bounds and record | `test_research_codex.*` |
+| 12 environment isolation | explicit allowlist for every Codex process | `test_codex_agent.test_child_gets_an_explicit_environment...`; `test_research_codex.test_environment_is_an_allowlist...` |
+| 13 fake-executable tests | `codex` fake for argv, environment and files; real checks with `PISAR_TEST_CODEX=1` (configuration only, no model call) | `test_codex_*.py`, `test_codex_smoke.py` |
+| 14 commit-message writer | `[commit_message] agent = "codex"`: `codex exec` with no tools (read-only, web search, shell, MCP, plugins, hooks and subagents off), `--ignore-user-config --ignore-rules --ephemeral`, the login of the main session in a private HOME, the same bounds, validation and fail-closed behaviour; a Claude model name is never passed to Codex | `test_commit_message_codex.*` |
+
+**Differences in mechanism.** Codex's `.rules` execpolicy is not default-deny (an
+unmatched command is not refused), so the restriction is the MCP server's
+allowlist with Codex's shell disabled. Codex has no plugin directory like
+`--plugin-dir`; the skills are copied, not generated. Subagents are not used:
+the reviewer and the researcher are separate `codex exec` runs that share the
+login of the main session but ignore its configuration
+(`--ignore-user-config --ignore-rules`) and pass their own confinement with
+flags and `-c` overrides. The main session has no shell tool and its
+`view_image` tool is disabled. The agent reads documents through `pisar read` and
+edits lesson drafts only through `lesson_draft_read`/`lesson_draft_write`;
+Codex's permission profile reads the root and writes only the lesson workspace.
+`apply_patch` is not switched off by any 0.162.0 config key: a model that offers
+it can write only where the profile allows (the lesson workspace). The Codex
+prompt has an extra section about the tools, appended to the shared prompt.
+Repository hooks still run on `git commit`, as they do for Claude.
+
+**Lesson accept needs the interactive session.** The pisar server tells Codex
+that it can ask for confirmation, and `lesson_accept` asks through that channel.
+Codex's `exec` mode declines such a question at once (checked with a mock model),
+so `lesson_accept` refuses there: nothing is accepted unless the user answers
+`accept`. The confirmation dialog itself is in the Codex TUI; it was not run
+interactively here, so check it once in your own session. The configuration
+checks run with `PISAR_TEST_CODEX=1 python -m unittest tests.test_codex_smoke`.
+
+The pisar server's tools are approved by default (`default_tools_approval_mode`),
+because the server enforces the same allowlist as the Claude agent; the only tool
+that still needs the user is `lesson_accept`.
 
 ## Read, discover, and validate
 
@@ -718,6 +838,14 @@ repository, including uncommitted drafts. Duplicate item IDs, source paths, or
 identical source hashes within a batch are rejected. The manifest stores the
 explicit root namespace; another knowledge root cannot use it.
 
+`reject --item ID [--reason TEXT]` drops an item that should not reach any wiki. It works
+from `pending` or `deferred` only, writes nothing to any knowledge repository, and keeps a
+hash-verified processed copy before it removes a global inbox original. An external
+original is only marked `rejected`: pisar does not own that file, so it is never deleted,
+and the report says so. The reason is trimmed, at most 500 characters, shown in the report,
+and never written to the wiki. A rejected item cannot be accepted. Rejection is
+final only within its batch: a later batch with the same content is prepared as a new item.
+
 Only `accept --item ID` applies that item and commits its intended paths. Source
 and draft hashes are revalidated; ambiguous or changed inputs stay unapplied.
 `defer` leaves an item external; explicit reroute reopens a deferred item. Once
@@ -797,8 +925,10 @@ exact task file in the **owning repository**, where its Git path may differ from
 that root-relative project. A submodule task commit needs a separate parent
 gitlink commit. Leave existing task files and status intact during rollback.
 
-Set `OWNER_REPO` to an absolute owning-repository path and `OPERATION` to the
-recorded operation ID, then run the following in Bash. It stages inverse patches
+Set `OWNER_REPO` to an absolute owning-repository path, `OPERATION` to the
+recorded operation ID and `PISAR_ROOT` to the knowledge root, then run the
+following in Bash. It reverts the commits recorded in the operation journal for
+that repository (not commits found by their subject). It stages inverse patches
 only for knowledge files; task files and all current submodule gitlinks are
 excluded. It stops on dirty trees or a conflicting later knowledge edit. Review
 the staged diff before committing.
@@ -807,17 +937,30 @@ the staged diff before committing.
 set -euo pipefail
 : "${OWNER_REPO:?Set the absolute owning repository path}"
 : "${OPERATION:?Set the recorded operation id}"
+: "${PISAR_ROOT:?Set the absolute knowledge root}"
+STATE="${PISAR_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pisar}"
+ROOT="$(realpath "$PISAR_ROOT")"
+NAMESPACE="$(printf %s "$ROOT" | python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:24])')"
+JOURNAL="$STATE/roots/$NAMESPACE/operations/$OPERATION.json"
 cd "$OWNER_REPO"
 test -z "$(git status --porcelain)"
-git log --format='%h %s' --grep="^wiki: $OPERATION\$"
+# The commits pisar recorded for this repository, oldest first (recorded ids, not commit text).
+mapfile -t commits < <(python3 -c '
+import json, os, sys
+journal, root, owner = sys.argv[1:4]
+for record in json.load(open(journal, encoding="utf-8"))["commits"]:
+    if os.path.join(root, record["repo"]) == owner:
+        print(record["commit"])
+' "$JOURNAL" "$ROOT" "$OWNER_REPO")
+git log --format='%h %s' --no-walk "${commits[@]}"
 excludes=(':(exclude,glob)**/.ruwana/**' ':(exclude,literal).ruwana')
 while IFS= read -r -d '' entry; do
   if [[ "$entry" == '160000 '* ]]; then
     excludes+=(":(exclude,literal)${entry#*$'\t'}")
   fi
 done < <(git ls-files --stage -z)
-for sha in $(git log --format=%H --grep="^wiki: $OPERATION\$"); do
-  git show --format= --binary "$sha" -- . "${excludes[@]}" \
+for ((i = ${#commits[@]} - 1; i >= 0; i--)); do
+  git show --format= --binary "${commits[i]}" -- . "${excludes[@]}" \
     | git apply -R --index --allow-empty
 done
 git diff --cached --stat
@@ -995,6 +1138,9 @@ so the question leaves the machine. pisar never contacts a service itself.
   Foundry `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_BASE_URL`,
   `ANTHROPIC_FOUNDRY_RESOURCE`. `CLAUDE_CONFIG_DIR` is set by pisar. Everything
   else, including `PISAR_*`, `WIKI_ROOT` and unrelated secrets, is dropped.
+- **Researcher.** `research_agent = "codex"` in the config file uses a Codex
+  researcher instead (see [Codex](#codex)); the guard, bounds and record below
+  are the same.
 - **Model and effort**: `--model`/`--effort`, else `[agents.claude.researcher]`
   in the config file, else `sonnet` and `medium`; values are passed verbatim.
 - **Result.** The answer is validated strictly (unknown fields, empty claims,

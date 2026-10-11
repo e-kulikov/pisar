@@ -219,11 +219,62 @@ def validate_artifacts(wiki, journal):
             raise WikiError('journal artifact hash mismatch')
 
 
+def pending_intent(runtime, journal):
+    """The hook gitops.commit calls before it moves a branch: the new commit id is journaled first."""
+    def intent(record):
+        journal['pending'] = record
+        runtime.store(journal)
+    return intent
+
+
+def checkpoint(runtime, journal, repo, commit):
+    """Record COMMIT in REPO as landed: the commit list, the recorded head and no pending record, in one write."""
+    if not any(c['repo'] == str(repo) and c['commit'] == commit for c in journal['commits']):
+        journal['commits'].append(dict(repo=str(repo), commit=commit))
+    journal['heads'][str(repo)] = commit
+    journal['pending'] = None
+    runtime.store(journal)
+
+
+def clear_pending(runtime, journal):
+    """Drop a pending record that no commit of this run needs (a retry that found its tree already committed)."""
+    if journal.get('pending') is not None:
+        journal['pending'] = None
+        runtime.store(journal)
+
+
+def landed_commit(repo, journal, recorded=None):
+    """The commit this operation moved REPO to before its checkpoint, or None when HEAD is not one of ours.
+
+    RECORDED is the head the operation expects (default: the journaled head). A journal with the
+    'pending' key (every journal written by this version) recognises its commit by id only: HEAD must be
+    the journaled commit, whose parent is the expected head. A journal without the key predates the
+    record; only there is the pisar subject accepted, and never for a journal written by this version."""
+    if recorded is None:
+        recorded = journal['heads'].get(str(repo))
+    head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+    if head == recorded:
+        return None
+    parent = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
+    if 'pending' not in journal:
+        subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
+        return head if parent == recorded and subject == f'wiki: {journal["operation_id"]}' else None
+    record = journal['pending']
+    if record is None:
+        return None
+    if not isinstance(record, dict) or set(record) != {'repo', 'commit', 'parent'} or \
+            not all(isinstance(value, str) for value in record.values()):
+        raise WikiError(f'journal commit record of {repo} is malformed; refusing to guess')
+    if record['repo'] == str(repo) and record['commit'] == head and record['parent'] == parent == recorded:
+        return head
+    return None
+
+
 def start(wiki, runtime, ident, payload, artifacts, adopted=(), extra_repos=(), extra=None):
     for item in artifacts:
         item['temp'] = f'.pisar-{ident}-{item["after"][:16]}.tmp'  # Ownership of an interrupted write.
     journal = dict(schema_version=1, format=JOURNAL_FORMAT, root=str(wiki.root), operation_id=ident,
-                   fingerprint=fingerprint(payload), status='incomplete',
+                   fingerprint=fingerprint(payload), status='incomplete', pending=None,
                    artifacts=artifacts, commits=[], tasks={}, heads={})
     repos, _ = groups(wiki, artifacts)
     for repo in extra_repos:
@@ -286,30 +337,77 @@ def pinned_commit(journal, child, wiki):
     return recorded
 
 
+def commit_writer(wiki, runtime, journal, repo):
+    """The message maker of one commit of REPO (see gitops.commit).
+
+    Deterministic messages need no journal. With the writer enabled, the message is stored in the journal
+    before the commit object exists, and a retry of the same tree reuses it: never a second message for the
+    same commit. A different tree is a different commit: it gets a new message, which replaces the stored one."""
+    from . import commit_message  # Lazy: commit_message imports research, which imports this module.
+    explanation = commit_message.current()
+    options = settings.commit_message()
+    operation = journal['operation_id']
+
+    def write(changes):
+        if not options['enabled']:
+            return commit_message.compose(changes, operation, explanation, options, wiki.root, runtime.base)
+        stored = journal.get('messages', {}).get(str(repo))
+        if stored and stored['tree'] == changes['tree']:
+            return stored['message']
+        paths = [str((repo / p).relative_to(wiki.root)) for p in changes['paths']]
+        spaces = sorted(s.address for s in wiki.spaces if any((repo / p).is_relative_to(s.path) for p in changes['paths']))
+        full = dict(paths=sorted(paths), spaces=spaces, tree=changes['tree'],
+                    diff=gitops.diff_text(repo, changes['old'], changes['tree'], commit_message.DIFF_LIMIT))
+        text = commit_message.compose(full, operation, explanation, options, wiki.root, runtime.base)
+        journal.setdefault('messages', {})[str(repo)] = dict(tree=changes['tree'], message=text)
+        runtime.store(journal)
+        return text
+    return write
+
+
+def recover(runtime, journal, mismatches):
+    """Recognise every commit a crash left behind, then record them all in one write.
+
+    MISMATCHES holds (repo, recorded head, allowed paths or None) for each repository that may have moved;
+    a HEAD equal to its recorded head is skipped. Every mismatch is decided before anything is recorded, so
+    an old-format journal (no 'pending' key) is read by its subject rule for all of them, and the pending
+    protocol starts only in the same write that records them. A HEAD that is not ours refuses the whole
+    recovery. Every recovered commit is recorded (a repository can be committed to more than once)."""
+    found = []
+    for repo, recorded, allowed in mismatches:
+        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+        # Equal to the head journaled by a checkpoint: already recorded, and only ours can be there.
+        if head in (recorded, journal['heads'].get(str(repo))):
+            continue
+        landed = landed_commit(repo, journal, recorded=recorded)
+        changed = set(gitops.run(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines())
+        if landed is None or (allowed is not None and not changed <= allowed):
+            raise WikiError(f'Git HEAD changed outside operation: {repo}')
+        found.append((repo, landed))
+    if found:
+        for repo, landed in found:
+            if not any(c['repo'] == str(repo) and c['commit'] == landed for c in journal['commits']):
+                journal['commits'].append(dict(repo=str(repo), commit=landed))
+            journal['heads'][str(repo)] = landed
+        journal['pending'] = None  # The pending protocol from here on, in this same write.
+        runtime.store(journal)
+
+
 def apply_files(wiki, runtime, journal):
     remove_leftovers(wiki, journal)
     validate_artifacts(wiki, journal)
     owned = owned_artifacts(wiki, journal)
     repos, links = groups(wiki, owned)
     by_path = {item['path']: item for item in owned}
+    mismatches = []
     for repo, allowed in repos.items():
-        current_head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
         previous_head = journal['heads'].get(str(repo))
         if previous_head is None:
             raise WikiError('repository was not part of prepared operation')
-        if current_head != previous_head:
-            # A crash can occur after Git commits and before the journal checkpoint.
-            parent_head = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
-            subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
-            changed = set(gitops.run(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines())
-            if parent_head != previous_head or subject != f'wiki: {journal["operation_id"]}' or not changed <= allowed:
-                raise WikiError(f'Git HEAD changed outside operation: {repo}')
-            journal['heads'][str(repo)] = current_head
-            # Every recovered commit is recorded (a repository can be committed to more than once);
-            # parent pinning then uses the latest one.
-            if not any(c['repo'] == str(repo) and c['commit'] == current_head for c in journal['commits']):
-                journal['commits'].append(dict(repo=str(repo), commit=current_head))
-            runtime.store(journal)
+        mismatches.append((repo, previous_head, allowed))
+    # A crash can occur after Git moves a branch and before its checkpoint: recognised before anything else.
+    recover(runtime, journal, mismatches)
+    for repo, allowed in repos.items():
         gitops.clean_except(repo, allowed)
         for _, relative in gitops.dirty(repo):
             if (repo, relative) in links:
@@ -332,9 +430,13 @@ def apply_files(wiki, runtime, journal):
                 verified[(wiki.root / item['path']).relative_to(repo).as_posix()] = base64.b64decode(item['data'])
         pins = {link: pinned_commit(journal, child, wiki)
                 for (parent, link), child in links.items() if parent == repo}
-        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins)
+        commit = gitops.commit(repo, repos[repo], journal['operation_id'], verified=verified, pins=pins,
+                               intent=pending_intent(runtime, journal),
+                               message=commit_writer(wiki, runtime, journal, repo))
         if commit:
-            journal['commits'].append(dict(repo=str(repo), commit=commit))
+            checkpoint(runtime, journal, repo, commit)
+        else:
+            clear_pending(runtime, journal)
         for (parent, link), child in links.items():
             pinned = pins.get(link) if parent == repo else None
             head = gitops.run(child, 'rev-parse', 'HEAD').strip() if pinned else pinned

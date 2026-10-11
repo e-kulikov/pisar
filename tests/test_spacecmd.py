@@ -8,6 +8,14 @@ from pisar.safety import sha256
 from .support import Fixture, commit_all, domain, git, init_repo, space
 
 
+def rewind(journal):
+    """Make a finished operation's journal look as a crash before its commits left it (tests move HEAD back)."""
+    data = json.loads(journal.read_text())
+    data.update(status='incomplete', commits=[], pending=None)
+    data['heads'] = {repo: git(Path(repo), 'rev-parse', 'HEAD') for repo in data['heads']}
+    journal.write_text(json.dumps(data))
+
+
 def commits(repo):
     return int(git(repo, 'rev-list', '--count', 'HEAD'))
 
@@ -106,9 +114,7 @@ class DomainTests(SpaceCommandFixture):
         (self.root / 'acme/.domain.toml').write_text('schema_version = 1\nid = "acme"\ntitle = "Acme"\n')
         runtime = Runtime(self.state, self.root)
         for journal in (runtime.path / 'operations').glob('domain-add-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
         before = commits(self.root)
         self.assertTrue(self.data(*args)['changed'])
         self.assertEqual(commits(self.root), before + 1)
@@ -141,9 +147,7 @@ class DomainTests(SpaceCommandFixture):
         self.cli(*args)
         git(self.root, 'reset', '-q', '--soft', 'HEAD~1')
         for journal in (Runtime(self.state, self.root).path / 'operations').glob('domain-add-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
         return args
 
     def test_resumed_submodule_add_completes_when_nothing_else_changed(self):
@@ -357,9 +361,7 @@ class CreateTests(SpaceCommandFixture):
         git(self.root, 'reset', '-q', '--hard', 'HEAD~1')
         runtime = Runtime(self.state, self.root)
         for journal in (runtime.path / 'operations').glob('space-create-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
         path = self.root / 'work/10-projects/launch-plan'
         path.mkdir(parents=True)
         (path / 'README.md').write_text('# Launch Plan\n')
@@ -371,9 +373,7 @@ class CreateTests(SpaceCommandFixture):
     def interrupt(self, pattern):
         """Mark the finished operation's journal incomplete, as a crash before the commit leaves it."""
         for journal in (Runtime(self.state, self.root).path / 'operations').glob(pattern):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
 
     def test_resumed_create_refuses_a_readme_edited_after_the_crash(self):
         args = ('--domain', 'work', '--kind', 'project', '--title', 'Launch Plan')
@@ -561,9 +561,7 @@ class RelocateTests(SpaceCommandFixture):
         marker.write_text(marker.read_text().replace('"project"', '"area"'))
         runtime = Runtime(self.state, self.root)
         for journal in (runtime.path / 'operations').glob('space-move-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
         before = commits(self.root)
         self.data('space', 'move', 'work/launch-plan', '--to', 'area')
         self.assertEqual(commits(self.root), before + 1)
@@ -580,9 +578,7 @@ class RelocateTests(SpaceCommandFixture):
         draft = self.root / 'work/20-areas/launch-plan/draft.md'
         draft.write_text('my draft\n')
         for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-move-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
         head = git(self.root, 'rev-parse', 'HEAD')
         failed = self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)
         self.assertIn('draft.md', failed.stderr)
@@ -600,9 +596,7 @@ class RelocateTests(SpaceCommandFixture):
         draft = self.root / 'work/20-areas/launch-plan/elsewhere'
         draft.symlink_to(self.base)
         for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-move-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+            rewind(journal)
         head = git(self.root, 'rev-parse', 'HEAD')
         failed = self.cli('space', 'move', 'work/launch-plan', '--to', 'area', ok=False)
         self.assertIn('elsewhere', failed.stderr)

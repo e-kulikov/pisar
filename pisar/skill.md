@@ -165,6 +165,7 @@ pisar triage report  --batch ID
 pisar triage accept  --batch ID --item ITEM
 pisar triage reroute --batch ID --item ITEM --space DOMAIN/ID
 pisar triage defer   --batch ID --item ITEM
+pisar triage reject  --batch ID --item ITEM [--reason TEXT]
 ```
 
 - `prepare` snapshots the inbox (or your routing JSON) into the state directory.
@@ -178,6 +179,9 @@ pisar triage defer   --batch ID --item ITEM
   approved. `reroute` changes the destination but does not approve; it discards
   any prepared semantic plan, so prepare a fresh one. `defer` leaves the item
   outside any repository.
+- `reject` (from `pending` or `deferred`) drops an item without touching any wiki.
+  A global inbox original is removed only after a verified processed copy exists;
+  an external original is never deleted. The reason is optional and stays out of the wiki.
 - Once an accept has started, `defer`/`reroute` are refused. Fix the cause and
   retry the same `accept`. Do not delete journals.
 
@@ -228,6 +232,18 @@ and `[types.NAME.fields.FIELD]` tables). Never invent a type silently.
   first. The command refuses a dirty tree and a conflicting redeclaration.
 - Date fields take quoted `"YYYY-MM-DD"` strings. A required field must be
   present; an empty value still counts as present.
+
+## Commit messages: say what and why
+
+`save`, `capture`, `triage accept`, `lesson accept`, `domain add`, and `space
+create|move|archive|restore` make commits. Pass `--what` (one short line: what
+changed) and `--why` (the reason). Write them as plain sentences with no secrets,
+no absolute local paths and no personal data beyond what the change needs. If
+the user's configuration enables the commit-message writer, these flags are
+**required**: pisar refuses the command before writing anything without them.
+`--context TEXT` or `--context-file FILE` (at most 8000 characters) summarises
+this operation's earlier steps for the writer. A writer failure stops the commit
+with a clear error; retry the same command. The operation ID stays the same.
 
 ## Guard: report possibly sensitive text
 
@@ -286,6 +302,8 @@ Never strip text on your own and never run `accept` without the user's go-ahead.
 - Operations are **not atomic** across repositories and ruwana; partial progress
   is recorded, not hidden. Read the journal and `git status` in the owning
   repository before deciding anything.
+- Recovery recognises pisar's own commits by the ids in the journal, never by
+  their subject. A commit that merely carries the `wiki:` subject is refused.
 - Never revert an operation's commits wholesale: commits that contain
   `.ruwana/` task files can delete tasks or restore old statuses. Roll back
   knowledge files only, leave task files and current status alone, do it in each
@@ -322,6 +340,10 @@ names of clients, people, projects or internal systems and without quotes.
    the records as `<id>.raw.txt` for diagnosis. `--model` and `--effort`
    default to `[agents.claude.researcher]` in the config file, else sonnet and
    medium; values are passed verbatim.
+
+`pisar mcp-serve` is not a command for you to run: the launcher (`pisar --agent`)
+starts it for an agent that reaches pisar through MCP tools. Those tools check
+the same arguments as the commands above.
 
 ## Rules of thumb
 

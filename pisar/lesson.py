@@ -17,7 +17,7 @@ import uuid
 from . import gitops, guard
 from .documents import Document, check_references, metadata, scan, validate_meta
 from .operations import (Runtime, apply_files, remove_leftovers, artifact, atomic_bytes, existing, external_path,
-                         outside_git, result as operation_result, start as start_operation, write_json)
+                         landed_commit, outside_git, result as operation_result, start as start_operation, write_json)
 from .safety import WikiError, address, concrete_id, safe_path, sha256
 
 TIERS = ('severe', 'ask', 'warn')
@@ -135,9 +135,8 @@ def acceptance_started(wiki, journal):
     HEAD moved to this operation's own commit, or the note file written by it is on disk."""
     if journal['status'] == 'complete' or journal['commits']:
         return True
-    for repo, head in journal['heads'].items():
-        if gitops.run(repo, 'rev-parse', 'HEAD').strip() != head and \
-                gitops.run(repo, 'log', '-1', '--format=%s').strip() == f'wiki: {journal["operation_id"]}':
+    for repo in journal['heads']:
+        if landed_commit(repo, journal) is not None:
             return True
     for item in journal['artifacts']:
         path = safe_path(wiki.root, item['path'])
