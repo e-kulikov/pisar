@@ -480,6 +480,12 @@ values = ["thai", "italian"]    # optional allowed values; strings or integers
   "idea about a dish": title, ingredients, source, status), not for the one record
   in hand. pisar never inserts a template into a document by itself.
 
+A hard interruption before type-add replaces the marker may leave a `.pisar-*`
+sibling. Pisar preserves ambiguous files and may refuse retry: inspect and move
+that specific leftover outside the repository, then repeat the original command.
+Post-marker interrupted operations resume normally. Occupied temporary paths in
+legacy journals are always refused, even if ignored.
+
 **Migration.** `note`, `recipe`, `movie`, `series`, `book`, `decision` and
 `overview` are no longer built in. A wiki whose documents use them fails
 `pisar check` until each owning space declares them, for example

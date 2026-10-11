@@ -1,5 +1,7 @@
 """Per-space record types declared in .wiki.toml, on temporary fixtures only."""
 import json
+import os
+from unittest.mock import patch
 import subprocess
 import sys
 import unittest
@@ -24,7 +26,7 @@ def document(ident, doc_type, extra='', owner='work/alpha', body='Body text.'):
 
 
 def temp_name():
-    """The temporary name a fresh `space type add work/alpha recipe-idea` journals for its marker write."""
+    """The legacy deterministic temporary name for `space type add work/alpha recipe-idea`."""
     text = _declaration_text(parse_type('recipe-idea', dict(description='One idea')))
     op = f'space-type-add-work-alpha-recipe-idea-{_digest("work/alpha", "recipe-idea", text)}'
     return f'.pisar-{_digest(op, "work/team/alpha/.wiki.toml")}.tmp'
@@ -225,7 +227,18 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
     """`pisar space type list|add` (SpaceCommandFixture supplies the synthetic identity)."""
 
     def setUp(self):
+        isolated = {k: v for k, v in os.environ.items()
+                    if not k.startswith(('PISAR_', 'XDG_', 'GIT_')) and k != 'EMAIL'}
+        isolated.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        self.environment = patch.dict(os.environ, isolated, clear=True)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         super().setUp()
+        (self.base / 'home' / '.gitconfig').write_text('')
+        os.environ['HOME'] = str(self.base / 'home')
+        os.environ['XDG_CONFIG_HOME'] = str(self.base / 'config')
+        self.env['HOME'] = str(self.base / 'home')
+        self.env['XDG_CONFIG_HOME'] = str(self.base / 'config')
         self.marker = self.alpha / '.wiki.toml'
         self.original = MARKER.encode()
         self.marker.write_bytes(self.original)
@@ -237,6 +250,94 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
 
     def listing(self, address='work/alpha'):
         return self.data('space', 'type', 'list', address)
+
+    ARGS = ('recipe-idea', '--description', 'One idea')
+
+    def snapshot(self, *paths):
+        return (self.marker.read_bytes(), git(self.root, 'rev-parse', 'HEAD'),
+                git(self.root, 'ls-files', '--stage'), git(self.root, 'status', '--porcelain'),
+                tuple(os.readlink(p) if p.is_symlink() else p.read_bytes() if p.exists() else None for p in paths))
+
+    def refused_twice(self, *paths):
+        before = self.snapshot(*paths)
+        for _ in range(2):
+            result = self.add(*self.ARGS, ok=False)
+            self.assertEqual(self.snapshot(*paths), before)
+        return result
+
+    def test_commit_failure_after_rename_preserves_reused_legacy_path(self):
+        head = git(self.root, 'rev-parse', 'HEAD')
+        git(self.root, 'config', 'user.useConfigOnly', 'true')
+        git(self.root, 'config', '--unset', 'user.name')
+        git(self.root, 'config', '--unset', 'user.email')
+        result = self.add(*self.ARGS, ok=False)
+        self.assertIn('identity', result.stderr.lower())
+        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        user = self.alpha / temp_name()
+        self.assertFalse(user.exists())
+        git(self.root, 'config', 'user.name', 'Synthetic fixture')
+        git(self.root, 'config', 'user.email', 'synthetic@example.invalid')
+        user.write_bytes(b'schema_version = 1\n')
+        self.refused_twice(user)
+
+    def competitor_prelude(self, content):
+        # On new journals this is an ordinary user file, never a reserved output.
+        return (
+            'import os\nimport pisar.operations as operations\n'
+            'real_store = operations.Runtime.store\n'
+            'def store(self, journal):\n'
+            '    real_store(self, journal)\n'
+            f'    temp = journal.get("temp") or {temp_name()!r}\n'
+            '    if journal["status"] == "incomplete":\n'
+            '        path = os.path.join(journal["root"], os.path.dirname(journal["artifacts"][0]["path"]), temp)\n'
+            '        if not os.path.lexists(path):\n'
+            f'            with open(path, "wb") as f: f.write({content!r})\n'
+            'operations.Runtime.store = store\n')
+
+    def test_empty_competitor_is_preserved_across_retries(self):
+        result = self.child_add(self.competitor_prelude(b''), *self.ARGS)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        if result.returncode:
+            self.assertEqual(self.marker.read_bytes(), self.original)
+        else:
+            self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+        user = self.alpha / temp_name()
+        self.assertEqual(user.read_bytes(), b'')
+        self.refused_twice(user)
+
+    def test_refused_resume_does_not_clean_a_full_leftover(self):
+        leftover = self.crash_leftover()
+        draft = self.alpha / 'user-draft.md'
+        draft.write_bytes(b'user draft\n')
+        self.refused_twice(leftover, draft)
+
+    def test_already_final_marker_is_not_rewritten_on_resume(self):
+        self.interrupted_add(*self.ARGS)
+        before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
+        prelude = (
+            'import os\nreal_replace = os.replace\n'
+            'def replace(source, target, *a, **k):\n'
+            f'    if str(target) == {str(self.marker)!r}: raise AssertionError("marker rewritten")\n'
+            '    return real_replace(source, target, *a, **k)\n'
+            'os.replace = replace\n')
+        result = self.child_add(prelude, *self.ARGS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before + 1)
+        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+        self.clean()
+
+    def test_new_add_preserves_tracked_legacy_temp_name(self):
+        user = self.alpha / temp_name()
+        user.write_bytes(b'my tracked draft\n')
+        commit_all(self.root)
+        entry = git(self.root, 'ls-files', '--stage', '--', str(user))
+        self.add(*self.ARGS)
+        self.assertEqual(user.read_bytes(), b'my tracked draft\n')
+        self.assertEqual(git(self.root, 'ls-files', '--stage', '--', str(user)), entry)
+        self.assertEqual(git(self.root, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'),
+                         'work/team/alpha/.wiki.toml')
+        self.clean()
 
     def test_list_reports_system_and_declared_types(self):
         self.declare(IDEA + '[types.recipe-idea.fields.cuisine]\nrequired = true\n')
@@ -257,6 +358,11 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
                           '--description', 'One idea for a recipe to try later',
                           '--field', 'cuisine:string:required')
         self.assertTrue(result['changed'])
+        _, journal = self.journal_data()
+        self.assertIn('expected', journal)
+        self.assertIn('final', journal)
+        self.assertNotIn('temp', journal)
+        self.assertNotIn('temp_acquired', journal)
         self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before + 1)
         self.assertEqual(git(self.root, 'log', '-1', '--format=%s').split(':')[0], 'wiki')
         self.clean()
@@ -428,7 +534,7 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
             'import pisar.operations as operations\n'
             'real = os.replace\n'
             'def replace(source, target, *a, **k):\n'
-            '    if str(target).endswith(".wiki.toml"):\n'
+            f'    if str(target) == {str(self.marker)!r}:\n'
             '        os._exit(9)\n'
             '    return real(source, target, *a, **k)\n'
             'os.replace = replace\n'
@@ -439,18 +545,95 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
              'space', 'type', 'add', 'work/alpha', *args],
             cwd=CHECKOUT, env={**self.env, 'PYTHONPATH': str(CHECKOUT)}, text=True, capture_output=True)
 
-    def test_crash_before_the_rename_leaves_only_its_recorded_leftover_and_resumes(self):
-        original = self.marker.read_bytes()
-        crashed = self.crash_before_the_rename('recipe-idea', '--description', 'One idea')
-        self.assertEqual(crashed.returncode, 9, crashed.stderr)
-        self.assertEqual(self.marker.read_bytes(), original)
-        leftovers = list(self.alpha.glob('.pisar-*'))
-        self.assertEqual(len(leftovers), 1)
-        self.assertEqual(git(self.root, 'status', '--porcelain', '--', 'work/team/alpha'), '?? work/team/alpha/.pisar-' + leftovers[0].name[len('.pisar-'):])
-        self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
-        self.clean()
-        self.assertEqual(list(self.alpha.glob('.pisar-*')), [])
-        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+    def test_hard_crash_siblings_are_preserved_until_explicit_resolution(self):
+        for window in ('exclusive-create', 'partial-write', 'pre-rename'):
+            with self.subTest(window=window):
+                before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
+                head = git(self.root, 'rev-parse', 'HEAD')
+                try:
+                    prelude = self.crash_prelude(window)
+                    crashed = self.child_add(prelude, *self.ARGS)
+                    self.assertEqual(crashed.returncode, 9, crashed.stderr)
+                    self.assertEqual(self.marker.read_bytes(), self.original)
+                    self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+                    (leftover,) = self.alpha.glob('.pisar-*')
+                    final = self.journal_data()[1]['final'].encode()
+                    expected = {'exclusive-create': b'', 'partial-write': final[:len(final)//2],
+                                'pre-rename': final}[window]
+                    self.assertEqual(leftover.read_bytes(), expected)
+                    result = self.refused_twice(leftover)
+                    self.assertIn(leftover.name, result.stderr)
+                    saved = self.base / 'saved-leftover'
+                    leftover.rename(saved)
+                    self.add(*self.ARGS)
+                    self.assertEqual(saved.read_bytes(), expected)
+                    self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before + 1)
+                    self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+                    self.clean()
+                finally:
+                    # Reset only synthetic data, even when a baseline subtest fails.
+                    git(self.root, 'reset', '--hard', head)
+                    for path in self.alpha.glob('.pisar-*'):
+                        path.unlink()
+                    self.journal_data()[0].unlink()
+
+    def crash_prelude(self, window):
+        return f'''import os
+from pathlib import Path
+marker = {str(self.marker)!r}
+parent = str(Path(marker).parent)
+window = {window!r}
+fds = set()
+real_open, real_write, real_fdopen, real_replace = os.open, os.write, os.fdopen, os.replace
+def opening(path, flags, *a, **k):
+    fd = real_open(path, flags, *a, **k)
+    p = Path(path)
+    if str(p.parent) == parent and p.name.startswith('.pisar-') and flags & os.O_CREAT:
+        fds.add(fd)
+        if window == 'exclusive-create': os._exit(9)
+    return fd
+def writing(fd, data):
+    if fd in fds and window == 'partial-write':
+        real_write(fd, bytes(data)[:len(data)//2])
+        os._exit(9)
+    return real_write(fd, data)
+class Stream:
+    def __init__(self, stream): self.stream = stream
+    def __enter__(self): self.stream.__enter__(); return self
+    def __exit__(self, *a): return self.stream.__exit__(*a)
+    def __getattr__(self, name): return getattr(self.stream, name)
+    def write(self, data):
+        self.stream.write(data[:len(data)//2])
+        self.stream.flush()
+        os._exit(9)
+def fdopen(fd, *a, **k):
+    stream = real_fdopen(fd, *a, **k)
+    return Stream(stream) if fd in fds and window == 'partial-write' else stream
+def replace(source, target, *a, **k):
+    if str(target) == marker and window == 'pre-rename': os._exit(9)
+    return real_replace(source, target, *a, **k)
+os.open, os.write, os.fdopen, os.replace = opening, writing, fdopen, replace
+'''
+
+    def journal_data(self):
+        (path,) = (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json')
+        return path, json.loads(path.read_text())
+
+    def legacy_interrupted_add(self, content, acquired=False):
+        """Synthetic old-format compatibility fixture, not a real crash."""
+        self.interrupted_add(*self.ARGS)
+        path, journal = self.journal_data()
+        journal['temp'] = temp_name()
+        journal.pop('temp_acquired', None)
+        if acquired is not None:
+            journal['temp_acquired'] = acquired
+        journal['status'] = 'incomplete'
+        self.marker.write_bytes(self.original)
+        path.write_text(json.dumps(journal))
+        leftover = self.alpha / temp_name()
+        if content is not None:
+            leftover.write_bytes(content)
+        return leftover
 
     def test_unrelated_temp_looking_user_file_is_never_removed(self):
         user = self.alpha / '.pisar-notes.tmp'
@@ -463,7 +646,7 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         self.assertEqual(self.marker.read_bytes(), original)
 
     def crash_leftover(self):
-        """A type-add killed before its rename: the journaled temporary file is left beside the marker."""
+        """A type-add killed before its rename: one temporary sibling is left beside the marker."""
         self.crash_before_the_rename('recipe-idea', '--description', 'One idea')
         (leftover,) = self.alpha.glob('.pisar-*')
         return leftover
@@ -478,139 +661,106 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
             cwd=CHECKOUT, env={**self.env, 'PYTHONPATH': str(CHECKOUT)}, text=True, capture_output=True)
 
     def test_competing_file_created_after_the_journal_is_refused_and_kept(self):
-        # After the journal names the temporary file, another process creates a file at that path.
-        prelude = (
-            'import os\n'
-            'import pisar.operations as operations\n'
-            'real_store = operations.Runtime.store\n'
-            'def store(self, journal):\n'
-            '    real_store(self, journal)\n'
-            '    temp = journal.get("temp")\n'
-            '    if temp and journal["status"] == "incomplete":\n'
-            '        path = os.path.join(journal["root"], os.path.dirname(journal["artifacts"][0]["path"]), temp)\n'
-            '        if not os.path.lexists(path):\n'
-            '            with open(path, "wb") as competing:\n'
-            '                competing.write(b"independent user draft\\n")\n'
-            'operations.Runtime.store = store\n')
-        text = self.marker.read_bytes()
-        head = git(self.root, 'rev-parse', 'HEAD')
-        result = self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        competing = next(self.alpha.glob('.pisar-*.tmp'))
+        result = self.child_add(self.competitor_prelude(b'independent user draft\n'), *self.ARGS)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        if result.returncode:
+            self.assertEqual(self.marker.read_bytes(), self.original)
+        else:
+            self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+        competing = self.alpha / temp_name()
         self.assertEqual(competing.read_bytes(), b'independent user draft\n')
-        self.assertEqual(self.marker.read_bytes(), text)
-        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
-
-    COMPETING_PREFIX = (
-        'import os\n'
-        'import pisar.operations as operations\n'
-        'real_store = operations.Runtime.store\n'
-        'def store(self, journal):\n'
-        '    real_store(self, journal)\n'
-        '    temp = journal.get("temp")\n'
-        '    if temp and journal["status"] == "incomplete":\n'
-        '        path = os.path.join(journal["root"], os.path.dirname(journal["artifacts"][0]["path"]), temp)\n'
-        '        if not os.path.lexists(path):\n'
-        '            with open(path, "wb") as competing:\n'
-        '                competing.write(b"schema_version = 1\\n")\n'  # a prefix of the intended marker
-        'operations.Runtime.store = store\n')
+        self.refused_twice(competing)
 
     def test_refused_collision_with_a_prefix_match_is_kept_across_retries(self):
+        result = self.child_add(self.competitor_prelude(b'schema_version = 1\n'), *self.ARGS)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        if result.returncode:
+            self.assertEqual(self.marker.read_bytes(), self.original)
+        else:
+            self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
         competing = self.alpha / temp_name()
-        text, head = self.marker.read_bytes(), git(self.root, 'rev-parse', 'HEAD')
-        first = self.child_add(self.COMPETING_PREFIX, 'recipe-idea', '--description', 'One idea')
-        self.assertNotEqual(first.returncode, 0, first.stdout)
         self.assertEqual(competing.read_bytes(), b'schema_version = 1\n')
-        self.add('recipe-idea', '--description', 'One idea', ok=False)
-        self.assertEqual(competing.read_bytes(), b'schema_version = 1\n')
-        self.assertEqual(self.marker.read_bytes(), text)
-        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
-
-    def test_crash_right_after_the_exclusive_create_leaves_an_empty_file_the_retry_removes(self):
-        prelude = 'import os\nos.write = lambda fd, data: os._exit(9)\n'
-        crashed = self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
-        self.assertEqual(crashed.returncode, 9, crashed.stderr)
-        (leftover,) = self.alpha.glob('.pisar-*.tmp')
-        self.assertEqual(leftover.read_bytes(), b'')
-        self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
-        self.clean()
-        self.assertEqual(list(self.alpha.glob('.pisar-*')), [])
+        self.refused_twice(competing)
 
     def test_old_style_journal_without_the_acquisition_record_keeps_a_nonempty_leftover(self):
-        prelude = (
-            'import os\n'
-            'real_write = os.write\n'
-            'def write(fd, data):\n'
-            '    real_write(fd, bytes(data)[: len(bytes(data)) // 2])\n'
-            '    os._exit(9)\n'
-            'os.write = write\n')
-        self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
-        (leftover,) = self.alpha.glob('.pisar-*.tmp')
-        partial = leftover.read_bytes()
-        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'):
-            data = json.loads(journal.read_text())
-            data.pop('temp_acquired', None)
-            journal.write_text(json.dumps(data))
-        self.assertTrue(partial)
-        self.add('recipe-idea', '--description', 'One idea', ok=False)
-        self.assertEqual(leftover.read_bytes(), partial)
+        leftover = self.legacy_interrupted_add(b'schema_version = 1\n', acquired=None)
+        self.refused_twice(leftover)
 
-    def test_kill_during_the_write_leaves_a_prefix_that_the_retry_recovers(self):
-        prelude = (
-            'import os\n'
-            'real_write = os.write\n'
-            'def write(fd, data):\n'
-            '    data = bytes(data)\n'
-            '    if b"[types.recipe-idea]" in data:\n'
-            '        real_write(fd, data[: len(data) // 2])\n'  # half of the intended bytes reach the file
-            '        os._exit(9)\n'
-            '    return real_write(fd, data)\n'
-            'os.write = write\n')
-        original = self.marker.read_bytes()
-        head = git(self.root, 'rev-parse', 'HEAD')
-        crashed = self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
-        self.assertEqual(crashed.returncode, 9, crashed.stderr)
-        self.assertEqual(self.marker.read_bytes(), original)
-        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
-        (leftover,) = self.alpha.glob('.pisar-*.tmp')
-        self.assertTrue(leftover.read_bytes())  # a non-empty partial write, not a completed one
-        self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
-        self.clean()
-        self.assertEqual(list(self.alpha.glob('.pisar-*')), [])
-        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+    def test_legacy_competitor_matrix_is_preserved_across_retries(self):
+        for acquired in (None, False, True):
+            for content in (b'independent user draft\n', b'schema_version = 1\n',
+                            self.original + b'\n[types.recipe-idea]\ndescription = "One idea"\n'):
+                with self.subTest(acquired=acquired, content=content):
+                    head = git(self.root, 'rev-parse', 'HEAD')
+                    try:
+                        leftover = self.legacy_interrupted_add(content, acquired)
+                        self.refused_twice(leftover)
+                    finally:
+                        if leftover.exists(): leftover.unlink()
+                        git(self.root, 'reset', '--hard', head)
+                        self.journal_data()[0].unlink()
 
-    def test_tracked_user_file_at_the_temp_path_is_refused_and_kept(self):
-        user = self.alpha / temp_name()
-        user.write_text('my tracked draft\n')
-        commit_all(self.root)
-        head, text = git(self.root, 'rev-parse', 'HEAD'), self.marker.read_bytes()
-        self.add('recipe-idea', '--description', 'One idea', ok=False)
-        self.assertEqual(user.read_text(), 'my tracked draft\n')
-        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
-        self.assertEqual(self.marker.read_bytes(), text)
-        self.clean()
+    def test_tracked_user_file_at_the_temp_path_is_preserved_on_new_add(self):
+        self.test_new_add_preserves_tracked_legacy_temp_name()
 
-    def test_ignored_user_file_at_the_temp_path_is_refused_and_kept(self):
+    def test_ignored_user_file_at_the_temp_path_is_preserved_on_new_add(self):
         (self.root / '.gitignore').write_text('.pisar-*\n')
         commit_all(self.root)
         user = self.alpha / temp_name()
-        user.write_text('my ignored notes\n')
-        text = self.marker.read_bytes()
-        self.add('recipe-idea', '--description', 'One idea', ok=False)
-        self.assertEqual(user.read_text(), 'my ignored notes\n')
-        self.assertEqual(self.marker.read_bytes(), text)
+        user.write_bytes(b'my ignored notes\n')
+        self.add(*self.ARGS)
+        self.assertEqual(user.read_bytes(), b'my ignored notes\n')
+        self.clean()
 
-    def test_symlink_at_the_temp_path_is_refused_and_its_target_kept(self):
+    def test_symlink_at_the_temp_path_is_preserved_on_new_add(self):
         (self.root / '.gitignore').write_text('.pisar-*\n')
         commit_all(self.root)
         target = self.base / 'external.txt'
-        target.write_text('outside the wiki\n')
-        (self.alpha / temp_name()).symlink_to(target)
-        text = self.marker.read_bytes()
-        self.add('recipe-idea', '--description', 'One idea', ok=False)
-        self.assertTrue((self.alpha / temp_name()).is_symlink())
-        self.assertEqual(target.read_text(), 'outside the wiki\n')
-        self.assertEqual(self.marker.read_bytes(), text)
+        target.write_bytes(b'outside the wiki\n')
+        user = self.alpha / temp_name()
+        user.symlink_to(target)
+        self.add(*self.ARGS)
+        self.assertTrue(user.is_symlink())
+        self.assertEqual(os.readlink(user), str(target))
+        self.assertEqual(target.read_bytes(), b'outside the wiki\n')
+        self.clean()
+
+    def test_occupied_legacy_paths_are_refused_without_changes(self):
+        for kind in ('tracked', 'ignored', 'symlink', 'directory'):
+            with self.subTest(kind=kind):
+                (self.root / '.gitignore').write_text('.pisar-*\n')
+                commit_changes(self.root)
+                target = self.base / 'external.txt'
+                target.write_bytes(b'external bytes\n')
+                user = self.alpha / temp_name()
+                if kind == 'tracked':
+                    user.write_bytes(b'tracked draft\n')
+                    git(self.root, 'add', '-f', '--', str(user))
+                    git(self.root, 'commit', '-qm', 'fixture tracked draft')
+                self.legacy_interrupted_add(None)
+                if kind == 'ignored': user.write_bytes(b'ignored draft\n')
+                if kind == 'symlink': user.symlink_to(target)
+                if kind == 'directory': user.mkdir()
+                before = self.snapshot() if kind == 'directory' else self.snapshot(user)
+                for _ in range(2):
+                    result = self.add(*self.ARGS, ok=False)
+                    self.assertIn('temporary path', result.stderr)
+                    self.assertEqual(self.snapshot() if kind == 'directory' else self.snapshot(user), before)
+                    self.assertEqual(target.read_bytes(), b'external bytes\n')
+                    if kind == 'directory': self.assertTrue(user.is_dir())
+                if kind == 'directory': user.rmdir()
+                else: user.unlink()
+                if kind == 'tracked': commit_all(self.root)
+                self.journal_data()[0].unlink()
+
+    def test_malformed_legacy_temp_names_are_refused(self):
+        self.interrupted_add(*self.ARGS)
+        path, journal = self.journal_data()
+        for temp in ('', '.', '..', '../draft', 'nested/draft', 'nested\\draft', 42):
+            with self.subTest(temp=temp):
+                journal['temp'] = temp
+                path.write_text(json.dumps(journal))
+                self.refused_twice()
 
     def test_leftover_that_became_a_tracked_user_file_is_kept_on_retry(self):
         leftover = self.crash_leftover()
@@ -649,6 +799,82 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         self.assertEqual(git(self.root, 'ls-files', '-u', '--', 'work/team/alpha/.wiki.toml'), staged)
         self.assertEqual(self.marker.read_bytes(), final)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_real_cached_three_way_conflict_is_preserved_on_resume(self):
+        relative = 'work/team/alpha/.wiki.toml'
+        self.marker.write_bytes(self.original.replace(b'kind = "project"', b'kind = "resource"'))
+        patch_bytes = subprocess.run(['git', '-C', str(self.root), 'diff', '--full-index', '--binary'],
+                                     capture_output=True, check=True).stdout
+        self.marker.write_bytes(self.original)
+        self.interrupted_add(*self.ARGS)
+        final = self.marker.read_bytes()
+        self.marker.write_bytes(final.replace(b'kind = "project"', b'kind = "area"'))
+        git(self.root, 'add', '--', relative)
+        applied = subprocess.run(['git', '-C', str(self.root), 'apply', '--3way', '--cached'],
+                                 input=patch_bytes, capture_output=True)
+        self.assertNotEqual(applied.returncode, 0, applied.stderr)
+        stages = git(self.root, 'ls-files', '--stage', '--', relative)
+        self.assertEqual([line.split('\t')[0].split()[2] for line in stages.splitlines()], ['1', '2', '3'])
+        self.marker.write_bytes(final)
+        self.assertIn('unresolved merge', self.refused_twice().stderr)
+
+    def module_interruption(self, module, window):
+        prelude = (
+            'import os\nimport pisar.gitops as gitops\nreal_commit = gitops.commit\n'
+            'def commit(repo, *a, **k):\n'
+            '    result = real_commit(repo, *a, **k)\n'
+            f'    if str(repo) == {str(module if window == "child" else self.root)!r}: os._exit(9)\n'
+            '    return result\n'
+            'gitops.commit = commit\n')
+        code = prelude + 'from pisar.cli import main\nimport sys\nsys.exit(main(sys.argv[1:]))\n'
+        return subprocess.run(
+            [sys.executable, '-c', code, '--root', str(self.root), '--state-dir', str(self.state),
+             'space', 'type', 'add', 'work/module', *self.ARGS],
+            cwd=CHECKOUT, env={**self.env, 'PYTHONPATH': str(CHECKOUT)}, capture_output=True, text=True)
+
+    def test_ancestor_stale_indexes_resume_without_duplicate_commits(self):
+        module = self.add_submodule()
+        for window in ('child', 'parent'):
+            with self.subTest(window=window):
+                parent_head = git(self.root, 'rev-parse', 'HEAD')
+                child_head = git(module, 'rev-parse', 'HEAD')
+                parent_count = int(git(self.root, 'rev-list', '--count', 'HEAD'))
+                child_count = int(git(module, 'rev-list', '--count', 'HEAD'))
+                crashed = self.module_interruption(module, window)
+                self.assertEqual(crashed.returncode, 9, crashed.stderr)
+                git(module, 'read-tree', child_head)
+                git(self.root, 'read-tree', parent_head)
+                self.data('space', 'type', 'add', 'work/module', *self.ARGS)
+                self.assertEqual(int(git(module, 'rev-list', '--count', 'HEAD')), child_count + 1)
+                self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), parent_count + 1)
+                self.clean(module)
+                self.clean()
+                self.assertEqual((module / '.wiki.toml').read_text().count('[types.recipe-idea]'), 1)
+                git(module, 'reset', '--hard', child_head)
+                git(self.root, 'reset', '--hard', parent_head)
+                self.journal_data()[0].unlink()
+
+    def test_ancestor_unmerged_gitlink_is_refused_and_preserved(self):
+        module = self.add_submodule()
+        crashed = self.module_interruption(module, 'child')
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        old = git(module, 'rev-parse', 'HEAD~1')
+        new = git(module, 'rev-parse', 'HEAD')
+        git(self.root, 'rm', '--cached', '-q', '--', 'work/module')
+        lines = ''.join(f'160000 {sha} {stage}\twork/module\n'
+                        for stage, sha in ((1, old), (2, new), (3, old)))
+        subprocess.run(['git', '-C', str(self.root), 'update-index', '--index-info'],
+                       input=lines, text=True, check=True)
+        child_before = (git(module, 'rev-parse', 'HEAD'), git(module, 'ls-files', '--stage'),
+                        git(module, 'status', '--porcelain'), (module / '.wiki.toml').read_bytes())
+        before = self.snapshot()
+        for _ in range(2):
+            result = self.cli('space', 'type', 'add', 'work/module', *self.ARGS, ok=False)
+            self.assertIn('unresolved merge', result.stderr)
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual((git(module, 'rev-parse', 'HEAD'), git(module, 'ls-files', '--stage'),
+                              git(module, 'status', '--porcelain'), (module / '.wiki.toml').read_bytes()),
+                             child_before)
 
     def test_nested_owner_commits_the_child_then_the_parent_gitlink(self):
         module = self.add_submodule()

@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import stat
 import tomllib
 import unicodedata
 from . import gitops
@@ -714,47 +713,17 @@ def _refuse_staged_extras(wiki, journal, op, repo, relative):
                             'write; nothing was changed. Unstage it (git restore --staged) and retry')
 
 
-def _write_reserved(marker, temp, data, acquired):
-    """Write DATA over MARKER through TEMP, a file this call creates exclusively. An existing occupant is never
-    unlinked or followed (O_EXCL and O_NOFOLLOW), so a file another process created after the journal named TEMP
-    makes the write refuse and stays as it is. ACQUIRED runs once the file is ours, before any byte is written."""
+def _refuse_legacy_type_temp(marker, journal):
+    """A legacy pathname records intent, not ownership of its current occupant."""
+    temp = journal.get('temp')
+    if temp is None:
+        return
+    if not isinstance(temp, str) or not temp or temp in ('.', '..') or '/' in temp or '\\' in temp:
+        raise WikiError('invalid temporary path in interrupted operation; nothing was changed')
     path = marker.parent / temp
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-                     stat.S_IMODE(marker.stat().st_mode))
-    except FileExistsError:
-        raise WikiError(f'{path.name} already exists beside {marker.name} and is reserved for this operation; '
-                        'nothing was replaced. Move or remove it and retry') from None
-    try:
-        acquired()
-        view = memoryview(data)
-        while view:  # os.write may store fewer bytes than asked: keep going until all are on disk
-            view = view[os.write(fd, view):]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(path, marker)
-
-
-def _remove_leftover(wiki, repo, marker, temp, final, acquired):
-    """Remove the journaled temporary file of an interrupted marker write. Only an untracked plain file goes:
-    one pisar acquired (ACQUIRED) whose bytes are a prefix of FINAL, or any empty file. A file pisar never
-    acquired (its exclusive create was refused, or the crash came first) is kept unless it is empty."""
-    if not temp:
-        return
-    leftover = marker.parent / temp
-    if not os.path.lexists(leftover):
-        return
-    relative = leftover.relative_to(repo).as_posix()
-    if leftover.is_symlink() or not leftover.is_file():
-        raise WikiError(f'{relative} is not a plain file; nothing was changed')
-    if _index_records(repo, relative) or _tree_entry(repo, relative, 'HEAD'):
-        raise WikiError(f'{relative} is tracked, so it is not a leftover of the interrupted operation; '
-                        'nothing was changed')
-    data = leftover.read_bytes()
-    if data and not (acquired and final.encode('utf-8').startswith(data)):
-        raise WikiError(f'{relative} holds bytes pisar did not write; nothing was changed')
-    leftover.unlink()
+    if os.path.lexists(path):
+        raise WikiError(f'{path}: temporary path from an interrupted operation is occupied; nothing was '
+                        'changed. Inspect and move it aside explicitly, then retry')
 
 
 def space_type_list(wiki, value, domains=None):
@@ -790,11 +759,10 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
     def body(runtime, resumed):
         plan = None
         if resumed:
-            # Validate the whole resume state before any cleanup: a refused resume changes nothing.
+            # Validate the whole resume state before applying anything: a refusal changes nothing.
             _verify(wiki, op, resumed, [repo, *(parent for parent, _, _ in gitops.ancestors(repo, root))])
             _refuse_staged_extras(wiki, resumed, op, repo, rel_repo)
-            _remove_leftover(wiki, repo, marker, resumed.get('temp'), resumed['final'],
-                             resumed.get('temp_acquired', False))
+            _refuse_legacy_type_temp(marker, resumed)
         if not resumed:
             # Clean trees only, even when the declaration already exists: the command never edits a dirty space.
             _ensure_clean(repo)
@@ -821,21 +789,12 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             if reread.get(name) != decl:
                 raise WikiError(f'the appended declaration of {name} does not read back; nothing was changed')
             # The final bytes are journaled, so a resume writes exactly what was decided.
-            # The temporary name is journaled before the write, so an interrupted write leaves only a known file.
-            temp = f'.pisar-{_digest(op, rel)}.tmp'
-            if os.path.lexists(marker.parent / temp):
-                raise WikiError(f'{marker.parent.relative_to(root).as_posix()}/{temp} is reserved for this '
-                                'operation and already exists; nothing was changed. Move or remove it and retry')
-            plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'), temp=temp)
+            plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'))
 
         def apply(journal):
-            def acquired():
-                # Persisted before the first byte: a leftover without this record was never ours to write.
-                journal['temp_acquired'] = True
-                runtime.store(journal)
-
-            _write_reserved(marker, journal.get('temp') or f'.pisar-{_digest(op, rel)}.tmp',
-                            journal['final'].encode('utf-8'), acquired)
+            final = journal['final'].encode('utf-8')
+            if marker.read_bytes() != final:
+                atomic_bytes(marker, final)
             return [(repo, gitops.commit(repo, [rel_repo], op))]
 
         commits = _flow(wiki, runtime, op, intent, repo, [rel], apply, resumed, plan)
