@@ -1,11 +1,13 @@
 """Per-space record types declared in .wiki.toml, on temporary fixtures only."""
 import json
+import subprocess
+import sys
 import unittest
 
 from pisar.operations import Runtime
 from pisar.safety import WikiError
 from pisar.spaces import Wiki
-from .support import Fixture, commit_all, git, space
+from .support import CHECKOUT, Fixture, commit_all, git, space
 from .test_spacecmd import SpaceCommandFixture
 
 
@@ -368,6 +370,88 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before + 1)
         self.clean()
         self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+
+    def interrupted_add(self, *args):
+        """Interrupt an add after its marker write: HEAD back to the old commit, file and journal kept."""
+        self.add(*args)
+        git(self.root, 'reset', '-q', '--mixed', 'HEAD~1')
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+
+    def test_staged_user_edit_to_the_marker_is_refused_on_resume(self):
+        args = ('recipe-idea', '--description', 'One idea')
+        self.interrupted_add(*args)
+        final = self.marker.read_bytes()
+        # The user stages a comment, then only the working file is restored to the journaled bytes.
+        self.marker.write_bytes(final + b'# user comment\n')
+        git(self.root, 'add', '--', 'work/team/alpha/.wiki.toml')
+        self.marker.write_bytes(final)
+        staged = git(self.root, 'show', ':work/team/alpha/.wiki.toml')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        result = self.add(*args, ok=False)
+        self.assertIn('staged', result.stderr)
+        self.assertEqual(git(self.root, 'show', ':work/team/alpha/.wiki.toml'), staged)
+        self.assertEqual(self.marker.read_bytes(), final)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_stale_index_after_a_head_update_still_resumes(self):
+        args = ('recipe-idea', '--description', 'One idea')
+        self.add(*args)
+        # A crash after update-ref leaves the index at the pre-operation entries while HEAD is new.
+        git(self.root, 'read-tree', 'HEAD~1')
+        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'):
+            data = json.loads(journal.read_text())
+            data['status'] = 'incomplete'
+            journal.write_text(json.dumps(data))
+        before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
+        self.add(*args)
+        self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before)
+        self.clean()
+
+    def crash_before_the_rename(self, *args):
+        """Run the add in a child process that exits (no cleanup runs) just before the marker is renamed.
+
+        os._exit skips every finally block, exactly like a SIGKILL at that point, and touches no other process."""
+        code = (
+            'import os, sys\n'
+            'import pisar.operations as operations\n'
+            'real = os.replace\n'
+            'def replace(source, target, *a, **k):\n'
+            '    if str(target).endswith(".wiki.toml"):\n'
+            '        os._exit(9)\n'
+            '    return real(source, target, *a, **k)\n'
+            'os.replace = replace\n'
+            'from pisar.cli import main\n'
+            'sys.exit(main(sys.argv[1:]))\n')
+        return subprocess.run(
+            [sys.executable, '-c', code, '--root', str(self.root), '--state-dir', str(self.state),
+             'space', 'type', 'add', 'work/alpha', *args],
+            cwd=CHECKOUT, env={**self.env, 'PYTHONPATH': str(CHECKOUT)}, text=True, capture_output=True)
+
+    def test_crash_before_the_rename_leaves_only_its_recorded_leftover_and_resumes(self):
+        original = self.marker.read_bytes()
+        crashed = self.crash_before_the_rename('recipe-idea', '--description', 'One idea')
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        self.assertEqual(self.marker.read_bytes(), original)
+        leftovers = list(self.alpha.glob('.pisar-*'))
+        self.assertEqual(len(leftovers), 1)
+        self.assertEqual(git(self.root, 'status', '--porcelain', '--', 'work/team/alpha'), '?? work/team/alpha/.pisar-' + leftovers[0].name[len('.pisar-'):])
+        self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
+        self.clean()
+        self.assertEqual(list(self.alpha.glob('.pisar-*')), [])
+        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+
+    def test_unrelated_temp_looking_user_file_is_never_removed(self):
+        user = self.alpha / '.pisar-notes.tmp'
+        user.write_text('my own draft\n')
+        commit_all(self.root)
+        user.write_text('my draft, edited\n')
+        original = self.marker.read_bytes()
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(user.read_text(), 'my draft, edited\n')
+        self.assertEqual(self.marker.read_bytes(), original)
 
     def test_nested_owner_commits_the_child_then_the_parent_gitlink(self):
         module = self.add_submodule()

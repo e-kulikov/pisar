@@ -672,6 +672,43 @@ def _template(wiki, value):
         raise WikiError(f'template must be UTF-8 text: {value}') from None
 
 
+def _remove_leftover(marker, temp):
+    """Remove ONLY the temporary file an interrupted type-add journaled for its marker write."""
+    if not temp:
+        return
+    leftover = marker.parent / temp
+    if leftover.is_symlink():
+        raise WikiError(f'temporary path is a symlink: {leftover}')
+    if leftover.is_file():
+        leftover.unlink()
+
+
+def _index_entry(repo, relative, revision=None):
+    """(mode, object) of RELATIVE in the real index, or in REVISION's tree; None when absent."""
+    if revision is None:
+        line = gitops.run(repo, 'ls-files', '--stage', '--', relative).strip()
+    else:
+        line = gitops.run(repo, 'ls-tree', revision, '--', relative).strip()
+    if not line:
+        return None
+    fields = line.split('\t', 1)[0].split()
+    return (fields[0], fields[1] if revision is None else fields[2])
+
+
+def _refuse_staged_extras(wiki, journal, op, repo, relative):
+    """Refuse a resume when the marker or a parent gitlink is staged with content the operation did not write.
+
+    The real index may hold the pre-operation entry (interrupted before its commit) or the committed one (a
+    crash after the branch moved, before the index was synchronized). Anything else is the user's staging."""
+    checks = [(repo, relative), *((parent, link) for parent, link, _ in gitops.ancestors(repo, wiki.root))]
+    for owner, path in checks:
+        recorded = journal.get('heads', {}).get(str(owner))
+        allowed = {_index_entry(owner, path, recorded) if recorded else None, _index_entry(owner, path, 'HEAD')}
+        if _index_entry(owner, path) not in allowed:
+            raise WikiError(f'{path} in {owner} has staged content that the interrupted operation {op} did not write; '
+                            'nothing was changed. Unstage it (git restore --staged) and retry')
+
+
 def space_type_list(wiki, value, domains=None):
     space = wiki.space(value, domains)
     return dict(space=space.address, system_types=sorted(SYSTEM_TYPES),
@@ -704,6 +741,9 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
 
     def body(runtime, resumed):
         plan = None
+        if resumed:
+            _remove_leftover(marker, resumed.get('temp'))
+            _refuse_staged_extras(wiki, resumed, op, repo, rel_repo)
         if not resumed:
             # Clean trees only, even when the declaration already exists: the command never edits a dirty space.
             _ensure_clean(repo)
@@ -730,10 +770,12 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             if reread.get(name) != decl:
                 raise WikiError(f'the appended declaration of {name} does not read back; nothing was changed')
             # The final bytes are journaled, so a resume writes exactly what was decided.
-            plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'))
+            # The temporary name is journaled before the write, so an interrupted write leaves only a known file.
+            temp = f'.pisar-{_digest(op, rel)}.tmp'
+            plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'), temp=temp)
 
         def apply(journal):
-            atomic_bytes(marker, journal['final'].encode('utf-8'))
+            atomic_bytes(marker, journal['final'].encode('utf-8'), journal.get('temp'))
             return [(repo, gitops.commit(repo, [rel_repo], op))]
 
         commits = _flow(wiki, runtime, op, intent, repo, [rel], apply, resumed, plan)
