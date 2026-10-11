@@ -235,8 +235,8 @@ and `[types.NAME.fields.FIELD]` tables). Never invent a type silently.
 
 ## Commit messages: say what and why
 
-`save`, `capture`, `triage accept`, `lesson accept`, `domain add`, and `space
-create|move|archive|restore` make commits. Pass `--what` (one short line: what
+`save`, `capture`, `triage accept`, `lesson accept`, `domain add`, `space
+create|move|archive|restore`, and `space type add` make commits. Pass `--what` (one short line: what
 changed) and `--why` (the reason). Write them as plain sentences with no secrets,
 no absolute local paths and no personal data beyond what the change needs. If
 the user's configuration enables the commit-message writer, these flags are

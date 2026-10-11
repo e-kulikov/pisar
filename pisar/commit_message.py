@@ -40,9 +40,11 @@ SUBJECT = re.compile(rf'(?:{"|".join(TYPES)})(?:\([a-z0-9][a-z0-9._/-]*\))?!?: \
 # Local paths (best effort): a leading slash at a word boundary, a home shorthand, a drive letter, file: and path: URLs.
 ABSOLUTE_PATH = re.compile(r'(?:^|[\s"\'`(\[<=,;])(?:/[\w.@-]|~/|[A-Za-z]:\\)|\b(?:file|path):/', re.M)
 SECRET_CATEGORIES = ('private-key', 'jwt', 'api-token', 'credential')
-# Commands that create commits, as (command, action); their --what and --why are checked before any write.
+# Commands that create commits, as (command, action[, type action]); their --what and --why are checked before
+# any write. `space type list` writes nothing and is not here.
 COMMITTING = (('save', None), ('capture', None), ('triage', 'accept'), ('lesson', 'accept'),
-              ('domain', 'add'), ('space', 'create'), ('space', 'move'), ('space', 'archive'), ('space', 'restore'))
+              ('domain', 'add'), ('space', 'create'), ('space', 'move'), ('space', 'archive'), ('space', 'restore'),
+              ('space', 'type', 'add'))
 MISSING = 'commit messages are written by an agent when [commit_message] enabled = true: this command needs ' \
           '--what (what changed) and --why (why it changed)'
 
@@ -106,9 +108,15 @@ def _context(args):
     return plain(text, '--context-file', CONTEXT_LIMIT)
 
 
+def command_path(args):
+    """(command, action) of the parsed command, with the type action for `space type` (see COMMITTING)."""
+    path = (getattr(args, 'command', None), getattr(args, 'action', None))
+    return path + (getattr(args, 'type_action', None),) if path[1] == 'type' else path
+
+
 def explain(args):
     """Set the explanation of a committing command from its flags; the token goes to reset()."""
-    if (getattr(args, 'command', None), getattr(args, 'action', None)) not in COMMITTING:
+    if command_path(args) not in COMMITTING:
         return None
     what = plain(args.what, '--what', WHAT_LIMIT) if getattr(args, 'what', None) is not None else None
     why = plain(args.why, '--why', WHY_LIMIT) if getattr(args, 'why', None) is not None else None
