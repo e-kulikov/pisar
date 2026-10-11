@@ -77,10 +77,10 @@ def parser():
     spacecmd.add_parser(commands)
     lesson_command.add_parser(commands)
     research_command.add_parser(commands)
-    for command, action in commit_message.COMMITTING:
-        leaf = commands.choices[command]
-        if action is not None:
-            leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[action]
+    for path in commit_message.COMMITTING:
+        leaf = commands.choices[path[0]]
+        for name in (n for n in path[1:] if n is not None):
+            leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[name]
         commit_message.add_flags(leaf)
     mcp.add_parser(commands)
     return p

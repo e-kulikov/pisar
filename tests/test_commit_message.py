@@ -234,6 +234,35 @@ class Commits(Writer):
         self.config_file = Path(self.env['XDG_CONFIG_HOME']) / 'pisar' / 'config.toml'
         self.env = {**self.env, 'PATH': self.path}
 
+    TYPE_ADD = ('space', 'type', 'add', 'work/alpha', 'recipe-idea', '--description', 'One idea for a recipe')
+
+    def test_space_type_add_explanation_is_the_commit_body_when_the_writer_is_disabled(self):
+        self.cli(*self.TYPE_ADD, '--what', 'Declare the idea type', '--why', 'Notes need a shape.')
+        subject, _, body = git(self.root, 'log', '-1', '--format=%s%n%n%b').partition('\n\n')
+        self.assertTrue(subject.startswith('wiki: space-type-add-work-alpha-recipe-idea-'), subject)
+        self.assertEqual(body.strip(), 'Declare the idea type\n\nNotes need a shape.')
+        self.assertEqual(self.calls(), [])
+
+    def test_space_type_add_is_refused_without_what_when_enabled(self):
+        self.enable()
+        head = git(self.root, 'rev-parse', 'HEAD')
+        failed = self.cli(*self.TYPE_ADD, '--why', 'Notes need a shape.', ok=False)
+        self.assertIn('--what', failed.stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(self.calls(), [])
+
+    def test_space_type_add_with_the_writer_enabled_commits_the_writers_message(self):
+        self.enable()
+        self.cli(*self.TYPE_ADD, '--what', 'Declare the idea type', '--why', 'Notes need a shape.')
+        self.assertEqual(git(self.root, 'log', '-1', '--format=%s'), SUBJECT)
+        self.assertIn('Pisar-Operation: space-type-add-work-alpha-recipe-idea-', git(self.root, 'log', '-1', '--format=%B'))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_space_type_list_needs_no_explanation_when_enabled(self):
+        self.enable()
+        self.data('space', 'type', 'list', 'work/alpha')
+
     def enable(self, text='[commit_message]\nenabled = true\n'):
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.config_file.write_text(text)
@@ -362,30 +391,31 @@ class CommittingCommands(unittest.TestCase):
         from argparse import _SubParsersAction
         from pisar import cli
         found = set()
-        top = cli.parser()
-        for action in top._actions:
-            if not isinstance(action, _SubParsersAction):
-                continue
-            for command, parser in action.choices.items():
-                if any('--what' in a.option_strings for a in parser._actions):
-                    found.add((command, None))
-                for sub in parser._actions:
-                    if isinstance(sub, _SubParsersAction):
-                        for name, leaf in sub.choices.items():
-                            if any('--what' in a.option_strings for a in leaf._actions):
-                                found.add((command, name))
+
+        def walk(parser, path):
+            for action in parser._actions:
+                if not isinstance(action, _SubParsersAction):
+                    continue
+                for name, child in action.choices.items():
+                    if any('--what' in a.option_strings for a in child._actions):
+                        found.add((*path, name) if path else (name, None))
+                    walk(child, (*path, name))
+
+        walk(cli.parser(), ())
         return found
 
     def test_the_explanation_flags_are_exactly_on_the_committing_commands(self):
         self.assertEqual(self.leaves(), set(commit_message.COMMITTING))
 
     def test_every_committing_command_refuses_a_missing_explanation_when_enabled(self):
-        for command, action in commit_message.COMMITTING:
-            with self.subTest(command=command, action=action), \
+        for path in commit_message.COMMITTING:
+            command, action = path[0], path[1]
+            type_action = path[2] if len(path) > 2 else None
+            with self.subTest(path=path), \
                     mock.patch.object(settings, 'commit_message', return_value=dict(
                         config.COMMIT_MESSAGE_DEFAULTS, enabled=True)):
-                args = Namespace(command=command, action=action, what=None, why=None, context=None,
-                                 context_file=None)
+                args = Namespace(command=command, action=action, type_action=type_action, what=None, why=None,
+                                 context=None, context_file=None)
                 with self.assertRaisesRegex(WikiError, '--what'):
                     commit_message.explain(args)
 

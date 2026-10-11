@@ -134,6 +134,11 @@ class SaveTests(Fixture):
             self.assertFalse((self.alpha / 'meetings').exists())
 
     def test_explicit_derived_note_update_requires_matching_base_hash(self):
+        # The derived pages are typed `overview` and `note`, which the owning space must declare.
+        with (self.alpha / '.wiki.toml').open('a') as marker:
+            marker.write('[types.overview]\ndescription = "Current overview"\n\n'
+                         '[types.note]\ndescription = "Reusable knowledge"\n')
+        commit_all(self.root)
         existing = self.alpha / 'overview.md'
         existing.write_text(document('current-overview', 'work/alpha', body='Old knowledge.').replace('"meeting"', '"overview"'))
         commit_all(self.root)

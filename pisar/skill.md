@@ -37,10 +37,10 @@ validation fails.
 - **Document**: Markdown with TOML front matter between `+++` lines. Required
   keys include `schema_version`, `id`, `type`, `title`, `space_ids` (addresses:
   owner first, then related spaces of the same domain) and `sources` (possibly
-  empty). Types:
-  `source`, `meeting`, `overview`, `decision`, `note`, `recipe`, `movie`,
-  `series`, `book`. Timestamps are quoted RFC 3339 with an explicit offset or
-  `Z`; omit values you do not know instead of inventing them.
+  empty). Types: `source` and `meeting` are system types pisar writes. Every
+  other type is declared by its space in `.wiki.toml`; run `pisar space type
+  list ADDRESS` to see them. Timestamps are quoted RFC 3339 with an explicit
+  offset or `Z`; omit values you do not know instead of inventing them.
 - **Reference**: `wiki:<domain>/<space-id>:<document-id>`, optionally
   `#fragment`. Stable across moving a space inside its domain. Document IDs are
   unique per owner. `pisar check` reports the old `wiki:<space-id>:<document-id>`
@@ -195,6 +195,8 @@ pisar space find launch [--include acme]
 pisar space move acme/launch-plan --to area
 pisar space archive acme/launch-plan
 pisar space restore acme/launch-plan
+pisar space type list acme/launch-plan
+pisar space type add acme/launch-plan recipe-idea --description '...' [--template-file F]
 ```
 
 Each is one local commit, safe to retry with the same inputs (`"changed": false`
@@ -208,10 +210,33 @@ only: confirm the location with the user first. `space move` stays inside the
 domain; it refuses a dirty tree, an existing target or an unfinished operation
 on that space, and `ruwana` tasks follow the directory.
 
+## Record types per space
+
+A document type other than `source` and `meeting` must be declared by its
+space in `.wiki.toml` (`[types.NAME]` with a `description`, optional `template`
+and `[types.NAME.fields.FIELD]` tables). Never invent a type silently.
+
+- To choose a type, run `pisar space type list ADDRESS` and read the space's
+  `kind`, its README and a few of its documents. Prefer a declared type that
+  fits.
+- When a save or capture is refused as an undeclared type, the error lists the
+  declared types. Either map the record to the closest declared type, or propose
+  a new one. A proposal has a name, a one-line description, optional fields and
+  a template.
+- Draft the template for the family of records the user is saving, one level up:
+  for a single recipe idea, propose "idea about a dish" (title, ingredients,
+  source, status), not a template fitted to that one dish.
+- Show the proposal to the user. Apply it only after they agree, with
+  `pisar space type add ADDRESS NAME --description '...' [--template-file F]
+  [--field NAME:TYPE[:required]]`. Write the template to a file outside the wiki
+  first. The command refuses a dirty tree and a conflicting redeclaration.
+- Date fields take quoted `"YYYY-MM-DD"` strings. A required field must be
+  present; an empty value still counts as present.
+
 ## Commit messages: say what and why
 
-`save`, `capture`, `triage accept`, `lesson accept`, `domain add`, and `space
-create|move|archive|restore` make commits. Pass `--what` (one short line: what
+`save`, `capture`, `triage accept`, `lesson accept`, `domain add`, `space
+create|move|archive|restore`, and `space type add` make commits. Pass `--what` (one short line: what
 changed) and `--why` (the reason). Write them as plain sentences with no secrets,
 no absolute local paths and no personal data beyond what the change needs. If
 the user's configuration enables the commit-message writer, these flags are

@@ -15,7 +15,7 @@ from . import gitops
 from . import operations
 from .operations import Runtime, atomic_bytes, fingerprint
 from .safety import WikiError, address, concrete_id, safe_path, sha256
-from .spaces import LAYOUT, Wiki, load_domain
+from .spaces import FIELD_TYPES, LAYOUT, SYSTEM_TYPES, Wiki, load_domain, parse_type, parse_types
 
 COMMANDS = ('domain', 'space')
 KINDS = ('project', 'area', 'resource')
@@ -53,6 +53,18 @@ def add_parser(commands):
     for name, verb in (('archive', 'Mark a space archived and move it to the domain archive folder'),
                        ('restore', 'Mark an archived space active and move it back to its kind folder')):
         actions.add_parser(name, help=verb).add_argument('address', help='domain/id')
+    record_types = actions.add_parser('type', help='List and add the record types a space declares')
+    type_actions = record_types.add_subparsers(dest='type_action', required=True)
+    type_actions.add_parser('list', help='Print the system types and the types a space declares') \
+        .add_argument('address', help='domain/id')
+    declare = type_actions.add_parser('add', help='Declare a record type in .wiki.toml (one journaled commit)')
+    declare.add_argument('address', help='domain/id')
+    declare.add_argument('name', help='Type name: lowercase letters, digits and dashes')
+    declare.add_argument('--description', required=True, help='One line saying what the records are')
+    declare.add_argument('--template-file', help='Markdown skeleton for new records, read as UTF-8; '
+                                                 'must lie outside the wiki')
+    declare.add_argument('--field', action='append', metavar='NAME:TYPE[:required]',
+                         help=f'Front-matter field; TYPE is one of {"/".join(FIELD_TYPES)}; repeatable')
 
 
 def run(args, ctx):
@@ -66,6 +78,11 @@ def run(args, ctx):
         return space_create(wiki, state, args.domain, args.kind, args.title, args.id)
     if args.action == 'find':
         return space_find(wiki, args.text, ctx.domains)
+    if args.action == 'type':
+        if args.type_action == 'list':
+            return space_type_list(wiki, args.address, ctx.domains)
+        return space_type_add(wiki, state, args.address, args.name, args.description, args.template_file,
+                              args.field or [], ctx.domains)
     if args.action == 'move':
         return relocate(wiki, state, 'move', args.address, args.to)
     return relocate(wiki, state, args.action, args.address)
@@ -613,5 +630,193 @@ def relocate(wiki, state_dir, action, value, to=None):
                 plan['pairs'].append([f'{old_rel}/{inner}', f'{new_rel}/{inner}'])
         done = _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, plan)
         return dict(space=_record(root, value), changed=True, commits=done)
+
+    return _locked(wiki, state_dir, op, intent, body)
+
+
+# --- record types -----------------------------------------------------------
+
+def _toml_string(value):
+    """A TOML basic string holding VALUE exactly, with every control character escaped."""
+    escapes = {'"': '\\"', '\\': '\\\\', '\b': '\\b', '\t': '\\t', '\n': '\\n', '\f': '\\f', '\r': '\\r'}
+    body = ''.join(escapes.get(c) or (f'\\u{ord(c):04x}' if ord(c) < 0x20 or ord(c) == 0x7f else c)
+                   for c in value)
+    return f'"{body}"'
+
+
+def _toml_key(name):
+    return name if re.fullmatch(r'[A-Za-z0-9_-]+', name) else _toml_string(name)
+
+
+def _declaration_text(decl):
+    """The tables declaring DECL, spelled the same way every time so identical inputs give identical bytes."""
+    key = _toml_key(decl.name)
+    lines = [f'[types.{key}]', f'description = {_toml_string(decl.description)}']
+    if decl.template is not None:
+        lines.append(f'template = {_toml_string(decl.template)}')
+    for field in decl.fields:
+        lines += ['', f'[types.{key}.fields.{_toml_key(field.name)}]', f'type = {_toml_string(field.type)}',
+                  f'required = {"true" if field.required else "false"}']
+        if field.values is not None:
+            values = [_toml_string(v) if isinstance(v, str) else str(v) for v in field.values]
+            lines.append(f'values = [{", ".join(values)}]')
+    return '\n'.join(lines) + '\n'
+
+
+def _field_argument(value):
+    parts = value.split(':')
+    if len(parts) not in (2, 3) or (len(parts) == 3 and parts[2] != 'required') or not parts[0].strip():
+        raise WikiError(f'--field expects NAME:TYPE or NAME:TYPE:required, got {value!r}')
+    return parts[0], dict(type=parts[1], required=len(parts) == 3)
+
+
+def _template(wiki, value):
+    """The template text of --template-file; a symlink, or a file inside the wiki, is refused."""
+    if value is None:
+        return None
+    path = Path(value).absolute()
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise WikiError(f'template {value} is a symlink or lies below one; refused')
+    if not path.is_file():
+        raise WikiError(f'template must be a regular file: {value}')
+    if path.resolve().is_relative_to(wiki.root):
+        raise WikiError('a template inside the wiki is refused (it could cross a domain boundary); '
+                        'copy it outside the wiki first')
+    try:
+        return path.read_bytes().decode('utf-8')
+    except UnicodeDecodeError:
+        raise WikiError(f'template must be UTF-8 text: {value}') from None
+
+
+def _index_records(repo, relative):
+    """Every (stage, mode, object) the real index holds for RELATIVE: unmerged stages included."""
+    records = []
+    for line in gitops.run(repo, 'ls-files', '--stage', '--', relative).splitlines():
+        meta, _ = line.split('\t', 1)
+        mode, sha, stage = meta.split()
+        records.append((int(stage), mode, sha))
+    return records
+
+
+def _tree_entry(repo, relative, revision):
+    """(mode, object) of RELATIVE in REVISION's tree, or None."""
+    line = gitops.run(repo, 'ls-tree', revision, '--', relative).strip()
+    if not line:
+        return None
+    mode, _, sha = line.split('\t', 1)[0].split()
+    return (mode, sha)
+
+
+def _refuse_staged_extras(wiki, journal, op, repo, relative):
+    """Refuse a resume unless the marker and each parent gitlink have exactly one stage-0 index entry that
+    is the pre-operation or the committed one (a crash past update-ref leaves the former, a crash before the
+    index sync the latter). Unmerged stages and any other staged content are the user's and are not touched."""
+    checks = [(repo, relative), *((parent, link) for parent, link, _ in gitops.ancestors(repo, wiki.root))]
+    for owner, path in checks:
+        recorded = journal.get('heads', {}).get(str(owner))
+        if recorded is None:
+            raise WikiError(f'no recorded baseline for {path} in {owner}; nothing was changed')
+        # A commit this run already checkpointed moved the recorded head on: its parent is pre-operation too.
+        before = [entry['commit'] + '^' for entry in journal.get('commits', []) if entry['repo'] == str(owner)]
+        records = _index_records(owner, path)
+        if any(stage for stage, _, _ in records):
+            raise WikiError(f'{path} in {owner} has an unresolved merge (stages 1-3) left by the user; the '
+                            f'interrupted operation {op} did not write it. Nothing was changed; resolve it '
+                            'and retry')
+        if len(records) != 1:
+            raise WikiError(f'{path} in {owner} has {len(records)} index entries, not one; nothing was changed')
+        _, mode, sha = records[0]
+        if (mode, sha) not in {_tree_entry(owner, path, rev) for rev in (recorded, 'HEAD', *before)}:
+            raise WikiError(f'{path} in {owner} has staged content that the interrupted operation {op} did not '
+                            'write; nothing was changed. Unstage it (git restore --staged) and retry')
+
+
+def _refuse_legacy_type_temp(marker, journal):
+    """A legacy pathname records intent, not ownership of its current occupant."""
+    temp = journal.get('temp')
+    if temp is None:
+        return
+    if not isinstance(temp, str) or not temp or temp in ('.', '..') or '/' in temp or '\\' in temp:
+        raise WikiError('invalid temporary path in interrupted operation; nothing was changed')
+    path = marker.parent / temp
+    if os.path.lexists(path):
+        raise WikiError(f'{path}: temporary path from an interrupted operation is occupied; nothing was '
+                        'changed. Inspect and move it aside explicitly, then retry')
+
+
+def space_type_list(wiki, value, domains=None):
+    space = wiki.space(value, domains)
+    return dict(space=space.address, system_types=sorted(SYSTEM_TYPES),
+                declared_types=[space.types[name].record() for name in sorted(space.types)])
+
+
+def space_type_add(wiki, state_dir, value, name, description, template_file, fields, domains=None):
+    space = wiki.space(value, domains)
+    raw = dict(description=description)
+    template = _template(wiki, template_file)
+    if template is not None:
+        raw['template'] = template
+    declared = {}
+    for item in fields:
+        field, spec = _field_argument(item)
+        if field in declared:
+            raise WikiError(f'duplicate --field {field}')
+        declared[field] = spec
+    if declared:
+        raw['fields'] = declared
+    decl = parse_type(name, raw)
+    root = wiki.root
+    marker = safe_path(root, f'{space.path.relative_to(root).as_posix()}/.wiki.toml')
+    rel = marker.relative_to(root).as_posix()
+    repo = gitops.owner(marker, root)
+    rel_repo = marker.relative_to(repo).as_posix()
+    text = _declaration_text(decl)
+    op = f'space-type-add-{space.domain}-{space.id}-{name}-{_digest(value, name, text)}'
+    intent = dict(action='type-add', address=value, declaration=text)
+
+    def body(runtime, resumed):
+        plan = None
+        if resumed:
+            # Validate the whole resume state before applying anything: a refusal changes nothing.
+            # The staged check reads the pre-operation heads, which recovery (in _verify) rewrites: run it first.
+            _refuse_staged_extras(wiki, resumed, op, repo, rel_repo)
+            _verify(wiki, runtime, op, resumed, [repo, *(parent for parent, _, _ in gitops.ancestors(repo, root))])
+            _refuse_legacy_type_temp(marker, resumed)
+        if not resumed:
+            # Clean trees only, even when the declaration already exists: the command never edits a dirty space.
+            _ensure_clean(repo)
+            for parent, _, _ in gitops.ancestors(repo, root):
+                _ensure_clean(parent)
+            if blocker := _blocking(runtime, rel, op):
+                raise WikiError(f'incomplete operation {blocker} touches {rel}; finish or roll it back first')
+            problems = gitops.attribute_problems(repo, rel_repo)
+            if problems:
+                raise WikiError(f'Git would not store {rel} byte for byte ({", ".join(problems)}); nothing was changed')
+            old = marker.read_bytes()
+            known = parse_types(tomllib.loads(old.decode('utf-8')))
+            if name in known:
+                if known[name] == decl:
+                    return dict(space=value, type=decl.record(), changed=False, commits=[])
+                raise WikiError(f'{value} already declares {name} differently; there is no remove or modify '
+                                'command, so nothing was changed')
+            separator = b'' if not old or old.endswith(b'\n') else b'\n'
+            new = old + separator + (b'\n' if old else b'') + text.encode('utf-8')
+            try:
+                reread = parse_types(tomllib.loads(new.decode('utf-8')))
+            except (tomllib.TOMLDecodeError, WikiError) as error:
+                raise WikiError(f'cannot append [types.{name}] to {rel}: {error}; nothing was changed') from None
+            if reread.get(name) != decl:
+                raise WikiError(f'the appended declaration of {name} does not read back; nothing was changed')
+            # The final bytes are journaled, so a resume writes exactly what was decided.
+            plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'))
+
+        def apply(journal):
+            final = journal['final'].encode('utf-8')
+            if marker.read_bytes() != final:
+                atomic_bytes(marker, final)
+            _commit(wiki, runtime, journal, repo, [rel_repo], op)
+
+        commits = _flow(wiki, runtime, op, intent, repo, [rel], apply, resumed, plan)
+        return dict(space=value, type=decl.record(), changed=True, commits=commits)
 
     return _locked(wiki, state_dir, op, intent, body)

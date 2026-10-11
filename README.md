@@ -474,8 +474,10 @@ occurred_at = "2026-10-04T11:00:00+02:00"
 
 `space_ids` holds addresses: the actual owner first, then related spaces in the
 same domain.
-Supported types: `source`, `meeting`, `overview`, `decision`, `note`, `recipe`,
-`movie`, `series`, `book`. Ordinary personal topic knowledge can use `note`.
+Types: `source` and `meeting` are system types that pisar writes; every other
+type is declared by its space in `.wiki.toml` (see
+[Record types per space](#record-types-per-space)). A document whose type its
+space does not declare is refused.
 `sources` is an array, possibly empty. Local source paths are relative to the
 owning space; a `#timestamp-or-fragment` is optional. Stable wiki references can
 also carry fragments. URLs and `urn:` identifiers are retained as provenance;
@@ -508,6 +510,8 @@ pisar space find launch --include acme
 pisar space move acme/launch-plan --to area
 pisar space archive acme/launch-plan
 pisar space restore acme/launch-plan
+pisar space type list acme/launch-plan
+pisar space type add acme/launch-plan recipe-idea --description 'One idea for a recipe'
 ```
 
 Every write here holds the writer lock, requires clean Git trees (the owning
@@ -552,6 +556,63 @@ gitlink) and can be retried with the same inputs: a finished operation reports
 - `space archive ADDRESS` sets `status = "archived"` and moves the directory to
   `<layout.archive>/`; `space restore ADDRESS` sets it back to `active` and moves
   it to the folder of its (unchanged) kind.
+- `space type list ADDRESS` prints the system types and the record types the
+  space declares, with their fields and templates. It writes nothing.
+- `space type add ADDRESS NAME --description TEXT [--template-file PATH]
+  [--field NAME:TYPE[:required]]...` appends the declaration to the space's
+  `.wiki.toml` (existing bytes, comments and line endings are kept). It refuses a
+  dirty tree, a conflicting redeclaration of NAME and anything invalid. Adding an
+  identical declaration reports `"changed": false`. There is no remove or modify
+  command yet.
+
+### Record types per space
+
+A space declares the document types it accepts in its own `.wiki.toml`:
+
+```toml
+[types.recipe-idea]
+description = "One idea for a recipe to try later"
+template = "## Idea\n\n## Ingredients\n\n## Source\n"
+
+[types.recipe-idea.fields.cuisine]
+type = "string"                 # string, integer, boolean, date (YYYY-MM-DD) or list
+required = true                 # default false
+values = ["thai", "italian"]    # optional allowed values; strings or integers
+```
+
+- Names match `[a-z][a-z0-9-]*`. `source` and `meeting` are reserved system
+  types, and the base front-matter fields (`schema_version`, `id`, `type`,
+  `title`, `space_ids`, `sources`, `occurred_at`, `imported_at`, `updated_at`)
+  cannot be declared as fields. Undeclared extra front-matter fields stay allowed.
+- A space with no declarations accepts only the system types. Nothing is
+  predefined in code.
+- A date field holds a quoted calendar date such as `"2026-10-01"` (a TOML date
+  is refused); timestamps belong in the base fields.
+- A required field must be present. An empty string, `0`, `false` or `[]` counts
+  as present.
+- A malformed declaration (unknown key, wrong type, bad name) makes the space
+  invalid: `check` reports it with the file path, and its documents and writes
+  are refused until it is fixed by hand.
+- An undeclared type is refused with the list of the space's declared types.
+  The proper response is to use a similar declared type or to propose a new one
+  with a template, and to apply it with `space type add` only after the user
+  agrees. `template` is a skeleton for the whole family of records (for example
+  "idea about a dish": title, ingredients, source, status), not for the one record
+  in hand. pisar never inserts a template into a document by itself.
+
+A hard interruption before type-add replaces the marker may leave a `.pisar-*`
+sibling. Pisar preserves ambiguous files and may refuse retry: inspect and move
+that specific leftover outside the repository, then repeat the original command.
+Post-marker interrupted operations resume normally. Occupied temporary paths in
+legacy journals are always refused, even if ignored.
+
+**Migration.** `note`, `recipe`, `movie`, `series`, `book`, `decision` and
+`overview` are no longer built in. A wiki whose documents use them fails
+`pisar check` until each owning space declares them, for example
+`pisar space type add work/alpha note --description 'Ordinary knowledge about a topic'`.
+Lesson acceptance writes a `note` into its target space, so that space must
+declare `note` too. Existing documents keep their content; only the declarations
+change.
 
 ## Known-space inbox capture
 

@@ -141,6 +141,9 @@ class Fixture(unittest.TestCase):
         remote = self.base / 'module-origin'
         init_repo(remote)
         space(remote, '.', 'module')
+        # Lesson notes are written into this space, which must declare `note` (record types).
+        with (remote / '.wiki.toml').open('a') as declared:
+            declared.write('\n[types.note]\ndescription = "A reusable lesson"\n')
         (remote / 'note.md').write_text(document('module-note', 'work/module', body='Module evidence.'))
         commit_all(remote)
         git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q',
