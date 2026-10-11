@@ -208,6 +208,18 @@ only: confirm the location with the user first. `space move` stays inside the
 domain; it refuses a dirty tree, an existing target or an unfinished operation
 on that space, and `ruwana` tasks follow the directory.
 
+## Commit messages: say what and why
+
+`save`, `capture`, `triage accept`, `lesson accept`, `domain add`, and `space
+create|move|archive|restore` make commits. Pass `--what` (one short line: what
+changed) and `--why` (the reason). Write them as plain sentences with no secrets,
+no absolute local paths and no personal data beyond what the change needs. If
+the user's configuration enables the commit-message writer, these flags are
+**required**: pisar refuses the command before writing anything without them.
+`--context TEXT` or `--context-file FILE` (at most 8000 characters) summarises
+this operation's earlier steps for the writer. A writer failure stops the commit
+with a clear error; retry the same command. The operation ID stays the same.
+
 ## Guard: report possibly sensitive text
 
 ```sh
@@ -265,6 +277,8 @@ Never strip text on your own and never run `accept` without the user's go-ahead.
 - Operations are **not atomic** across repositories and ruwana; partial progress
   is recorded, not hidden. Read the journal and `git status` in the owning
   repository before deciding anything.
+- Recovery recognises pisar's own commits by the ids in the journal, never by
+  their subject. A commit that merely carries the `wiki:` subject is refused.
 - Never revert an operation's commits wholesale: commits that contain
   `.ruwana/` task files can delete tasks or restore old statuses. Roll back
   knowledge files only, leave task files and current status alone, do it in each

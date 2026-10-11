@@ -38,7 +38,8 @@ class RollbackTests(Fixture):
         recipe = section.split('```sh\n', 1)[1].split('```', 1)[0]
         for repo in ([module, self.root] if module else [self.root]):
             rollback = subprocess.run(['bash', '-c', recipe], cwd=self.base,
-                                      env={**env, 'OWNER_REPO': str(repo), 'OPERATION': 'rollback-one'},
+                                      env={**env, 'OWNER_REPO': str(repo), 'OPERATION': 'rollback-one',
+                                           'PISAR_ROOT': str(self.root), 'PISAR_STATE_DIR': str(self.state)},
                                       text=True, capture_output=True)
             self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
             staged = git(repo, 'diff', '--cached', '--name-only').splitlines()

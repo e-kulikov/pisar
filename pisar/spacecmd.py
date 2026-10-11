@@ -12,6 +12,7 @@ import shutil
 import tomllib
 import unicodedata
 from . import gitops
+from . import operations
 from .operations import Runtime, atomic_bytes, fingerprint
 from .safety import WikiError, address, concrete_id, safe_path, sha256
 from .spaces import LAYOUT, Wiki, load_domain
@@ -137,17 +138,35 @@ def _files(directory):
             yield Path(parent) / name
 
 
-def _verify(wiki, op, journal, repos):
+def _landed(wiki, runtime, journal, repo, sha):
+    """Checkpoint SHA as the commit of REPO it is; None (nothing was committed) clears a stale intent."""
+    if sha:
+        operations.checkpoint(runtime, journal, repo, sha)
+    else:
+        operations.clear_pending(runtime, journal)
+    return sha
+
+
+def _commit(wiki, runtime, journal, repo, paths, op):
+    """gitops.commit journaled as it lands: the intent before the branch moves, the commit right after."""
+    return _landed(wiki, runtime, journal, repo, gitops.commit(
+        repo, paths, op, intent=operations.pending_intent(runtime, journal),
+        message=operations.commit_writer(wiki, runtime, journal, repo)))
+
+
+def _verify(wiki, runtime, op, journal, repos):
     """A resumed operation continues only on exactly the state it left: same HEADs, same files."""
     root = wiki.root
-    for repo in repos:
-        recorded = journal.get('heads', {}).get(str(repo))
-        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
-        if recorded and head != recorded:
-            parent = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
-            subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
-            if parent != recorded or subject != f'wiki: {op}':
-                raise WikiError(f'Git HEAD of {repo} changed since the interrupted operation {op}')
+    mismatches = [(repo, journal['heads'][str(repo)], None) for repo in repos if journal.get('heads', {}).get(str(repo))]
+    for child in journal.get('children', []):
+        repo = root / child['path']
+        # Checkpointed but not yet stored as 'after': the journaled head is ours even without a pending record.
+        if gitops.run(repo, 'rev-parse', 'HEAD').strip() not in (child['base'], child.get('after')):
+            mismatches.append((repo, child['base'], None))
+    try:
+        operations.recover(runtime, journal, mismatches)
+    except WikiError as error:
+        raise WikiError(f'{error}; the interrupted operation is {op}') from None
     expected = journal.get('expected', {})
     for rel, allowed in expected.items():
         path = root / rel
@@ -164,12 +183,6 @@ def _verify(wiki, op, journal, repos):
             raise WikiError(f'.gitmodules changed since the interrupted operation {op}; resolve it by hand')
     for child in journal.get('children', []):
         repo = root / child['path']
-        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
-        if head not in (child['base'], child.get('after')):
-            parent = gitops.run(repo, 'rev-parse', 'HEAD^', check=False).strip()
-            subject = gitops.run(repo, 'log', '-1', '--format=%s').strip()
-            if parent != child['base'] or subject != f'wiki: {op}':
-                raise WikiError(f'Git HEAD of {child["path"]} changed since the interrupted operation {op}')
         own = [(root / t).relative_to(repo).as_posix() for t in expected if (root / t).is_relative_to(repo)]
         _ensure_clean(repo, own)
     for pair in journal.get('pairs', []):
@@ -178,14 +191,16 @@ def _verify(wiki, op, journal, repos):
 
 
 def _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, plan=None):
-    """Verify a resume, check cleanliness, journal, APPLY(journal) the edits (returns [(repo, sha)]),
-    then commit parent gitlinks. PLAN records the intended files (`expected` root-relative path ->
-    allowed hashes, `closed` directories holding nothing else, `pairs`, `allow`) for a later resume."""
+    """Verify a resume, check cleanliness, journal, APPLY(journal) the edits (each commit it makes goes
+    through _commit, so it is journaled when it lands), then commit parent gitlinks. PLAN records the
+    intended files (`expected` root-relative path -> allowed hashes, `closed` directories holding nothing
+    else, `pairs`, `allow`) for a later resume. Returns the commits (repos relative to the root), earlier
+    ones of a resume included."""
     root = wiki.root
     chain = gitops.ancestors(repo, root)
     repos = [repo, *(parent for parent, _, _ in chain)]
     if resumed:
-        _verify(wiki, op, resumed, repos)
+        _verify(wiki, runtime, op, resumed, repos)
         known = [*resumed.get('expected', {}), *resumed.get('closed', []), *resumed.get('allow', [])]
         own = [(root / t).relative_to(repo).as_posix() for t in known if (root / t).is_relative_to(repo)]
     else:
@@ -194,24 +209,23 @@ def _flow(wiki, runtime, op, intent, repo, touched, apply, resumed, plan=None):
     for parent, link, _ in chain:
         _ensure_clean(parent, (link,) if resumed else ())
     journal = resumed or dict(schema_version=1, root=str(root), operation_id=op, fingerprint=fingerprint(intent),
-                              artifacts=[dict(path=t) for t in touched], commits=[], tasks={},
+                              artifacts=[dict(path=t) for t in touched], commits=[], tasks={}, pending=None,
                               heads={str(r): gitops.run(r, 'rev-parse', 'HEAD').strip() for r in repos},
                               **{**dict(expected={}, closed=[], pairs=[], allow=[]), **(plan or {})})
     journal['status'] = 'incomplete'
     journal.pop('error', None)
     runtime.store(journal)
     try:
-        done = list(apply(journal))
+        apply(journal)
         for parent, link, _ in chain:
-            done.append((parent, gitops.commit(parent, [link], op)))
+            _commit(wiki, runtime, journal, parent, [link], op)
     except (WikiError, OSError) as error:
         journal['error'] = str(error)
         runtime.store(journal)
         raise
-    journal['commits'] = [dict(repo=Path(r).relative_to(root).as_posix(), commit=sha) for r, sha in done if sha]
     journal['status'] = 'complete'
     runtime.store(journal)
-    return journal['commits']
+    return [dict(repo=Path(c['repo']).relative_to(root).as_posix(), commit=c['commit']) for c in journal['commits']]
 
 
 # --- domains ----------------------------------------------------------------
@@ -366,12 +380,11 @@ def domain_add(wiki, state_dir, ident, title, repo, layout):
                 if not path.exists():
                     atomic_bytes(path, content)
             inner = [(base / rel).relative_to(target).as_posix() for rel in journal['planned']]
-            done = [(target, gitops.commit(target, inner, op))]
+            _commit(wiki, runtime, journal, target, inner, op)
             if location:
                 journal['children'][0]['after'] = gitops.run(target, 'rev-parse', 'HEAD').strip()
                 runtime.store(journal)
-                done.append((root, gitops.commit(root, ['.gitmodules', ident], op)))
-            return done
+                _commit(wiki, runtime, journal, root, ['.gitmodules', ident], op)
 
         plan = dict(allow=['.gitmodules', ident] if location else [])
         return finish(True, _flow(wiki, runtime, op, intent, flow_repo, touched, apply, resumed, plan))
@@ -458,12 +471,12 @@ def space_create(wiki, state_dir, domain_id, kind, title, ident):
         files = {'.wiki.toml': f'schema_version = 1\nid = "{ident}"\nkind = "{kind}"\nstatus = "active"\n',
                  'README.md': f'# {title}\n'}
 
-        def apply(_):
+        def apply(journal):
             for name, text in files.items():
                 target = path / name
                 if not target.exists() or target.read_text(encoding='utf-8') != text:
                     atomic_bytes(target, text.encode())
-            return [(repo, gitops.commit(repo, [(path / n).relative_to(repo).as_posix() for n in files], op))]
+            _commit(wiki, runtime, journal, repo, [(path / n).relative_to(repo).as_posix() for n in files], op)
 
         plan = dict(expected={f'{relative}/{n}': [sha256(t.encode())] for n, t in files.items()},
                     closed=[relative])
@@ -572,16 +585,19 @@ def relocate(wiki, state_dir, action, value, to=None):
                                 'byte-preserving, e.g. add `/<path> -text -filter -ident` to .gitattributes, '
                                 'commit that yourself and rerun the command')
 
-        def apply(_):
+        def apply(journal):
             if new != old and old.exists() and not new.exists():
                 new.parent.mkdir(parents=True, exist_ok=True)
                 gitops.run(repo, 'mv', '--', rel(old), rel(new))
             _edit_marker(new / '.wiki.toml', kind, status)
             if new == old:
-                return [(repo, gitops.commit(repo, [rel(new / '.wiki.toml')], op))]
+                _commit(wiki, runtime, journal, repo, [rel(new / '.wiki.toml')], op)
+                return
             marker = rel(new / '.wiki.toml')
-            return [(repo, gitops.commit_move(repo, rel(old), rel(new), op,
-                                              replace={marker: (new / '.wiki.toml').read_bytes()}))]
+            _landed(wiki, runtime, journal, repo, gitops.commit_move(
+                repo, rel(old), rel(new), op, replace={marker: (new / '.wiki.toml').read_bytes()},
+                intent=operations.pending_intent(runtime, journal),
+                message=operations.commit_writer(wiki, runtime, journal, repo)))
 
         touched = sorted({old.relative_to(root).as_posix(), new.relative_to(root).as_posix()})
         old_rel, new_rel = old.relative_to(root).as_posix(), new.relative_to(root).as_posix()
