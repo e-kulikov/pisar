@@ -58,15 +58,17 @@ def parser():
     save.add_argument('--plan', required=True)
     triage = commands.add_parser('triage', help='External global inbox routing')
     actions = triage.add_subparsers(dest='action', required=True)
-    for name in ('prepare', 'report', 'accept', 'reroute', 'defer'):
+    for name in ('prepare', 'report', 'accept', 'reroute', 'defer', 'reject'):
         sub = actions.add_parser(name)
         sub.add_argument('--batch', required=True)
         if name == 'prepare':
             source = sub.add_mutually_exclusive_group()
             source.add_argument('--plan', help='External routing JSON')
             source.add_argument('--inbox', help='External inbox directory, default runtime/inbox')
-        if name in ('accept', 'reroute', 'defer'):
+        if name in ('accept', 'reroute', 'defer', 'reject'):
             sub.add_argument('--item', required=True)
+        if name == 'reject':
+            sub.add_argument('--reason', help='Short note stored in the manifest and report, never in the wiki')
         if name == 'reroute':
             sub.add_argument('--space', required=True, help='New destination space address (domain/id)')
     config_command.add_parser(commands)
@@ -158,6 +160,8 @@ def main(argv=None):
                     result = triage.accept(wiki, args.state_dir, args.batch, args.item, args.ruwana)
                 elif args.action == 'reroute':
                     result = triage.reroute(wiki, args.state_dir, args.batch, args.item, args.space)
+                elif args.action == 'reject':
+                    result = triage.reject(wiki, args.state_dir, args.batch, args.item, args.reason)
                 else:
                     result = triage.defer(wiki, args.state_dir, args.batch, args.item)
             else:

@@ -657,6 +657,14 @@ repository, including uncommitted drafts. Duplicate item IDs, source paths, or
 identical source hashes within a batch are rejected. The manifest stores the
 explicit root namespace; another knowledge root cannot use it.
 
+`reject --item ID [--reason TEXT]` drops an item that should not reach any wiki. It works
+from `pending` or `deferred` only, writes nothing to any knowledge repository, and keeps a
+hash-verified processed copy before it removes a global inbox original. An external
+original is only marked `rejected`: pisar does not own that file, so it is never deleted,
+and the report says so. The reason is trimmed, at most 500 characters, shown in the report,
+and never written to the wiki. A rejected item cannot be accepted. Rejection is
+final only within its batch: a later batch with the same content is prepared as a new item.
+
 Only `accept --item ID` applies that item and commits its intended paths. Source
 and draft hashes are revalidated; ambiguous or changed inputs stay unapplied.
 `defer` leaves an item external; explicit reroute reopens a deferred item. Once
