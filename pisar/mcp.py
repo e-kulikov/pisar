@@ -182,18 +182,28 @@ class Server:
         self.writer.flush()
 
     def read(self):
+        """The next message that is a JSON object, or EOF at the end of the connection.
+
+        Anything else on a line (not JSON, or JSON that is not an object) gets an error answer and
+        reading goes on: `null` is not the end of input.
+        """
         while True:
             line = self.reader.readline()
             if not line:
-                return None
-            if line.strip():
-                try:
-                    return json.loads(line)
-                except ValueError:
-                    self.send({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': 'parse error'}})
+                return EOF
+            if not line.strip():
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                self.send({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': 'parse error'}})
+                continue
+            if isinstance(message, dict):
+                return message
+            self.send({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600, 'message': 'invalid request'}})
 
     def serve(self):
-        while (message := self.read()) is not None:
+        while (message := self.read()) is not EOF:
             self.dispatch(message)
 
     def dispatch(self, message):
@@ -285,9 +295,7 @@ class Server:
         ident = f'elicit-{self.next_id}'
         self.send({'jsonrpc': '2.0', 'id': ident, 'method': 'elicitation/create',
                    'params': {'message': message, 'requestedSchema': {'type': 'object', 'properties': {}}}})
-        while (answer := self.read()) is not None:
-            if not isinstance(answer, dict):
-                continue
+        while (answer := self.read()) is not EOF:
             if 'method' in answer:
                 if answer.get('id') is not None:
                     self.send({'jsonrpc': '2.0', 'id': answer['id'], 'error': {
@@ -364,6 +372,9 @@ class Server:
         if not self.elicit(message):
             raise Refused('lesson_accept: not confirmed by the user; nothing was accepted')
         return self.capture([*self.pisar(), 'lesson', 'accept', *args])
+
+
+EOF = object()  # the read loop's end of input; no JSON value is ever this object
 
 
 class _Unknown(Exception):

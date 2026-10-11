@@ -243,6 +243,18 @@ class McpTests(Fixture):
                     self.assertIn('error', second)
                     self.assertNotIn('unknown lesson batch', json.dumps(second))
 
+    def test_a_non_object_json_line_is_an_error_and_is_not_end_of_input(self):
+        # `null` decodes to None: it must not be taken for the end of the connection.
+        import io
+        from pisar import mcp as module
+        out = io.StringIO()
+        request = '{"jsonrpc":"2.0","id":1,"method":"ping"}\n'
+        server = module.Server(self.root, self.state, 'ruwana', io.StringIO('null\n[1]\n' + request), out, {})
+        server.serve()
+        answers = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([a.get('error', {}).get('code') for a in answers[:2]], [-32600, -32600])
+        self.assertEqual(answers[2], {'jsonrpc': '2.0', 'id': 1, 'result': {}})
+
     def test_malformed_requests_get_an_error_and_the_server_keeps_serving(self):
         client = self.server()
         for params in ([1, 2], {'name': 'pisar', 'arguments': []}, {'name': 'pisar', 'arguments': {'args': 'x'}}):
