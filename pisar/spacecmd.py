@@ -157,13 +157,16 @@ def _commit(wiki, runtime, journal, repo, paths, op):
 def _verify(wiki, runtime, op, journal, repos):
     """A resumed operation continues only on exactly the state it left: same HEADs, same files."""
     root = wiki.root
-    for repo in repos:
-        recorded = journal.get('heads', {}).get(str(repo))
-        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
-        if recorded and head != recorded:
-            if operations.landed_commit(repo, journal) is None:
-                raise WikiError(f'Git HEAD of {repo} changed since the interrupted operation {op}')
-            _landed(wiki, runtime, journal, repo, head)  # Our commit: it only lacked its checkpoint.
+    mismatches = [(repo, journal['heads'][str(repo)], None) for repo in repos if journal.get('heads', {}).get(str(repo))]
+    for child in journal.get('children', []):
+        repo = root / child['path']
+        # Checkpointed but not yet stored as 'after': the journaled head is ours even without a pending record.
+        if gitops.run(repo, 'rev-parse', 'HEAD').strip() not in (child['base'], child.get('after')):
+            mismatches.append((repo, child['base'], None))
+    try:
+        operations.recover(runtime, journal, mismatches)
+    except WikiError as error:
+        raise WikiError(f'{error}; the interrupted operation is {op}') from None
     expected = journal.get('expected', {})
     for rel, allowed in expected.items():
         path = root / rel
@@ -180,13 +183,6 @@ def _verify(wiki, runtime, op, journal, repos):
             raise WikiError(f'.gitmodules changed since the interrupted operation {op}; resolve it by hand')
     for child in journal.get('children', []):
         repo = root / child['path']
-        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
-        if head not in (child['base'], child.get('after')):
-            # Checkpointed but not yet stored as 'after': the journaled head is ours even without a pending record.
-            ours = head == journal.get('heads', {}).get(str(repo))
-            if not ours and operations.landed_commit(repo, journal, recorded=child['base']) is None:
-                raise WikiError(f'Git HEAD of {child["path"]} changed since the interrupted operation {op}')
-            _landed(wiki, runtime, journal, repo, head)
         own = [(root / t).relative_to(repo).as_posix() for t in expected if (root / t).is_relative_to(repo)]
         _ensure_clean(repo, own)
     for pair in journal.get('pairs', []):

@@ -365,26 +365,49 @@ def commit_writer(wiki, runtime, journal, repo):
     return write
 
 
+def recover(runtime, journal, mismatches):
+    """Recognise every commit a crash left behind, then record them all in one write.
+
+    MISMATCHES holds (repo, recorded head, allowed paths or None) for each repository that may have moved;
+    a HEAD equal to its recorded head is skipped. Every mismatch is decided before anything is recorded, so
+    an old-format journal (no 'pending' key) is read by its subject rule for all of them, and the pending
+    protocol starts only in the same write that records them. A HEAD that is not ours refuses the whole
+    recovery. Every recovered commit is recorded (a repository can be committed to more than once)."""
+    found = []
+    for repo, recorded, allowed in mismatches:
+        head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
+        # Equal to the head journaled by a checkpoint: already recorded, and only ours can be there.
+        if head in (recorded, journal['heads'].get(str(repo))):
+            continue
+        landed = landed_commit(repo, journal, recorded=recorded)
+        changed = set(gitops.run(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines())
+        if landed is None or (allowed is not None and not changed <= allowed):
+            raise WikiError(f'Git HEAD changed outside operation: {repo}')
+        found.append((repo, landed))
+    if found:
+        for repo, landed in found:
+            if not any(c['repo'] == str(repo) and c['commit'] == landed for c in journal['commits']):
+                journal['commits'].append(dict(repo=str(repo), commit=landed))
+            journal['heads'][str(repo)] = landed
+        journal['pending'] = None  # The pending protocol from here on, in this same write.
+        runtime.store(journal)
+
+
 def apply_files(wiki, runtime, journal):
     remove_leftovers(wiki, journal)
     validate_artifacts(wiki, journal)
     owned = owned_artifacts(wiki, journal)
     repos, links = groups(wiki, owned)
     by_path = {item['path']: item for item in owned}
+    mismatches = []
     for repo, allowed in repos.items():
-        current_head = gitops.run(repo, 'rev-parse', 'HEAD').strip()
         previous_head = journal['heads'].get(str(repo))
         if previous_head is None:
             raise WikiError('repository was not part of prepared operation')
-        if current_head != previous_head:
-            # A crash can occur after Git moves the branch and before the journal checkpoint.
-            landed = landed_commit(repo, journal)
-            changed = set(gitops.run(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines())
-            if landed is None or not changed <= allowed:
-                raise WikiError(f'Git HEAD changed outside operation: {repo}')
-            # Every recovered commit is recorded (a repository can be committed to more than once);
-            # parent pinning then uses the latest one.
-            checkpoint(runtime, journal, repo, landed)
+        mismatches.append((repo, previous_head, allowed))
+    # A crash can occur after Git moves a branch and before its checkpoint: recognised before anything else.
+    recover(runtime, journal, mismatches)
+    for repo, allowed in repos.items():
         gitops.clean_except(repo, allowed)
         for _, relative in gitops.dirty(repo):
             if (repo, relative) in links:

@@ -258,5 +258,56 @@ class SpaceMoveRecovery(SpaceCommandFixture):
         self.clean()
 
 
+
+class LegacyMigration(SpaceCommandFixture):
+    """A journal written before the 'pending' key: its recoverable commits are all recognised before it switches."""
+
+    def interrupted_space_create(self, window):
+        """`space create` inside a submodule domain, interrupted in the parent repository (the gitlink commit)."""
+        bare = self.origin()
+        self.cli('domain', 'add', '--id', 'acme', '--title', 'Acme', '--repo', str(bare))
+        child, parent = self.root / 'acme', self.root
+        before = {str(child): git(child, 'rev-parse', 'HEAD'), str(parent): git(parent, 'rev-parse', 'HEAD')}
+        SpaceRecovery.crash(self, parent, window, lambda: spacecmd.space_create(
+            Wiki(self.root), self.state, 'acme', 'project', 'Launch Plan', 'launch-plan'))
+        return before
+
+    def make_legacy(self, before):
+        """The journal as the pisar of origin/main leaves it: no pending key, the heads before the operation."""
+        runtime = Runtime(self.state, self.root)
+        path = next((runtime.path / 'operations').glob('space-create-*.json'))
+        journal = json.loads(path.read_text())
+        journal.pop('pending', None)
+        journal['commits'] = []
+        journal['status'] = 'incomplete'
+        journal['heads'] = {repo: before[repo] for repo in journal['heads']}
+        runtime.store(journal)
+
+    def create(self):
+        return self.cli('space', 'create', '--domain', 'acme', '--kind', 'project', '--title', 'Launch Plan',
+                        '--id', 'launch-plan')
+
+    def test_child_and_parent_both_landed_resume_and_a_retry_after_the_migration_succeeds(self):
+        before = self.interrupted_space_create('after-ref')
+        self.make_legacy(before)
+        self.create()
+        journal = Runtime(self.state, self.root).load(next(
+            p.stem for p in (Runtime(self.state, self.root).path / 'operations').glob('space-create-*.json')))
+        self.assertEqual(journal['status'], 'complete')
+        self.assertIsNone(journal['pending'])
+        self.assertEqual({c['repo'] for c in journal['commits']}, {str(self.root / 'acme'), str(self.root)})
+        self.create()  # the retry after the migration
+        self.clean()
+        self.assertTrue(self.data('check')['ok'])
+
+    def test_only_the_child_landed_resumes(self):
+        before = self.interrupted_space_create('before-ref')
+        self.make_legacy(before)
+        self.create()
+        self.create()
+        self.clean()
+        self.assertTrue(self.data('check')['ok'])
+
+
 if __name__ == '__main__':
     unittest.main()
