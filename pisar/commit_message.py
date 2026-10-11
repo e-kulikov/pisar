@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import unicodedata
-from . import codex_agent, guard, research, research_codex, settings
+from . import codex_agent, guard, operations, research, research_codex, settings
 from .safety import WikiError
 
 PROMPT_NAME = 'commit-message-prompt.md'
@@ -91,8 +91,11 @@ def _secret(text):
 def _context(args):
     if getattr(args, 'context_file', None) is None:
         return None if getattr(args, 'context', None) is None else plain(args.context, '--context', CONTEXT_LIMIT)
-    path = Path(args.context_file)
-    if path.is_symlink() or not path.is_file():
+    try:
+        path = operations.external_path(args.context_file)  # refuses a symlink in any component
+    except WikiError:
+        raise WikiError('--context-file is not a readable file') from None
+    if not path.is_file():
         raise WikiError('--context-file is not a readable file')
     with path.open('rb') as stream:
         data = stream.read(4 * CONTEXT_LIMIT + 1)  # Bounded: a larger file fails the length check below.
@@ -300,8 +303,10 @@ def _codex(prompt, text, options, root, base):
         output = b''
         if answer.is_file():
             with answer.open('rb') as stream:
-                output = stream.read(STDOUT_LIMIT)  # Bounded, like the output of every writer run.
+                output = stream.read(STDOUT_LIMIT + 1)  # One byte more than the limit is the overflow mark.
     _finished(done, timeout)
+    if len(output) > STDOUT_LIMIT:
+        raise WikiError('the commit message writer output is too large; nothing was committed')
     try:
         value = json.loads(output.decode('utf-8'))
     except ValueError:

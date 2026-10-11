@@ -425,6 +425,15 @@ class Explanations(Writer):
                 with self.subTest(path=path.name), self.assertRaisesRegex(WikiError, reason):
                     commit_message.explain(self.args(context=None, context_file=str(path)))
 
+    def test_a_context_file_under_a_symlinked_directory_is_refused(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        real = directory / 'real'
+        real.mkdir()
+        (real / 'context.txt').write_text('Drafted the note first.')
+        (directory / 'link').symlink_to(real, target_is_directory=True)
+        with self.enabled(), self.assertRaisesRegex(WikiError, 'not a readable file'):
+            commit_message.explain(self.args(context=None, context_file=str(directory / 'link' / 'context.txt')))
+
     def test_context_is_ignored_and_unchecked_while_the_writer_is_disabled(self):
         with mock.patch.object(settings, 'commit_message', return_value=self.options(enabled=False)):
             token = commit_message.explain(self.args(context=None, context_file='/no/such/file'))

@@ -24,6 +24,10 @@ call = {"argv": sys.argv[1:], "env": sorted(os.environ), "codex_home": os.enviro
 with open(conf["record"], "a") as stream:
     stream.write(json.dumps(call) + "\\n")
 mode = conf["mode"]
+if mode == "raw":  # the answer file holds exactly conf["raw"]: any content, however large or malformed
+    with open(sys.argv[sys.argv.index("-o") + 1], "w") as stream:
+        stream.write(conf["raw"])
+    sys.exit(0)
 if mode == "exit":
     sys.stderr.write("SECRET-STDERR should never be echoed")
     sys.exit(3)
@@ -54,8 +58,8 @@ class CodexWriter(Fixture):
         self.fake()
         self.path = f'{self.bin}{os.pathsep}{os.environ["PATH"]}'
 
-    def fake(self, mode='ok', text=MESSAGE):
-        (self.bin / 'fake.json').write_text(json.dumps(dict(mode=mode, text=text, record=str(self.record))))
+    def fake(self, mode='ok', text=MESSAGE, raw=''):
+        (self.bin / 'fake.json').write_text(json.dumps(dict(mode=mode, text=text, raw=raw, record=str(self.record))))
 
     def calls(self):
         if not self.record.exists():
@@ -112,6 +116,23 @@ class Invocation(CodexWriter):
             self.assertIn(part, stdin)
 
     def test_valid_answer_becomes_the_checked_message_with_the_trailer(self):
+        self.assertEqual(self.compose(), f'{MESSAGE}\n\nPisar-Operation: codex-op')
+
+
+class AnswerFile(CodexWriter):
+    """The answer file is read at most STDOUT_LIMIT bytes; an extra byte is refused before any JSON parsing."""
+
+    def test_an_answer_file_just_over_the_limit_is_refused_even_with_a_valid_json_prefix(self):
+        limit = commit_message.STDOUT_LIMIT
+        prefix = json.dumps({'message': MESSAGE})
+        self.fake(mode='raw', raw=prefix + ' ' * (limit - len(prefix)) + 'INVALID-TRAILING-DATA')
+        with self.assertRaisesRegex(WikiError, 'too large'):
+            self.compose()
+
+    def test_an_answer_file_of_exactly_the_limit_still_works(self):
+        limit = commit_message.STDOUT_LIMIT
+        prefix = json.dumps({'message': MESSAGE})
+        self.fake(mode='raw', raw=prefix + ' ' * (limit - len(prefix)))
         self.assertEqual(self.compose(), f'{MESSAGE}\n\nPisar-Operation: codex-op')
 
 
