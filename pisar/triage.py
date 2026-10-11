@@ -36,7 +36,7 @@ def persist(directory, manifest):
     for item in manifest['items']:
         lines.append(f'- `{item["id"]}`: {item["status"]}; destination `{item.get("space_id") or "unknown"}`; original `{item["source"]}`')
         if item.get('reason'):
-            lines.append(f'  Reason: {item["reason"]}')
+            lines.append(f'  Reason: {markdown_text(item["reason"])}')
         if item['status'] == 'rejecting':
             lines.append('  Rejected: reject in progress; retry reject')
         elif item['status'] == 'rejected':
@@ -153,6 +153,11 @@ def reason_text(reason):
     return text or None
 
 
+def markdown_text(text):
+    """Backslash-escape Markdown and HTML metacharacters so free text renders literally."""
+    return ''.join('\\' + ch if ch in '\\`*_{}[]()#+-.!|<>&~' else ch for ch in text)
+
+
 def reject_note(entry):
     if entry.get('archive_inbox'):
         return 'global inbox original removed after its verified processed copy was kept'
@@ -243,6 +248,7 @@ def reject(wiki, directory, batch, ident, reason=None):
         current = source if source.exists() else processed
         if entry['status'] == 'rejected':
             source_bytes(processed, entry['sha256'])
+            persist(dest, manifest)  # regenerates a report whose final write may have failed
             return dict(batch_id=batch, item=entry, note=reject_note(entry))
         _, data, digest = source_bytes(current, entry['sha256'])
         if entry['status'] != 'rejecting':

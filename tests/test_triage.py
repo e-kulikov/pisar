@@ -456,6 +456,45 @@ class TriageTests(Fixture):
         self.data('triage', 'prepare', '--batch', 'reject-again-two')
         self.assertEqual(self.data('triage', 'report', '--batch', 'reject-again-two')['items'][0]['status'], 'pending')
 
+    def test_reason_is_shown_literally_in_report_markup_while_manifest_keeps_it(self):
+        _, ident = self.inbox_item('reject-markup')
+        reason = '<!-- duplicate --> [docs](http://example.invalid)'
+        result = self.data('triage', 'reject', '--batch', 'reject-markup', '--item', ident, '--reason', reason)
+        self.assertEqual(result['item']['reason'], reason)
+        report = Path(self.data('triage', 'report', '--batch', 'reject-markup')['directory'])
+        text = (report / 'report.md').read_text()
+        self.assertNotIn('<!-- duplicate -->', text)
+        self.assertNotIn('[docs](http://example.invalid)', text)
+        self.assertIn(r'\<\!\-\- duplicate \-\-\>', text)
+        self.assertIn(r'\[docs\]\(http://example\.invalid\)', text)
+
+    def test_report_is_repaired_by_completed_reject_retry_after_final_report_write_fails(self):
+        from pisar import triage
+        from pisar.spaces import Wiki
+        source, ident = self.inbox_item('reject-report')
+        original_write = triage.atomic_bytes
+
+        def fail_final_report(path, data):
+            if path.name == 'report.md' and b': rejected;' in data:
+                raise OSError('synthetic failure writing the final report')
+            return original_write(path, data)
+
+        with patch.object(triage, 'atomic_bytes', fail_final_report):
+            with self.assertRaises(OSError):
+                triage.reject(Wiki(self.root), self.state, 'reject-report', ident)
+        self.assertFalse(source.exists())
+        manifest = json.loads(next(self.state.rglob('triage/reject-report/manifest.json')).read_text())
+        self.assertEqual(manifest['items'][0]['status'], 'rejected')
+        report = next(self.state.rglob('triage/reject-report/report.md'))
+        self.assertNotIn(': rejected;', report.read_text())
+        processed = Path(manifest['items'][0]['processed_path'])
+        retried = self.data('triage', 'reject', '--batch', 'reject-report', '--item', ident)
+        self.assertEqual(retried['item']['status'], 'rejected')
+        self.assertIn(': rejected;', report.read_text())
+        self.assertNotIn('reject in progress', report.read_text())
+        self.assertEqual(processed.read_bytes(), b'Synthetic original for reject-report')
+        self.assertFalse(source.exists())
+
     def test_reason_is_trimmed_bounded_stored_in_report_and_never_written_to_wiki(self):
         _, ident = self.inbox_item('reject-reason')
         self.data('triage', 'reject', '--batch', 'reject-reason', '--item', ident, '--reason', '  Duplicate of the call  ')
