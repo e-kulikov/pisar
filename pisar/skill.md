@@ -165,6 +165,7 @@ pisar triage report  --batch ID
 pisar triage accept  --batch ID --item ITEM
 pisar triage reroute --batch ID --item ITEM --space DOMAIN/ID
 pisar triage defer   --batch ID --item ITEM
+pisar triage reject  --batch ID --item ITEM [--reason TEXT]
 ```
 
 - `prepare` snapshots the inbox (or your routing JSON) into the state directory.
@@ -178,6 +179,9 @@ pisar triage defer   --batch ID --item ITEM
   approved. `reroute` changes the destination but does not approve; it discards
   any prepared semantic plan, so prepare a fresh one. `defer` leaves the item
   outside any repository.
+- `reject` (from `pending` or `deferred`) drops an item without touching any wiki.
+  A global inbox original is removed only after a verified processed copy exists;
+  an external original is never deleted. The reason is optional and stays out of the wiki.
 - Once an accept has started, `defer`/`reroute` are refused. Fix the cause and
   retry the same `accept`. Do not delete journals.
 
