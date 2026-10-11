@@ -672,41 +672,65 @@ def _template(wiki, value):
         raise WikiError(f'template must be UTF-8 text: {value}') from None
 
 
-def _remove_leftover(marker, temp):
-    """Remove ONLY the temporary file an interrupted type-add journaled for its marker write."""
-    if not temp:
-        return
-    leftover = marker.parent / temp
-    if leftover.is_symlink():
-        raise WikiError(f'temporary path is a symlink: {leftover}')
-    if leftover.is_file():
-        leftover.unlink()
+def _index_records(repo, relative):
+    """Every (stage, mode, object) the real index holds for RELATIVE: unmerged stages included."""
+    records = []
+    for line in gitops.run(repo, 'ls-files', '--stage', '--', relative).splitlines():
+        meta, _ = line.split('\t', 1)
+        mode, sha, stage = meta.split()
+        records.append((int(stage), mode, sha))
+    return records
 
 
-def _index_entry(repo, relative, revision=None):
-    """(mode, object) of RELATIVE in the real index, or in REVISION's tree; None when absent."""
-    if revision is None:
-        line = gitops.run(repo, 'ls-files', '--stage', '--', relative).strip()
-    else:
-        line = gitops.run(repo, 'ls-tree', revision, '--', relative).strip()
+def _tree_entry(repo, relative, revision):
+    """(mode, object) of RELATIVE in REVISION's tree, or None."""
+    line = gitops.run(repo, 'ls-tree', revision, '--', relative).strip()
     if not line:
         return None
-    fields = line.split('\t', 1)[0].split()
-    return (fields[0], fields[1] if revision is None else fields[2])
+    mode, _, sha = line.split('\t', 1)[0].split()
+    return (mode, sha)
 
 
 def _refuse_staged_extras(wiki, journal, op, repo, relative):
-    """Refuse a resume when the marker or a parent gitlink is staged with content the operation did not write.
-
-    The real index may hold the pre-operation entry (interrupted before its commit) or the committed one (a
-    crash after the branch moved, before the index was synchronized). Anything else is the user's staging."""
+    """Refuse a resume unless the marker and each parent gitlink have exactly one stage-0 index entry that
+    is the pre-operation or the committed one (a crash past update-ref leaves the former, a crash before the
+    index sync the latter). Unmerged stages and any other staged content are the user's and are not touched."""
     checks = [(repo, relative), *((parent, link) for parent, link, _ in gitops.ancestors(repo, wiki.root))]
     for owner, path in checks:
         recorded = journal.get('heads', {}).get(str(owner))
-        allowed = {_index_entry(owner, path, recorded) if recorded else None, _index_entry(owner, path, 'HEAD')}
-        if _index_entry(owner, path) not in allowed:
-            raise WikiError(f'{path} in {owner} has staged content that the interrupted operation {op} did not write; '
-                            'nothing was changed. Unstage it (git restore --staged) and retry')
+        if recorded is None:
+            raise WikiError(f'no recorded baseline for {path} in {owner}; nothing was changed')
+        records = _index_records(owner, path)
+        if any(stage for stage, _, _ in records):
+            raise WikiError(f'{path} in {owner} has an unresolved merge (stages 1-3) left by the user; the '
+                            f'interrupted operation {op} did not write it. Nothing was changed; resolve it '
+                            'and retry')
+        if len(records) != 1:
+            raise WikiError(f'{path} in {owner} has {len(records)} index entries, not one; nothing was changed')
+        _, mode, sha = records[0]
+        if (mode, sha) not in {_tree_entry(owner, path, recorded), _tree_entry(owner, path, 'HEAD')}:
+            raise WikiError(f'{path} in {owner} has staged content that the interrupted operation {op} did not '
+                            'write; nothing was changed. Unstage it (git restore --staged) and retry')
+
+
+def _remove_leftover(wiki, repo, marker, temp, final):
+    """Remove the journaled temporary file of an interrupted marker write, and only when it is untracked and
+    holds nothing (an empty file) or exactly the bytes pisar was writing. Anything else is the user's."""
+    if not temp:
+        return
+    leftover = marker.parent / temp
+    if not os.path.lexists(leftover):
+        return
+    relative = leftover.relative_to(repo).as_posix()
+    if leftover.is_symlink() or not leftover.is_file():
+        raise WikiError(f'{relative} is not a plain file; nothing was changed')
+    if _index_records(repo, relative) or _tree_entry(repo, relative, 'HEAD'):
+        raise WikiError(f'{relative} is tracked, so it is not a leftover of the interrupted operation; '
+                        'nothing was changed')
+    data = leftover.read_bytes()
+    if data and data != final.encode('utf-8'):
+        raise WikiError(f'{relative} holds bytes pisar did not write; nothing was changed')
+    leftover.unlink()
 
 
 def space_type_list(wiki, value, domains=None):
@@ -742,8 +766,10 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
     def body(runtime, resumed):
         plan = None
         if resumed:
-            _remove_leftover(marker, resumed.get('temp'))
+            # Validate the whole resume state before any cleanup: a refused resume changes nothing.
+            _verify(wiki, op, resumed, [repo, *(parent for parent, _, _ in gitops.ancestors(repo, root))])
             _refuse_staged_extras(wiki, resumed, op, repo, rel_repo)
+            _remove_leftover(wiki, repo, marker, resumed.get('temp'), resumed['final'])
         if not resumed:
             # Clean trees only, even when the declaration already exists: the command never edits a dirty space.
             _ensure_clean(repo)
@@ -772,6 +798,9 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             # The final bytes are journaled, so a resume writes exactly what was decided.
             # The temporary name is journaled before the write, so an interrupted write leaves only a known file.
             temp = f'.pisar-{_digest(op, rel)}.tmp'
+            if os.path.lexists(marker.parent / temp):
+                raise WikiError(f'{marker.parent.relative_to(root).as_posix()}/{temp} is reserved for this '
+                                'operation and already exists; nothing was changed. Move or remove it and retry')
             plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'), temp=temp)
 
         def apply(journal):

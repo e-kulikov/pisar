@@ -5,6 +5,8 @@ import sys
 import unittest
 
 from pisar.operations import Runtime
+from pisar.spacecmd import _declaration_text, _digest
+from pisar.spaces import parse_type
 from pisar.safety import WikiError
 from pisar.spaces import Wiki
 from .support import CHECKOUT, Fixture, commit_all, git, space
@@ -19,6 +21,13 @@ def document(ident, doc_type, extra='', owner='work/alpha', body='Body text.'):
     return ('+++\nschema_version = 1\n'
             f'id = "{ident}"\ntype = {json.dumps(doc_type)}\ntitle = "Idea"\n'
             f'space_ids = [{json.dumps(owner)}]\nsources = []\n{extra}+++\n\n{body}\n')
+
+
+def temp_name():
+    """The temporary name a fresh `space type add work/alpha recipe-idea` journals for its marker write."""
+    text = _declaration_text(parse_type('recipe-idea', dict(description='One idea')))
+    op = f'space-type-add-work-alpha-recipe-idea-{_digest("work/alpha", "recipe-idea", text)}'
+    return f'.pisar-{_digest(op, "work/team/alpha/.wiki.toml")}.tmp'
 
 
 def commit_changes(root):
@@ -452,6 +461,83 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         self.add('recipe-idea', '--description', 'One idea', ok=False)
         self.assertEqual(user.read_text(), 'my draft, edited\n')
         self.assertEqual(self.marker.read_bytes(), original)
+
+    def crash_leftover(self):
+        """A type-add killed before its rename: the journaled temporary file is left beside the marker."""
+        self.crash_before_the_rename('recipe-idea', '--description', 'One idea')
+        (leftover,) = self.alpha.glob('.pisar-*')
+        return leftover
+
+    def test_tracked_user_file_at_the_temp_path_is_refused_and_kept(self):
+        user = self.alpha / temp_name()
+        user.write_text('my tracked draft\n')
+        commit_all(self.root)
+        head, text = git(self.root, 'rev-parse', 'HEAD'), self.marker.read_bytes()
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(user.read_text(), 'my tracked draft\n')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(self.marker.read_bytes(), text)
+        self.clean()
+
+    def test_ignored_user_file_at_the_temp_path_is_refused_and_kept(self):
+        (self.root / '.gitignore').write_text('.pisar-*\n')
+        commit_all(self.root)
+        user = self.alpha / temp_name()
+        user.write_text('my ignored notes\n')
+        text = self.marker.read_bytes()
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(user.read_text(), 'my ignored notes\n')
+        self.assertEqual(self.marker.read_bytes(), text)
+
+    def test_symlink_at_the_temp_path_is_refused_and_its_target_kept(self):
+        (self.root / '.gitignore').write_text('.pisar-*\n')
+        commit_all(self.root)
+        target = self.base / 'external.txt'
+        target.write_text('outside the wiki\n')
+        (self.alpha / temp_name()).symlink_to(target)
+        text = self.marker.read_bytes()
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertTrue((self.alpha / temp_name()).is_symlink())
+        self.assertEqual(target.read_text(), 'outside the wiki\n')
+        self.assertEqual(self.marker.read_bytes(), text)
+
+    def test_leftover_that_became_a_tracked_user_file_is_kept_on_retry(self):
+        leftover = self.crash_leftover()
+        leftover.write_text('my draft, committed by me\n')
+        commit_all(self.root)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(leftover.read_text(), 'my draft, committed by me\n')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 0)
+
+    def test_untracked_leftover_with_foreign_bytes_is_kept_on_retry(self):
+        leftover = self.crash_leftover()
+        leftover.write_text('not what pisar wrote\n')
+        self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertEqual(leftover.read_text(), 'not what pisar wrote\n')
+
+    def test_unresolved_three_way_merge_in_the_marker_is_refused_and_kept(self):
+        original = self.marker.read_bytes()
+        self.interrupted_add('recipe-idea', '--description', 'One idea')
+        final = self.marker.read_bytes()
+        # The intended marker is on disk; the index holds a 3-way conflict (stages 1, 2 and 3).
+        blobs = []
+        for content in (original, final + b'# user comment\n', original + b'# other comment\n'):
+            blobs.append(subprocess.run(['git', '-C', str(self.root), 'hash-object', '-w', '--stdin'],
+                                        input=content, capture_output=True, check=True).stdout.decode().strip())
+        git(self.root, 'rm', '--cached', '-q', '--', 'work/team/alpha/.wiki.toml')
+        lines = ''.join(f'100644 {blob} {stage}\twork/team/alpha/.wiki.toml\n'
+                        for stage, blob in zip((1, 2, 3), blobs))
+        subprocess.run(['git', '-C', str(self.root), 'update-index', '--index-info'], input=lines,
+                       text=True, check=True)
+        staged = git(self.root, 'ls-files', '-u', '--', 'work/team/alpha/.wiki.toml')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        result = self.add('recipe-idea', '--description', 'One idea', ok=False)
+        self.assertIn('unresolved merge', result.stderr)
+        self.assertEqual(git(self.root, 'ls-files', '-u', '--', 'work/team/alpha/.wiki.toml'), staged)
+        self.assertEqual(self.marker.read_bytes(), final)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
 
     def test_nested_owner_commits_the_child_then_the_parent_gitlink(self):
         module = self.add_submodule()
