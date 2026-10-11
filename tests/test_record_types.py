@@ -1,4 +1,5 @@
 """Per-space record types declared in .wiki.toml, on temporary fixtures only."""
+from pathlib import Path
 import json
 import os
 from unittest.mock import patch
@@ -473,27 +474,46 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
 
     def test_interrupted_add_after_the_marker_write_retries_without_duplicates(self):
         self.add('recipe-idea', '--description', 'One idea')
-        # Crash after the marker was written but before the commit: HEAD back, file kept.
-        git(self.root, 'reset', '-q', '--mixed', 'HEAD~1')
-        runtime = Runtime(self.state, self.root)
-        for journal in (runtime.path / 'operations').glob('space-type-add-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+        self.crash_before_commit()  # the marker was written, the commit never happened
         before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
         self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
         self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before + 1)
         self.clean()
         self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
 
+    def journals(self):
+        return list((Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'))
+
+    def crash_before_commit(self):
+        """Leave the journals as a crash before any commit does: pre-operation heads, no commits, the working
+        files as they were written. Every repository that was committed to is reset, index included."""
+        for path in self.journals():
+            data = json.loads(path.read_text())
+            for entry in data['commits']:
+                repo = Path(entry['repo'])
+                before = git(repo, 'rev-parse', entry['commit'] + '^')
+                git(repo, 'reset', '-q', '--mixed', before)
+                data['heads'][entry['repo']] = before
+            data.update(commits=[], pending=None, status='incomplete')
+            path.write_text(json.dumps(data))
+
+    def crash_after_the_branch_moved(self):
+        """Leave the root as a crash between update-ref and the checkpoint does: the pending record names the new
+        commit, the journal still has the pre-operation head and the index keeps the pre-operation entries."""
+        for path in self.journals():
+            data = json.loads(path.read_text())
+            (entry,) = data['commits']
+            before = git(self.root, 'rev-parse', entry['commit'] + '^')
+            git(self.root, 'read-tree', before)
+            data['pending'] = dict(repo=entry['repo'], commit=entry['commit'], parent=before)
+            data['heads'][entry['repo']] = before
+            data.update(commits=[], status='incomplete')
+            path.write_text(json.dumps(data))
+
     def interrupted_add(self, *args):
         """Interrupt an add after its marker write: HEAD back to the old commit, file and journal kept."""
         self.add(*args)
-        git(self.root, 'reset', '-q', '--mixed', 'HEAD~1')
-        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+        self.crash_before_commit()
 
     def test_staged_user_edit_to_the_marker_is_refused_on_resume(self):
         args = ('recipe-idea', '--description', 'One idea')
@@ -515,11 +535,7 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         args = ('recipe-idea', '--description', 'One idea')
         self.add(*args)
         # A crash after update-ref leaves the index at the pre-operation entries while HEAD is new.
-        git(self.root, 'read-tree', 'HEAD~1')
-        for journal in (Runtime(self.state, self.root).path / 'operations').glob('space-type-add-*.json'):
-            data = json.loads(journal.read_text())
-            data['status'] = 'incomplete'
-            journal.write_text(json.dumps(data))
+        self.crash_after_the_branch_moved()
         before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
         self.add(*args)
         self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before)

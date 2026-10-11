@@ -716,6 +716,8 @@ def _refuse_staged_extras(wiki, journal, op, repo, relative):
         recorded = journal.get('heads', {}).get(str(owner))
         if recorded is None:
             raise WikiError(f'no recorded baseline for {path} in {owner}; nothing was changed')
+        # A commit this run already checkpointed moved the recorded head on: its parent is pre-operation too.
+        before = [entry['commit'] + '^' for entry in journal.get('commits', []) if entry['repo'] == str(owner)]
         records = _index_records(owner, path)
         if any(stage for stage, _, _ in records):
             raise WikiError(f'{path} in {owner} has an unresolved merge (stages 1-3) left by the user; the '
@@ -724,7 +726,7 @@ def _refuse_staged_extras(wiki, journal, op, repo, relative):
         if len(records) != 1:
             raise WikiError(f'{path} in {owner} has {len(records)} index entries, not one; nothing was changed')
         _, mode, sha = records[0]
-        if (mode, sha) not in {_tree_entry(owner, path, recorded), _tree_entry(owner, path, 'HEAD')}:
+        if (mode, sha) not in {_tree_entry(owner, path, rev) for rev in (recorded, 'HEAD', *before)}:
             raise WikiError(f'{path} in {owner} has staged content that the interrupted operation {op} did not '
                             'write; nothing was changed. Unstage it (git restore --staged) and retry')
 
@@ -776,8 +778,9 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
         plan = None
         if resumed:
             # Validate the whole resume state before applying anything: a refusal changes nothing.
-            _verify(wiki, op, resumed, [repo, *(parent for parent, _, _ in gitops.ancestors(repo, root))])
+            # The staged check reads the pre-operation heads, which recovery (in _verify) rewrites: run it first.
             _refuse_staged_extras(wiki, resumed, op, repo, rel_repo)
+            _verify(wiki, runtime, op, resumed, [repo, *(parent for parent, _, _ in gitops.ancestors(repo, root))])
             _refuse_legacy_type_temp(marker, resumed)
         if not resumed:
             # Clean trees only, even when the declaration already exists: the command never edits a dirty space.
@@ -811,7 +814,7 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             final = journal['final'].encode('utf-8')
             if marker.read_bytes() != final:
                 atomic_bytes(marker, final)
-            return [(repo, gitops.commit(repo, [rel_repo], op))]
+            _commit(wiki, runtime, journal, repo, [rel_repo], op)
 
         commits = _flow(wiki, runtime, op, intent, repo, [rel], apply, resumed, plan)
         return dict(space=value, type=decl.record(), changed=True, commits=commits)
