@@ -7,12 +7,13 @@ user says so.
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import unittest
 
 from pisar import mcp
 from . import support
-from .support import CHECKOUT, Fixture, pisar_command
+from .support import CHECKOUT, Fixture, commit_all, pisar_command
 
 
 class McpClient:
@@ -288,6 +289,83 @@ class McpTests(Fixture):
                 text, error = client.text('git', args)
                 self.assertFalse(error, text)
         self.assertTrue((self.alpha / 'call2.md').is_file())
+
+    def test_validated_diff_output_equals_direct_git_for_revision_notation(self):
+        # Revision-set notation must stay revisions, not become paths behind `--`.
+        (self.alpha / 'call.md').write_text('Second synthetic version.\n')
+        commit_all(self.root)
+        (self.alpha / 'call.md').write_text('Third synthetic version.\n')
+        commit_all(self.root)
+        (self.alpha / 'call.md').write_text('Uncommitted synthetic version.\n')  # so the path diff is not empty
+        from pisar import mcp as module
+        cases = [['HEAD^!'], ['HEAD^@'], ['HEAD~1..HEAD'], ['HEAD~1...HEAD'], ['^HEAD~1', 'HEAD'],
+                 ['work/team/alpha/call.md']]
+        for operands in cases:
+            with self.subTest(operands=operands):
+                direct = subprocess.run(['git', '-C', str(self.root), 'diff', *operands],
+                                        capture_output=True, text=True, check=True).stdout
+                validated = module.check_git(['diff', *operands], self.root)
+                run = subprocess.run(['git', '-C', str(self.root), *validated],
+                                     capture_output=True, text=True, check=True).stdout
+                self.assertTrue(direct, 'the direct diff must not be empty in this fixture')
+                self.assertEqual(run, direct)
+
+    def test_an_operand_that_is_neither_a_revision_nor_a_path_is_refused(self):
+        from pisar import mcp as module
+        with self.assertRaisesRegex(module.Refused, 'not a revision or an existing path'):
+            module.check_git(['diff', 'no-such-revision-or-file'], self.root)
+        with self.assertRaisesRegex(module.Refused, 'not a revision or an existing path'):
+            module.check_git(['log', 'HEAD~99'], self.root)
+
+    def custom_metadata_submodule(self):
+        """A registered submodule whose git dir sits in the root, outside any `.git` component."""
+        module = self.add_submodule()
+        meta = self.root / 'module-meta'
+        shutil.move(str(self.root / '.git' / 'modules' / 'work' / 'module'), str(meta))
+        (module / '.git').write_text(f'gitdir: {meta}\n')
+        config = meta / 'config'  # core.worktree was relative to the old place: make it absolute
+        config.write_text(''.join(f'\tworktree = {module}\n' if 'worktree' in line else line
+                                  for line in config.read_text().splitlines(True)))
+        self.assertEqual(Path(subprocess.run(['git', '-C', str(module), 'rev-parse', '--absolute-git-dir'],
+                                             capture_output=True, text=True, check=True).stdout.strip()).resolve(),
+                         meta.resolve())
+        return module, meta
+
+    def test_custom_submodule_metadata_is_refused_for_add_and_mv_in_every_spelling(self):
+        from pisar import mcp as module_
+        module, meta = self.custom_metadata_submodule()
+        (self.root / 'alias').symlink_to(meta)
+        (self.root / 'note.md').write_text('Synthetic.\n')
+        spellings = ['module-meta/config', 'module-meta', str(meta / 'config'), f'{self.root}/module-meta/config',
+                     'work/module/../../module-meta/config', './module-meta/HEAD', 'alias/config', 'alias']
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                with self.assertRaises(module_.Refused):
+                    module_.check_git(['add', spelling], self.root)
+                with self.assertRaises(module_.Refused):
+                    module_.check_git(['mv', 'note.md', spelling], self.root)
+                with self.assertRaises(module_.Refused):
+                    module_.check_git(['mv', spelling, 'note.md'], self.root)
+
+    def test_ordinary_submodule_paths_stay_allowed(self):
+        from pisar import mcp as module_
+        module, meta = self.custom_metadata_submodule()
+        (module / 'inside.md').write_text('Synthetic file of the submodule.\n')
+        for args in (['add', 'work/module'], ['add', 'work/module/inside.md'], ['status', '--', 'work/module'],
+                     ['diff', '--', 'work/module/inside.md']):
+            with self.subTest(args=args):
+                module_.check_git(args, self.root)
+
+    def test_a_bare_repository_layout_inside_the_root_is_refused(self):
+        from pisar import mcp as module_
+        bare = self.root / 'bare-like'
+        (bare / 'objects').mkdir(parents=True)
+        (bare / 'refs').mkdir()
+        (bare / 'HEAD').write_text('ref: refs/heads/main\n')
+        for args in (['add', 'bare-like/HEAD'], ['add', 'bare-like/refs/x'], ['mv', 'bare-like/HEAD', 'note.md']):
+            with self.subTest(args=args), self.assertRaises(module_.Refused):
+                module_.check_git(args, self.root)
+        module_.check_git(['add', 'work/team/alpha/call.md'], self.root)
 
     def test_git_never_reads_through_a_symlink_to_an_outside_file(self):
         outside = self.base / 'outside-link.txt'

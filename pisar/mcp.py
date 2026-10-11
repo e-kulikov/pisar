@@ -149,29 +149,79 @@ def _inside(path, base):
     return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
 
 
+def _norm(path):
+    """The real, normalised spelling of PATH: symlinks, `..` and case are resolved for comparisons."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _git_dirs(directory):
+    """Real git dir and common dir of the repository whose top level is DIRECTORY; [] when it is not one."""
+    lines = _git(directory, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir',
+                 '--git-common-dir').split('\n')
+    if len(lines) != 3 or _norm(lines[0]) != _norm(directory):
+        return []
+    return [_norm(lines[1]), _norm(lines[2])]
+
+
+def _gitlinks(directory):
+    """Paths of the submodules (gitlinks) recorded in the index of the repository DIRECTORY."""
+    done = subprocess.run(['git', '-C', str(directory), 'ls-files', '-s', '-z'], capture_output=True, timeout=60)
+    entries = done.stdout.split(b'\0')
+    return [entry.split(b'\t', 1)[1].decode('utf-8', 'surrogateescape')
+            for entry in entries if entry.startswith(b'160000 ') and b'\t' in entry]
+
+
 def _admin_paths(root):
-    """Real paths of Git's administrative directories: the git dir and the common dir."""
-    dirs = _git(root, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir').split('\n')
-    return [os.path.realpath(d) for d in dirs if d]
+    """Normalised paths of every Git administrative directory that belongs to the knowledge root.
+
+    That is the git dir and common dir of the root, of each initialised submodule (recursively, wherever
+    its metadata lives) and of each linked worktree. Uninitialised submodules have none.
+    """
+    real_root = os.path.realpath(root)
+    pending = [real_root]
+    for line in _git(root, 'worktree', 'list', '--porcelain').split('\n'):
+        if line.startswith('worktree '):
+            pending.append(os.path.realpath(line[len('worktree '):]))
+    found, seen = set(), set()
+    while pending and len(seen) < 256:
+        directory = pending.pop()
+        if directory in seen:
+            continue
+        seen.add(directory)
+        dirs = _git_dirs(directory)
+        found.update(dirs)
+        if not dirs:
+            continue
+        for relative in _gitlinks(directory):
+            submodule = os.path.realpath(os.path.join(directory, relative))
+            if _inside(submodule, real_root) and os.path.isdir(submodule):
+                pending.append(submodule)
+    return found
+
+
+def _bare_layout(directory):
+    """True for a directory that holds a bare repository (HEAD, objects/ and refs/)."""
+    return (os.path.isfile(os.path.join(directory, 'HEAD')) and os.path.isdir(os.path.join(directory, 'objects'))
+            and os.path.isdir(os.path.join(directory, 'refs')))
 
 
 def _is_revision(root, operand):
-    """True when OPERAND names a commit or tree and is not a file of the root (`A..B` checks both sides)."""
+    """True when Git resolves OPERAND as revision notation (commit, tree, ranges, ^A, HEAD^!, ...).
+
+    An existing file of the root always wins: that operand is a path.
+    """
     if os.path.lexists(os.path.join(root, operand)):
         return False
-    sides = [part or 'HEAD' for part in re.split(r'\.\.\.?', operand, maxsplit=1)] if '..' in operand else [operand]
-    for side in sides:
-        if not _git(root, 'rev-parse', '--verify', '--quiet', side + '^{commit}') and \
-                not _git(root, 'rev-parse', '--verify', '--quiet', side + '^{tree}'):
-            return False
-    return True
+    return bool(_git(root, 'rev-parse', '--revs-only', '--no-flags', operand))
 
 
 def check_path(operand, root, admin):
     """OPERAND if it is a path inside ROOT that is not Git's own: otherwise Refused.
 
     Symlinks are followed (realpath), so an alias of a file outside the root, or of anything under
-    Git's administrative directories, is refused like the target. Pathspec magic is refused.
+    Git's administrative directories, is refused like the target. Absolute spellings, `..` and case
+    variants are normalised first. Directories that hold a bare repository are refused as well.
+    Pathspec magic is refused.
     """
     if not operand or operand.startswith(':') or '\\' in operand:
         raise Refused(f'git: path not allowed: {operand!r}')
@@ -180,8 +230,16 @@ def check_path(operand, root, admin):
     real = os.path.realpath(os.path.join(root, operand))
     if not _inside(real, root):
         raise Refused(f'git: path is outside the knowledge root: {operand}')
-    if any(_inside(real, directory) for directory in admin) or '.git' in os.path.relpath(real, root).split(os.sep):
+    if '.git' in os.path.relpath(real, root).split(os.sep):
         raise Refused('git: the Git administrative directory cannot be used')
+    normal = os.path.normcase(real)
+    if any(_inside(normal, directory) for directory in admin):
+        raise Refused('git: the Git administrative directory cannot be used')
+    current = real if os.path.isdir(real) else os.path.dirname(real)
+    while current != root and _inside(current, root):
+        if _bare_layout(current):
+            raise Refused('git: a bare repository cannot be used')
+        current = os.path.dirname(current)
     return operand
 
 
@@ -207,10 +265,13 @@ def check_git(args, root):
             paths.extend(rest)
             break
         if not token.startswith('-'):
-            if subcommand in REVISION_OPERANDS and _is_revision(root, token):
-                revisions.append(token)
-            else:
-                paths.append(token)
+            if subcommand in REVISION_OPERANDS:
+                if _is_revision(root, token):
+                    revisions.append(token)
+                    continue
+                if not os.path.lexists(os.path.join(root, token)):
+                    raise Refused(f'git: {token!r} is not a revision or an existing path')
+            paths.append(token)
             continue
         if token in GIT_BLOCKED or any(token.startswith(blocked + '=') for blocked in GIT_BLOCKED):
             raise Refused(f'git: option not allowed: {token.split("=", 1)[0]}')
