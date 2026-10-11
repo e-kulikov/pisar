@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import tomllib
 import unicodedata
 from . import gitops
@@ -713,6 +714,27 @@ def _refuse_staged_extras(wiki, journal, op, repo, relative):
                             'write; nothing was changed. Unstage it (git restore --staged) and retry')
 
 
+def _write_reserved(marker, temp, data):
+    """Write DATA over MARKER through TEMP, a file this call creates exclusively. An existing occupant is never
+    unlinked or followed (O_EXCL and O_NOFOLLOW), so a file another process created after the journal named TEMP
+    makes the write refuse and stays as it is."""
+    path = marker.parent / temp
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     stat.S_IMODE(marker.stat().st_mode))
+    except FileExistsError:
+        raise WikiError(f'{path.name} already exists beside {marker.name} and is reserved for this operation; '
+                        'nothing was replaced. Move or remove it and retry') from None
+    try:
+        view = memoryview(data)
+        while view:  # os.write may store fewer bytes than asked: keep going until all are on disk
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(path, marker)
+
+
 def _remove_leftover(wiki, repo, marker, temp, final):
     """Remove the journaled temporary file of an interrupted marker write, and only when it is untracked and
     holds nothing (an empty file) or exactly the bytes pisar was writing. Anything else is the user's."""
@@ -728,7 +750,7 @@ def _remove_leftover(wiki, repo, marker, temp, final):
         raise WikiError(f'{relative} is tracked, so it is not a leftover of the interrupted operation; '
                         'nothing was changed')
     data = leftover.read_bytes()
-    if data and data != final.encode('utf-8'):
+    if not final.encode('utf-8').startswith(data):  # empty, partial or complete: all pisar's own writes
         raise WikiError(f'{relative} holds bytes pisar did not write; nothing was changed')
     leftover.unlink()
 
@@ -804,7 +826,8 @@ def space_type_add(wiki, state_dir, value, name, description, template_file, fie
             plan = dict(expected={rel: [sha256(old), sha256(new)]}, final=new.decode('utf-8'), temp=temp)
 
         def apply(journal):
-            atomic_bytes(marker, journal['final'].encode('utf-8'), journal.get('temp'))
+            _write_reserved(marker, journal.get('temp') or f'.pisar-{_digest(op, rel)}.tmp',
+                            journal['final'].encode('utf-8'))
             return [(repo, gitops.commit(repo, [rel_repo], op))]
 
         commits = _flow(wiki, runtime, op, intent, repo, [rel], apply, resumed, plan)

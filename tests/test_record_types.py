@@ -468,6 +468,63 @@ class TypeCommandTests(SpaceCommandFixture, RecordTypeFixture):
         (leftover,) = self.alpha.glob('.pisar-*')
         return leftover
 
+    def child_add(self, prelude, *args):
+        """Run `space type add` in a child process after PRELUDE (test code patching one call site). The
+        child may exit with os._exit, which skips every cleanup exactly as a SIGKILL at that point would."""
+        code = prelude + 'from pisar.cli import main\nimport sys\nsys.exit(main(sys.argv[1:]))\n'
+        return subprocess.run(
+            [sys.executable, '-c', code, '--root', str(self.root), '--state-dir', str(self.state),
+             'space', 'type', 'add', 'work/alpha', *args],
+            cwd=CHECKOUT, env={**self.env, 'PYTHONPATH': str(CHECKOUT)}, text=True, capture_output=True)
+
+    def test_competing_file_created_after_the_journal_is_refused_and_kept(self):
+        # After the journal names the temporary file, another process creates a file at that path.
+        prelude = (
+            'import os\n'
+            'import pisar.operations as operations\n'
+            'real_store = operations.Runtime.store\n'
+            'def store(self, journal):\n'
+            '    real_store(self, journal)\n'
+            '    temp = journal.get("temp")\n'
+            '    if temp and journal["status"] == "incomplete":\n'
+            '        path = os.path.join(journal["root"], os.path.dirname(journal["artifacts"][0]["path"]), temp)\n'
+            '        if not os.path.lexists(path):\n'
+            '            with open(path, "wb") as competing:\n'
+            '                competing.write(b"independent user draft\\n")\n'
+            'operations.Runtime.store = store\n')
+        text = self.marker.read_bytes()
+        head = git(self.root, 'rev-parse', 'HEAD')
+        result = self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        competing = next(self.alpha.glob('.pisar-*.tmp'))
+        self.assertEqual(competing.read_bytes(), b'independent user draft\n')
+        self.assertEqual(self.marker.read_bytes(), text)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_kill_during_the_write_leaves_a_prefix_that_the_retry_recovers(self):
+        prelude = (
+            'import os\n'
+            'real_write = os.write\n'
+            'def write(fd, data):\n'
+            '    data = bytes(data)\n'
+            '    if b"[types.recipe-idea]" in data:\n'
+            '        real_write(fd, data[: len(data) // 2])\n'  # half of the intended bytes reach the file
+            '        os._exit(9)\n'
+            '    return real_write(fd, data)\n'
+            'os.write = write\n')
+        original = self.marker.read_bytes()
+        head = git(self.root, 'rev-parse', 'HEAD')
+        crashed = self.child_add(prelude, 'recipe-idea', '--description', 'One idea')
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        self.assertEqual(self.marker.read_bytes(), original)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        (leftover,) = self.alpha.glob('.pisar-*.tmp')
+        self.assertTrue(leftover.read_bytes())  # a non-empty partial write, not a completed one
+        self.assertTrue(self.add('recipe-idea', '--description', 'One idea')['changed'])
+        self.clean()
+        self.assertEqual(list(self.alpha.glob('.pisar-*')), [])
+        self.assertEqual(self.marker.read_text().count('[types.recipe-idea]'), 1)
+
     def test_tracked_user_file_at_the_temp_path_is_refused_and_kept(self):
         user = self.alpha / temp_name()
         user.write_text('my tracked draft\n')
