@@ -195,7 +195,7 @@ class Validation(unittest.TestCase):
             'enabled = "yes"': 'commit_message.enabled',
             'timeout = 1': 'commit_message.timeout',
             'timeout = 99999': 'commit_message.timeout',
-            'agent = "codex"': 'commit_message.agent',
+            'agent = "gemini"': 'commit_message.agent',
             'prompt_file = "relative.md"': 'commit_message.prompt_file',
             'colour = "red"': 'commit_message.colour',
         }
@@ -207,9 +207,9 @@ class Validation(unittest.TestCase):
 
     def test_writer_agent_is_validated_against_the_writer_set_not_the_agents_list(self):
         # Another agent added to AGENTS (for its own options) must not become a valid writer.
-        with mock.patch.object(config, 'AGENTS', ('claude', 'codex')):
-            file = self.config_file('[commit_message]\nagent = "codex"\n')
-            with self.assertRaisesRegex(WikiError, 'supported: claude'):
+        with mock.patch.object(config, 'AGENTS', ('claude', 'codex', 'gemini')):
+            file = self.config_file('[commit_message]\nagent = "gemini"\n')
+            with self.assertRaisesRegex(WikiError, 'supported: claude, codex'):
                 config.load(file)
 
     def test_every_writer_agent_has_a_backend_and_every_backend_is_a_writer_agent(self):

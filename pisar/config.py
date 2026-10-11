@@ -17,7 +17,7 @@ COMMIT_MESSAGE_DEFAULTS = dict(enabled=False, agent='claude', model='sonnet', ef
                                prompt_file=None)
 COMMIT_MESSAGE_TIMEOUT = (10, 600)
 # The agents that can write commit messages; commit_message.BACKENDS must have exactly these names.
-COMMIT_MESSAGE_AGENTS = ('claude',)
+COMMIT_MESSAGE_AGENTS = ('claude', 'codex')
 
 
 def config_home():

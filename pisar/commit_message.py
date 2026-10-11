@@ -9,6 +9,7 @@ time and output, and a child environment built from an allowlist.
 """
 import contextlib
 import contextvars
+import json
 import os
 from importlib.resources import files
 from pathlib import Path
@@ -20,7 +21,7 @@ import tempfile
 import threading
 import time
 import unicodedata
-from . import guard, research, settings
+from . import codex_agent, guard, research, research_codex, settings
 from .safety import WikiError
 
 PROMPT_NAME = 'commit-message-prompt.md'
@@ -240,6 +241,19 @@ def run_bounded(argv, text, cwd, env, timeout):
     return research.Completed(process.returncode, bytes(out), bytes(err), state)
 
 
+def _finished(done, timeout):
+    """Refuse a writer run that did not finish cleanly; the messages are fixed and echo nothing."""
+    if done.state == 'timeout':
+        raise WikiError(f'the commit message writer did not finish within {timeout} seconds; nothing was committed')
+    if done.state == 'orphan':
+        raise WikiError('the commit message writer left background processes holding its output; they were '
+                        'stopped; nothing was committed')
+    if done.state == 'overflow':
+        raise WikiError('the commit message writer output is too large; nothing was committed')
+    if done.returncode != 0:
+        raise WikiError(f'the commit message writer exited with status {done.returncode}; nothing was committed')
+
+
 def _claude(prompt, text, options, root, base):
     """The claude backend: ``claude -p`` with no tools, no MCP, no plugins, no session, its own configuration."""
     executable = shutil.which('claude')
@@ -254,19 +268,50 @@ def _claude(prompt, text, options, root, base):
     timeout = options['timeout']
     with tempfile.TemporaryDirectory(prefix='pisar-commit-message-', dir=research.scratch_base(root, base)) as cwd:
         done = run_bounded(argv, text, cwd, env, timeout)
-    if done.state == 'timeout':
-        raise WikiError(f'the commit message writer did not finish within {timeout} seconds; nothing was committed')
-    if done.state == 'orphan':
-        raise WikiError('the commit message writer left background processes holding its output; they were '
-                        'stopped; nothing was committed')
-    if done.state == 'overflow':
-        raise WikiError('the commit message writer output is too large; nothing was committed')
-    if done.returncode != 0:
-        raise WikiError(f'the commit message writer exited with status {done.returncode}; nothing was committed')
+    _finished(done, timeout)
     return done.stdout.decode('utf-8', errors='replace')
 
 
-BACKENDS = {'claude': _claude}
+CODEX_DIRECTORY = 'commit-message'
+CODEX_ANSWER = 'answer.json'
+CODEX_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['message'],
+                'properties': {'message': {'type': 'string'}}}
+
+
+def _codex(prompt, text, options, root, base):
+    """The codex backend: ``codex exec`` with no tools (read-only, no shell, web, MCP, plugins or hooks).
+
+    It uses the login of the main session and a private HOME (research_codex.environment); the instructions
+    and the answer schema are written to the writer's own directory. The answer is a JSON object with the
+    message, which the caller checks like the claude output."""
+    executable = research_codex.which()
+    home = codex_agent.helper_home(base, CODEX_DIRECTORY)
+    instructions, schema = home / 'instructions.md', home / 'schema.json'
+    for path, content in ((instructions, prompt), (schema, json.dumps(CODEX_SCHEMA))):
+        path.write_text(content, encoding='utf-8')
+        os.chmod(path, 0o600)
+    env = research_codex.environment(base)
+    timeout = options['timeout']
+    with tempfile.TemporaryDirectory(prefix='pisar-commit-message-', dir=research.scratch_base(root, base)) as cwd:
+        answer = Path(cwd) / CODEX_ANSWER
+        argv = codex_agent.exec_argv(executable, cwd, answer, schema, instructions,
+                                     options.get('model'), options.get('effort'), 'disabled')
+        done = run_bounded(argv, text, cwd, env, timeout)
+        output = b''
+        if answer.is_file():
+            with answer.open('rb') as stream:
+                output = stream.read(STDOUT_LIMIT)  # Bounded, like the output of every writer run.
+    _finished(done, timeout)
+    try:
+        value = json.loads(output.decode('utf-8'))
+    except ValueError:
+        value = None
+    if not isinstance(value, dict) or not isinstance(value.get('message'), str):
+        raise WikiError('the commit message writer returned an invalid answer; nothing was committed')
+    return value['message']
+
+
+BACKENDS = {'claude': _claude, 'codex': _codex}
 
 
 def compose(changes, operation, explanation, options, root, base):

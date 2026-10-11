@@ -70,8 +70,17 @@ def default_agent():
 
 
 def commit_message():
-    """The effective [commit_message] options: the config table over the defaults (no flag, no environment)."""
-    return {**config.COMMIT_MESSAGE_DEFAULTS, **config.load().get('commit_message', {})}
+    """The effective [commit_message] options: the config table over the defaults (no flag, no environment).
+
+    With the codex writer, model and effort not set in the table are the Codex researcher defaults: the
+    Claude defaults are never passed to Codex."""
+    table = config.load().get('commit_message', {})
+    options = {**config.COMMIT_MESSAGE_DEFAULTS, **table}
+    if options['agent'] == 'codex':
+        for key in ('model', 'effort'):
+            if key not in table:
+                options[key] = agent_option('codex', key, 'researcher')[0]
+    return options
 
 
 def research_agent():

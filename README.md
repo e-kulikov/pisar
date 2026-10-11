@@ -192,23 +192,26 @@ Commands that commit (`save`, `capture`, `triage accept`, `lesson accept`,
 `--why` (the reason for it). With the default configuration (`[commit_message]
 enabled = false`) they are optional and added verbatim to the deterministic message
 below the subject. With `enabled = true` (in `$XDG_CONFIG_HOME/pisar/config.toml`), pisar refuses
-those commands unless both are given, and a tool-less `claude -p` writer turns them,
-the staged diff and the affected spaces into the message. The writer's settings are
-`model`, `effort`, `timeout` (10 to 600 seconds) and an optional absolute
-`prompt_file`:
+those commands unless both are given, and a tool-less writer turns them, the staged
+diff and the affected spaces into the message. The writer is `agent = "claude"` (the
+default, `claude -p`) or `agent = "codex"` (`codex exec`, read-only, no shell, web,
+MCP, plugins or hooks, its own CODEX_HOME and the Codex login of the main session).
+The writer's settings are `agent`, `model`, `effort`, `timeout` (10 to 600 seconds)
+and an optional absolute `prompt_file`:
 
 ```toml
 [commit_message]
 enabled = true
-model = "sonnet"
-effort = "medium"
+agent = "codex"
+# model and effort are optional; unset, the writer uses the defaults of its own agent
+# (Claude: sonnet and medium; Codex: the Codex researcher defaults, never a Claude name).
 timeout = 120
 ```
 
 The writer's output must be a Conventional Commits subject of at most 72 characters,
 an optional body of at most 2000 characters, free of absolute local paths and
 secret-like values. pisar appends the trailer `Pisar-Operation: OPERATION-ID` itself.
-Invalid output, a failing or timed-out writer, or a missing `claude` stops the commit:
+Invalid output, a failing or timed-out writer, or a missing `claude` or `codex` stops the commit:
 nothing is committed and no fallback message is used. The files of the operation stay
 in the working tree and its journal stays incomplete; rerun the same command (same
 operation ID) once the cause is fixed. Each commit's message is generated
@@ -330,6 +333,7 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
 | 11 web research | `pisar/research_codex.py`: `codex exec`, `web_search = "live"`, read-only, no shell or MCP; same guard, bounds and record | `test_research_codex.*` |
 | 12 environment isolation | explicit allowlist for every Codex process | `test_codex_agent.test_child_gets_an_explicit_environment...`; `test_research_codex.test_environment_is_an_allowlist...` |
 | 13 fake-executable tests | `codex` fake for argv, environment and files; real checks with `PISAR_TEST_CODEX=1` (configuration only, no model call) | `test_codex_*.py`, `test_codex_smoke.py` |
+| 14 commit-message writer | `[commit_message] agent = "codex"`: `codex exec` with no tools (read-only, web search, shell, MCP, plugins, hooks and subagents off), `--ignore-user-config --ignore-rules --ephemeral`, the login of the main session in a private HOME, the same bounds, validation and fail-closed behaviour; a Claude model name is never passed to Codex | `test_commit_message_codex.*` |
 
 **Differences in mechanism.** Codex's `.rules` execpolicy is not default-deny (an
 unmatched command is not refused), so the restriction is the MCP server's
