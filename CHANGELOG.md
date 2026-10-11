@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/e-kulikov/pisar/compare/v0.4.0...v0.5.0) (2026-10-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* the built-in document types note, recipe, movie, series, book and decision no longer exist. A space must declare them in `.wiki.toml` (`pisar space type add`) or its documents fail `pisar check`, and `pisar lesson accept` requires the target space to declare `note`.
+
+### Features
+
+* add a Codex agent backend with parity to Claude ([#17](https://github.com/e-kulikov/pisar/issues/17)) ([2c268d1](https://github.com/e-kulikov/pisar/commit/2c268d1ae0259e7921e8642a33534aea2afa4c4f)), closes [#12](https://github.com/e-kulikov/pisar/issues/12)
+* declare record types per space in .wiki.toml ([#14](https://github.com/e-kulikov/pisar/issues/14)) ([5ae68c7](https://github.com/e-kulikov/pisar/commit/5ae68c7e4e01dbb06964426deb89df7f02a8325c)), closes [#9](https://github.com/e-kulikov/pisar/issues/9)
+* record commit ids for recovery and explain commits with what and why ([#15](https://github.com/e-kulikov/pisar/issues/15)) ([77d6290](https://github.com/e-kulikov/pisar/commit/77d6290f80e565080950335f0e75e037946cbb9e)), closes [#11](https://github.com/e-kulikov/pisar/issues/11) [#18](https://github.com/e-kulikov/pisar/issues/18)
+* **triage:** add reject to discard an inbox item ([#16](https://github.com/e-kulikov/pisar/issues/16)) ([7005006](https://github.com/e-kulikov/pisar/commit/70050066d3210e9928ec4ee1131cb733f47492b8)), closes [#10](https://github.com/e-kulikov/pisar/issues/10)
+
 ## [0.4.0](https://github.com/e-kulikov/pisar/compare/v0.3.0...v0.4.0) (2026-10-08)
 
 
