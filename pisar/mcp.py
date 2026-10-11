@@ -74,6 +74,8 @@ GIT = {
         values=set(), patterns=(), fixed=()),
 }
 # Refused for every subcommand, before its own list is consulted.
+# Subcommands whose operands before the paths can be revisions.
+REVISION_OPERANDS = ('diff', 'log')
 GIT_BLOCKED = ('-c', '-C', '--config', '--git-dir', '--work-tree', '--exec')
 SCHEMA_ARGS = {'type': 'object', 'properties': {'args': {'type': 'array', 'items': {'type': 'string'}}},
                'required': ['args'], 'additionalProperties': False}
@@ -137,29 +139,85 @@ def _git_option(rule, token, following):
     raise Refused(f'git: option not allowed: {name}')
 
 
-def check_git(args):
-    """The argument list for `git ARGS` (the subcommand first), or Refused."""
+def _git(root, *args):
+    """Output of a read-only git query in ROOT (no helper programs run for rev-parse)."""
+    done = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True, timeout=60)
+    return done.stdout.strip() if done.returncode == 0 else ''
+
+
+def _inside(path, base):
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _admin_paths(root):
+    """Real paths of Git's administrative directories: the git dir and the common dir."""
+    dirs = _git(root, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir').split('\n')
+    return [os.path.realpath(d) for d in dirs if d]
+
+
+def _is_revision(root, operand):
+    """True when OPERAND names a commit or tree and is not a file of the root (`A..B` checks both sides)."""
+    if os.path.lexists(os.path.join(root, operand)):
+        return False
+    sides = [part or 'HEAD' for part in re.split(r'\.\.\.?', operand, maxsplit=1)] if '..' in operand else [operand]
+    for side in sides:
+        if not _git(root, 'rev-parse', '--verify', '--quiet', side + '^{commit}') and \
+                not _git(root, 'rev-parse', '--verify', '--quiet', side + '^{tree}'):
+            return False
+    return True
+
+
+def check_path(operand, root, admin):
+    """OPERAND if it is a path inside ROOT that is not Git's own: otherwise Refused.
+
+    Symlinks are followed (realpath), so an alias of a file outside the root, or of anything under
+    Git's administrative directories, is refused like the target. Pathspec magic is refused.
+    """
+    if not operand or operand.startswith(':') or '\\' in operand:
+        raise Refused(f'git: path not allowed: {operand!r}')
+    if '.git' in operand.split('/'):
+        raise Refused('git: the Git administrative directory cannot be used')
+    real = os.path.realpath(os.path.join(root, operand))
+    if not _inside(real, root):
+        raise Refused(f'git: path is outside the knowledge root: {operand}')
+    if any(_inside(real, directory) for directory in admin) or '.git' in os.path.relpath(real, root).split(os.sep):
+        raise Refused('git: the Git administrative directory cannot be used')
+    return operand
+
+
+def check_git(args, root):
+    """The argument list for `git ARGS` (the subcommand first) in ROOT, or Refused.
+
+    Path operands always follow a `--`, so Git never infers no-index mode for outside files, and every
+    path operand is checked (see check_path). For diff and log an operand before the paths is a revision
+    only when Git resolves it as a commit or tree; anything else is a path.
+    """
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not args:
         raise Refused('git: args must be a non-empty list of strings')
     subcommand, rest = args[0], args[1:]
     if subcommand not in GIT:
         raise Refused(f'git: not an allowed subcommand: {subcommand}')
     rule = GIT[subcommand]
-    checked = []
+    root = os.path.realpath(root)
+    admin = _admin_paths(root)
+    options, revisions, paths = [], [], []
     while rest:
         token = rest.pop(0)
         if token == '--':
-            checked.append(token)
-            checked.extend(rest)  # pathspecs only after this point
+            paths.extend(rest)
             break
         if not token.startswith('-'):
-            checked.append(token)
+            if subcommand in REVISION_OPERANDS and _is_revision(root, token):
+                revisions.append(token)
+            else:
+                paths.append(token)
             continue
         if token in GIT_BLOCKED or any(token.startswith(blocked + '=') for blocked in GIT_BLOCKED):
             raise Refused(f'git: option not allowed: {token.split("=", 1)[0]}')
         passed, rest = _git_option(rule, token, rest)
-        checked.extend(passed)
-    return [subcommand, *rule['fixed'], *checked]
+        options.extend(passed)
+    checked = [check_path(p, root, admin) for p in paths]
+    return [subcommand, *rule['fixed'], *options, *revisions, *(['--', *checked] if checked else [])]
 
 
 class Server:
@@ -248,7 +306,7 @@ class Server:
                 return self.text(self.capture([*self.pisar(), *check_pisar(args)]))
             if name == 'git':
                 return self.text(self.capture(['git', '-C', str(self.root), '-c', 'core.fsmonitor=false',
-                                               '-c', 'core.pager=cat', *check_git(args)]))
+                                               '-c', 'core.pager=cat', *check_git(args, self.root)]))
             if name == 'lesson_accept':
                 return self.text(self.accept(args))
             if name == 'lesson_review':

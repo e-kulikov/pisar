@@ -4,9 +4,10 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from .support import CHECKOUT, Fixture, clean_environ
+from .support import CHECKOUT, Fixture, clean_environ, init_repo
 
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys
@@ -346,18 +347,24 @@ class CodexAllowlistTests(unittest.TestCase):
     """The Codex allowlist (pisar/mcp.py) has the same guarantees as CLAUDE_ALLOWED: nothing it lets through runs
     arbitrary code. Each rule class of AGENTS.md is refused here, through the same checks the server uses."""
 
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='pisar-test-')
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / 'wiki'
+        init_repo(self.root)
+
     def test_git_aliases_config_and_programs_are_refused(self):
         from pisar import mcp
         for args in (['-c', 'alias.x=!sh', 'x'], ['status', '-c', 'core.pager=sh'], ['push'],
                      ['config', 'alias.x', '!sh'], ['diff', '--ext-diff'], ['diff', '--textconv'],
                      ['log', '--output=/tmp/x'], ['diff', '--no-index', '/etc/hosts'], ['--exec-path=/tmp', 'status']):
             with self.subTest(args=args), self.assertRaises(mcp.Refused):
-                mcp.check_git(args)
+                mcp.check_git(args, self.root)
 
     def test_bare_git_and_pisar_are_refused(self):
         from pisar import mcp
         with self.assertRaises(mcp.Refused):
-            mcp.check_git([])
+            mcp.check_git([], self.root)
         for args in ([], ['git', 'status'], ['sh', '-c', 'true'], ['python3', '-c', 'print(1)'],
                      ['mv', 'a', 'b'], ['lesson', 'accept', '--batch', 'x']):
             with self.subTest(args=args), self.assertRaises(mcp.Refused):
@@ -372,9 +379,9 @@ class CodexAllowlistTests(unittest.TestCase):
 
     def test_mv_is_only_a_tracked_rename_through_git_mv(self):
         from pisar import mcp
-        self.assertEqual(mcp.check_git(['mv', 'a.md', 'b.md']), ['mv', 'a.md', 'b.md'])
+        self.assertEqual(mcp.check_git(['mv', 'a.md', 'b.md'], self.root), ['mv', '--', 'a.md', 'b.md'])
         with self.assertRaises(mcp.Refused):
-            mcp.check_git(['mv', '--exec=sh', 'a', 'b'])
+            mcp.check_git(['mv', '--exec=sh', 'a', 'b'], self.root)
 
 
 if __name__ == '__main__':

@@ -6,6 +6,7 @@ user says so.
 """
 import json
 import os
+from pathlib import Path
 import subprocess
 import unittest
 
@@ -263,6 +264,84 @@ class McpTests(Fixture):
                 answer = client.read()
                 self.assertTrue('error' in answer or answer['result'].get('isError'), answer)
                 self.assertEqual(client.request('ping')['result'], {})
+
+    def test_git_never_reads_files_outside_the_root(self):
+        # Two existing files outside the root: Git would switch to no-index mode for them.
+        first, second = self.base / 'outside-one.txt', self.base / 'outside-two.txt'
+        first.write_text('SENTINEL-ONE\n')
+        second.write_text('SENTINEL-TWO\n')
+        client = self.server()
+        for args in (['diff', str(first), str(second)], ['diff', '--', str(first)],
+                     ['log', str(first)], ['add', str(first)], ['status', '../outside-one.txt']):
+            with self.subTest(args=args):
+                text, error = client.text('git', args)
+                self.assertTrue(error)
+                self.assertNotIn('SENTINEL', text)
+
+    def test_git_still_takes_revisions_and_paths_inside_the_root(self):
+        client = self.server()
+        (self.alpha / 'call.md').write_text('Changed synthetic text.\n')
+        for args in (['diff', 'HEAD', '--', 'work/team/alpha/call.md'], ['diff', 'HEAD..HEAD', '--', 'work'],
+                     ['log', '-1', 'HEAD'], ['diff', '--stat', 'HEAD', 'work/team/alpha/call.md'],
+                     ['mv', 'work/team/alpha/call.md', 'work/team/alpha/call2.md'], ['status', '--short']):
+            with self.subTest(args=args):
+                text, error = client.text('git', args)
+                self.assertFalse(error, text)
+        self.assertTrue((self.alpha / 'call2.md').is_file())
+
+    def test_git_never_reads_through_a_symlink_to_an_outside_file(self):
+        outside = self.base / 'outside-link.txt'
+        outside.write_text('SENTINEL-LINK\n')
+        (self.root / 'link.txt').symlink_to(outside)
+        client = self.server()
+        text, error = client.text('git', ['diff', '--no-index', 'link.txt', 'work/team/alpha/call.md'])
+        self.assertTrue(error)
+        self.assertNotIn('SENTINEL', text)
+        text, error = client.text('git', ['add', 'link.txt'])
+        self.assertTrue(error)
+
+    def test_git_refuses_git_administrative_paths_for_every_subcommand(self):
+        config = (self.root / '.git' / 'config').read_bytes()
+        client = self.server()
+        for args in (['mv', 'work/team/alpha/call.md', '.git/config'], ['mv', '-f', 'work/team/alpha/call.md', '.git/config'],
+                     ['add', '.git/config'], ['status', '.git'], ['log', '--', '.git/HEAD'],
+                     ['diff', '--', '.git/config'], ['mv', '.git/config', 'work/x.md'],
+                     ['add', self.root.as_posix() + '/.git/config'], ['add', './work/../.git/config'],
+                     ['add', ':(literal).git/config'], ['add', ':/.git/config']):
+            with self.subTest(args=args):
+                text, error = client.text('git', args)
+                self.assertTrue(error, text)
+        self.assertEqual((self.root / '.git' / 'config').read_bytes(), config)
+
+    def test_git_refuses_symlinks_whose_target_is_git_administrative(self):
+        (self.root / 'alias').symlink_to(self.root / '.git' / 'config')
+        client = self.server()
+        for args in (['add', 'alias'], ['mv', 'alias', 'work/moved.md'], ['mv', 'work/team/alpha/call.md', 'alias']):
+            with self.subTest(args=args):
+                _, error = client.text('git', args)
+                self.assertTrue(error)
+
+    def test_the_full_clean_config_attack_is_stopped_at_the_git_mv(self):
+        # The complete chain: a lesson draft with chosen text is captured as a tracked file, which is then
+        # moved onto .git/config and used to run a filter. Every step must be refused or harmless.
+        marker = self.base / 'MARKER-OUTSIDE-ROOT'
+        before = (self.root / '.git' / 'config').read_bytes()
+        client = self.server()
+        start = client.text('pisar', ['lesson', 'start', '--from', 'work', '--to', 'work/beta', '--title', 'T'])[0]
+        batch = json.loads(start)['batch']
+        draft = Path(json.loads(start)['draft'])
+        payload = f'[core]\n\tattributesFile = {draft}\n[filter "escape"]\n\tclean = touch {marker}; cat\n'
+        check = client.call_with('lesson_draft_read', {'batch': batch})
+        digest = json.loads(check['content'][0]['text'])['sha256']
+        result = client.call_with('lesson_draft_write', {'batch': batch, 'sha256': digest, 'text': payload})
+        self.assertFalse(result.get('isError'), result)
+        _, error = client.text('pisar', ['capture', '--space', 'work/beta', '--id', 'escape-config', '--source', str(draft)])
+        self.assertFalse(error)
+        tracked = next(self.root.glob('work/team/beta/**/escape-config/original'))
+        moved, error = client.text('git', ['mv', '-f', str(tracked.relative_to(self.root)), '.git/config'])
+        self.assertTrue(error, moved)
+        self.assertEqual((self.root / '.git' / 'config').read_bytes(), before)
+        self.assertFalse(marker.exists())
 
     def test_git_reads_and_commits_only_inside_the_root(self):
         client = self.server()
