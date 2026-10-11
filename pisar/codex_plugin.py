@@ -16,7 +16,7 @@ SKILLS = ('pisar', 'lessons', 'research')
 CLAUDE_SKILLS = 'plugin/claude/skills'
 TOOLS = '''## Tools in this session
 
-You have no shell and no file tools. Run pisar with the `pisar` tool: `args` is
+You have no shell tool. Do not edit repository files directly. Run pisar with the `pisar` tool: `args` is
 the list that follows `pisar`, for example `["search", "--space", "work/alpha", "launch"]`.
 Read documents with the `pisar` tool (`read`), and change them only through pisar.
 Run git with the `git` tool: `args` starts with the subcommand, for example

@@ -290,7 +290,7 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
 | 3 tool restriction | `features.shell_tool`, `multi_agent`, `apps`, `plugins`, `browser_use`, `computer_use`, `image_generation`, `hooks`, `goals` off; `web_search` disabled; the server offers `enabled_tools` only | `test_codex_agent.test_main_session_has_no_shell_subagents_plugins_or_web_search`; `test_pisar_server_keeps_the_users_home_and_git_setup_and_only_its_tools` |
 | 4 command allowlist/denylist | `pisar mcp-serve`: tools `pisar` (command prefixes), `git` (per-subcommand option lists) — no execpolicy, see below | `test_codex_mcp.McpTests.test_pisar_refuses_bare_pisar_arbitrary_binaries_and_mv`, `test_git_refuses_bare_git_aliases_config_push_and_programs`, `test_git_refuses_abbreviated_and_unlisted_options`; `test_agent.CodexAllowlistTests` |
 | 5 `lesson accept` asks the user | `lesson_accept` tool: an MCP elicitation the user must accept; fails closed | `test_codex_mcp.test_accept_runs_only_after_an_explicit_user_accept`, `test_accept_is_refused_unless_the_user_accepts`, `test_elicitation_edge_cases_never_accept_by_accident` |
-| 6 edit only lesson drafts | no file-editing tool is offered; `lesson_draft_read` / `lesson_draft_write` change only the draft of an open batch, guarded by the sha256 of the text last read; the profile also allows writing only `<state>/lessons` | `test_codex_drafts.*`; `test_codex_agent.test_permissions_profile_writes_only_the_lesson_drafts` |
+| 6 edit only lesson drafts | the shell is off and the agent is told not to edit files directly (Codex 0.162.0 has no config key for `apply_patch`, which some models offer; its writes are confined to the lesson workspace by the profile); the draft tools are the only path for drafts: `lesson_draft_read` / `lesson_draft_write` change only the draft of an open batch, guarded by the sha256 of the text last read; the profile also allows writing only `<state>/lessons` | `test_codex_drafts.*`; `test_codex_agent.test_permissions_profile_writes_only_the_lesson_drafts` |
 | 7 isolated configuration | `CODEX_HOME` and `HOME` under the state directory; explicit environment; `WIKI_ROOT` never passed | `test_codex_agent.test_child_gets_an_explicit_environment_and_never_wiki_root_or_ambient_secrets` |
 | 8 plugin: skills and reviewer | skills in `$CODEX_HOME/skills`; reviewer = `lesson_review` tool running a tool-less, read-only `codex exec` with the reviewer model and effort | `test_codex_plugin.*`; `test_codex_reviewer.*` |
 | 9 strict MCP | the root's `.mcp.json` (regular file only) translated to `mcp_servers`; nothing from user config | `test_codex_agent.test_root_mcp_file_is_translated_and_symlinks_are_ignored` |
@@ -306,10 +306,12 @@ allowlist with Codex's shell disabled. Codex has no plugin directory like
 the reviewer and the researcher are separate `codex exec` runs that share the
 login of the main session but ignore its configuration
 (`--ignore-user-config --ignore-rules`) and pass their own confinement with
-flags and `-c` overrides. Codex offers no file or shell
-tool here, so the agent reads documents through `pisar read` and edits lesson
-drafts only through `lesson_draft_read`/`lesson_draft_write`; Codex's permission
-profile reads the root and writes only the lesson workspace. The Codex
+flags and `-c` overrides. The main session has no shell tool and its
+`view_image` tool is disabled. The agent reads documents through `pisar read` and
+edits lesson drafts only through `lesson_draft_read`/`lesson_draft_write`;
+Codex's permission profile reads the root and writes only the lesson workspace.
+`apply_patch` is not switched off by any 0.162.0 config key: a model that offers
+it can write only where the profile allows (the lesson workspace). The Codex
 prompt has an extra section about the tools, appended to the shared prompt.
 Repository hooks still run on `git commit`, as they do for Claude.
 
