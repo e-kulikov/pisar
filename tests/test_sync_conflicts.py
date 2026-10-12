@@ -193,3 +193,56 @@ class SyncConflictTests(Fixture):
         self.assertEqual(result['status'], 'invalid')
         self.assertEqual(self.repo_state(), before)
         self.assertEqual(len(git(self.root, 'worktree', 'list').splitlines()), 1)
+
+    def source_base(self):
+        """Commit a source file in the base, so both sides hold it, and bring the other clone up to date."""
+        (self.root / 'work/team/alpha/sources').mkdir(parents=True, exist_ok=True)
+        (self.root / 'work/team/alpha/sources/transcript.txt').write_text('first\nsecond\n')
+        commit_all(self.root)
+        git(self.root, 'push', '-q', 'origin', self.branch)
+        git(self.other, 'pull', '-q', 'origin', self.branch)
+
+    def test_a_taken_source_cannot_be_edited_afterwards(self):
+        self.source_base()
+        self.locally(lambda r: (r / 'work/team/alpha/sources/transcript.txt').write_text('LOCAL\nsecond\n'))
+        self.publish(lambda r: (r / 'work/team/alpha/sources/transcript.txt').write_text('first\nREMOTE\n'))
+        self.both_edit_call()  # A conflict elsewhere, so the sync stops and waits in its work tree
+        result = self.sync()
+        head = git(self.root, 'rev-parse', 'HEAD')
+        self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'work/team/alpha/sources/transcript.txt',
+                 '--side', 'theirs')
+        (Path(result['work']) / 'work/team/alpha/sources/transcript.txt').write_text('edited after take\n')
+        self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'work/team/alpha/call.md', '--side', 'ours')
+        p = self.cli('sync', 'resolve', '--id', result['sync_id'], ok=False)
+        self.assertIn('immutable', p.stderr)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_a_clean_remote_source_cannot_be_edited_in_the_work_tree(self):
+        self.source_base()
+        self.both_edit_call()
+        self.publish(lambda r: (r / 'work/team/alpha/sources/added.txt').write_text('remote original\n'))
+        result = self.sync()
+        self.assertEqual(result['status'], 'conflicts')
+        (Path(result['work']) / 'work/team/alpha/sources/added.txt').write_text('edited by hand\n')
+        self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'work/team/alpha/call.md', '--side', 'ours')
+        p = self.cli('sync', 'resolve', '--id', result['sync_id'], ok=False)
+        self.assertIn('immutable', p.stderr)
+
+    def test_a_local_source_cannot_be_edited_in_the_work_tree(self):
+        self.source_base()
+        self.locally(lambda r: (r / 'work/team/alpha/sources/local.txt').write_text('local original\n'))
+        self.both_edit_call()
+        result = self.sync()
+        (Path(result['work']) / 'work/team/alpha/sources/local.txt').write_text('edited by hand\n')
+        self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'work/team/alpha/call.md', '--side', 'ours')
+        p = self.cli('sync', 'resolve', '--id', result['sync_id'], ok=False)
+        self.assertIn('immutable', p.stderr)
+
+    def test_a_source_present_on_both_sides_cannot_be_deleted_in_the_work_tree(self):
+        self.source_base()
+        self.both_edit_call()
+        result = self.sync()
+        (Path(result['work']) / 'work/team/alpha/sources/transcript.txt').unlink()
+        self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'work/team/alpha/call.md', '--side', 'ours')
+        p = self.cli('sync', 'resolve', '--id', result['sync_id'], ok=False)
+        self.assertIn('immutable', p.stderr)

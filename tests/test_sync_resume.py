@@ -3,6 +3,7 @@
 The faults run in-process (`sync.checkpoint` is replaced), against temporary repositories and a temporary remote.
 """
 import os
+from pathlib import Path
 import subprocess
 from unittest import mock
 
@@ -137,3 +138,97 @@ class SyncResumeTests(Fixture):
         git(root, 'update-ref', ref, git(root, 'rev-parse', 'HEAD~0'))
         with self.assertRaisesRegex(Exception, 'fetched ref moved'):
             sync.do_pull(root, state)
+
+    def conflict_scenario(self, name):
+        def local(repo):
+            (repo / 'work/team/alpha/call.md').write_text(document(related=('work/beta',), body='Local wording.'))
+
+        def remote(repo):
+            (repo / 'work/team/alpha/call.md').write_text(document(related=('work/beta',), body='Remote wording.'))
+        return self.scenario(name, local=local, remote=remote)
+
+    def test_abort_after_the_branch_moved_refuses_and_a_pull_finishes_the_sync(self):
+        for fault in ('moved', 'files'):
+            with self.subTest(fault=fault):
+                root, state, _ = self.scenario(f'abort-{fault}', remote=self.add_remote_document)
+                self.start(root, state)
+                with self.assertRaises(Interrupted):
+                    self.run_with_fault(fault, fault)
+                moved = git(root, 'rev-parse', 'HEAD')
+                state_before = git(root, 'status', '--porcelain')
+                ident = sync.open_journal(sync.Runtime(state, root), '.')['operation_id']
+                with self.assertRaisesRegex(Exception, 'cannot be taken back'):
+                    sync.do_abort(root, state, ident)
+                self.assertEqual(git(root, 'rev-parse', 'HEAD'), moved)
+                self.assertEqual(git(root, 'status', '--porcelain'), state_before)  # abort changed nothing
+                self.assertEqual(sync.do_pull(root, state)['status'], 'fast-forward')
+                self.assertEqual(git(root, 'status', '--porcelain'), '')
+                self.assertTrue((root / 'work/team/alpha/remote-call.md').is_file())
+
+    def test_abort_before_the_branch_moves_leaves_nothing_behind(self):
+        root, state, _ = self.scenario('abort-pending', remote=self.add_remote_document)
+        self.start(root, state)
+        with self.assertRaises(Interrupted):
+            self.run_with_fault('pending', 'pending')
+        head = git(root, 'rev-parse', 'HEAD')
+        ident = sync.open_journal(sync.Runtime(state, root), '.')['operation_id']
+        result = sync.do_abort(root, state, ident)
+        self.assertEqual(result['status'], 'aborted')
+        self.assertEqual(git(root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(root, 'status', '--porcelain'), '')
+        self.assertFalse((sync.Runtime(state, root).path / 'sync' / ident).exists())
+
+    def test_resume_never_overwrites_a_users_edit_of_a_path_the_sync_writes(self):
+        for fault in ('moved', 'files'):
+            with self.subTest(fault=fault, kind='added'):
+                root, state, _ = self.scenario(f'edit-added-{fault}', remote=self.add_remote_document)
+                self.start(root, state)
+                with self.assertRaises(Interrupted):
+                    self.run_with_fault(fault, fault)
+                (root / 'work/team/alpha/remote-call.md').write_text('My own text, not the remote.\n')
+                with self.assertRaisesRegex(Exception, 'remote-call.md'):
+                    sync.do_pull(root, state)
+                self.assertEqual((root / 'work/team/alpha/remote-call.md').read_text(),
+                                 'My own text, not the remote.\n')
+        root, state, _ = self.scenario('edit-modified', remote=self.add_remote_document)
+        self.start(root, state)
+        with self.assertRaises(Interrupted):
+            self.run_with_fault('moved', 'moved')
+        (root / 'work/team/alpha/call.md').write_text('Edited by hand after the interruption.\n')
+        with self.assertRaisesRegex(Exception, 'call.md'):
+            sync.do_pull(root, state)
+        self.assertEqual((root / 'work/team/alpha/call.md').read_text(), 'Edited by hand after the interruption.\n')
+
+    def test_an_interrupted_resolve_is_finished_by_the_same_command_or_by_pull(self):
+        for fault in ('merge-commit', 'journal', 'pending', 'moved', 'files', 'complete'):
+            with self.subTest(fault=fault):
+                root, state, branch = self.conflict_scenario(f'resolve-{fault}')
+                self.start(root, state, merge=True)
+                conflicted = sync.do_pull(root, state, merge=True)
+                self.assertEqual(conflicted['status'], 'conflicts')
+                ident = conflicted['sync_id']
+                work = Path(conflicted['work'])
+                (work / 'work/team/alpha/call.md').write_text(document(related=('work/beta',), body='Both kept.'))
+                before = self.history(root)
+                with self.assertRaises(Interrupted):
+                    self.resolve_with_fault(root, state, ident, fault)
+                if fault == 'merge-commit':
+                    sync.do_resolve(root, state, ident)  # Still a conflict until the merge commit is journaled.
+                    done = 'resolved'
+                else:
+                    done = sync.do_pull(root, state, merge=True)['status']
+                    self.assertIn(done, ('merge', 'up-to-date'))
+                after = self.history(root)
+                self.assertEqual(after['merges'], before['merges'] + 1, fault)
+                self.assertEqual(git(root, 'status', '--porcelain'), '')
+                self.assertEqual(len(git(root, 'worktree', 'list').splitlines()), 1, fault)
+                self.assertIn('Both kept.', (root / 'work/team/alpha/call.md').read_text())
+                self.assertEqual(git(root, 'rev-parse', 'HEAD^2'),
+                                 git(root, 'rev-parse', f'refs/pisar/sync/origin/{branch}'))
+
+    def resolve_with_fault(self, root, state, ident, fault):
+        def stop(point):
+            if point == fault:
+                raise Interrupted(point)
+        with mock.patch('pisar.sync.checkpoint', side_effect=stop):
+            return sync.do_resolve(root, state, ident)

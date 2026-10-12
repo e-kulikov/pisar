@@ -204,6 +204,7 @@ def fetch(repo, remote, branch, ref):
     previous = commit_of(repo, ref)
     git(repo, '-c', 'fetch.recurseSubmodules=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
         '-c', 'fetch.writeCommitGraph=false', '-c', 'fetch.prune=false', '-c', 'fetch.pruneTags=false',
+        '-c', 'transfer.fsckObjects=true', '-c', 'fetch.fsckObjects=true',
         'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-prune', '--refmap=',
         remote, f'+refs/heads/{branch}:{ref}', network=True)
     return previous, commit_of(repo, ref)
@@ -469,10 +470,13 @@ def candidate_root(root, repo, tree, chain):
     return git(root, 'rev-parse', f'{current}^{{tree}}').strip(), overrides
 
 
-def problems_of(runtime, ident, root, tree, overrides):
+def problems_of(runtime, ident, root, tree, overrides, changed):
     """Why the candidate root tree is not valid (empty when valid): `pisar check`'s rules plus conflict markers.
 
-    The candidate is materialised in a scratch directory that is removed afterwards; nothing else is written."""
+    CHANGED lists the root-relative paths the sync writes. Only those are scanned for conflict markers, and never a
+    file under a `sources` folder: an immutable original may legitimately contain marker-like lines (its bytes are
+    checked against the sides in resolve). The candidate is materialised in a scratch directory that is removed
+    afterwards; nothing else is written."""
     scratch = scratch_path(runtime, ident, 'validate')
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(mode=0o700)
@@ -483,11 +487,12 @@ def problems_of(runtime, ident, root, tree, overrides):
             return [str(error)]
         result = documents.check(Wiki(scratch))
         problems = list(result['errors'])
-        for path in sorted(scratch.rglob('*')):
-            if path.is_file() and not path.is_symlink():
-                text = path.read_bytes().decode('utf-8', 'replace')
-                if MARKER.search(text):
-                    problems.append(f'{path.relative_to(scratch).as_posix()}: unresolved conflict markers')
+        for path in sorted(changed):
+            if 'sources' in path.split('/') or not (scratch / path).is_file():
+                continue
+            text = (scratch / path).read_bytes().decode('utf-8', 'replace')
+            if MARKER.search(text) or SEPARATOR.search(text) and path.endswith('.md'):
+                problems.append(f'{path}: unresolved conflict markers')
         return problems
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -561,6 +566,23 @@ def merge_trees(repo, ancestor, ours, theirs, scratch, is_source=lambda path: Fa
             clean[path] = (o[0], hash_blob(repo, merged))
     _no_clash(sorted(set(clean) | {c['path'] for c in conflicts}))
     return clean, conflicts
+
+
+def _unsafe_entries(clean, conflicts):
+    """Problems of the entries a merge would write: unsafe names and symbolic links, clean or conflicted."""
+    problems = []
+    for path, (mode, _) in clean.items():
+        if _path_problem(path):
+            problems.append(f'{path}: {_path_problem(path)}')
+        elif mode == '120000':
+            problems.append(f'{path}: symbolic links are refused in synced content')
+    for conflict in conflicts:
+        path = conflict['path']
+        if _path_problem(path):
+            problems.append(f'{path}: {_path_problem(path)}')
+        elif any(entry and entry[0] == '120000' for entry in conflict['stages'].values()):
+            problems.append(f'{path}: symbolic links are refused in synced content')
+    return problems
 
 
 def _conflict(path, kind, a, o, t, data):
@@ -642,21 +664,33 @@ def check_files(repo, plan):
 
 def apply_files(repo, plan):
     """Write the new bytes of the plan into the working tree (or remove them), then make the index agree for
-    these paths only. Idempotent: a file already at its new bytes is left alone; one at its old bytes is replaced."""
+    these paths only. Idempotent: a file already at its new bytes is left alone; one at its old bytes (or absent,
+    where the old state had no file) is replaced. Any other content is the user's edit and is never overwritten."""
     blobs = read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new']) if x and x[0] in BLOBS])
     for item in plan:
         if _gitlink_item(item):
             continue
         path = repo / item['path']
+        if path.is_dir() or path.is_symlink():
+            raise WikiError(f'{item["path"]}: a directory or link is in the way; not overwritten')
+        current = path.read_bytes() if path.is_file() else None
+        old = blobs[item['old'][1]] if item['old'] else None
         if item['new'] is None:
-            if path.exists() and path.read_bytes() == blobs[item['old'][1]]:
-                path.unlink()
-                _prune_empty(repo, path.parent)
+            if current is None:
+                continue
+            if current != old:
+                raise WikiError(f'{item["path"]}: changed since the sync was planned; not removed')
+            path.unlink()
+            _prune_empty(repo, path.parent)
             continue
         data = blobs[item['new'][1]]
-        if path.exists() and path.read_bytes() == data:
+        if current is not None and current == data:
             os.chmod(path, 0o755 if item['new'][0] == '100755' else 0o644)
             continue
+        if current is not None and current != old:
+            raise WikiError(f'{item["path"]}: changed since the sync was planned; not overwritten')
+        if current is None and path.exists():
+            raise WikiError(f'{item["path"]}: not a regular file; not overwritten')
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_bytes(path, data)
         os.chmod(path, 0o755 if item['new'][0] == '100755' else 0o644)
@@ -835,6 +869,8 @@ def build_work(repo, runtime, ident, head, clean, conflicts):
 
 def _write_entry(work, path, mode, data):
     target = work / path
+    if not target.resolve().is_relative_to(work.resolve()) or _path_problem(path):
+        raise WikiError(f'{path}: refused: the path would leave the work tree')
     if mode == GITLINK or data is None and mode not in BLOBS:
         target.mkdir(parents=True, exist_ok=True)
         return
@@ -968,8 +1004,8 @@ def _start_merge(root, runtime, wiki, repo, relname, names_, head, fetched, iden
                                        is_source=lambda path: _is_source(path, spaces))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    unsafe = [f'{c["path"]}: {_path_problem(c["path"])}' for c in conflicts if _path_problem(c['path'])]
-    if unsafe:  # A conflicted path is written into the work tree: an unsafe name from the remote is never written.
+    unsafe = _unsafe_entries(clean, conflicts)
+    if unsafe:  # Nothing of an unsafe remote is written into the work tree or the repository.
         remove_scratch(runtime, ident)
         return dict(ok=False, status='invalid', repo=relname, head=head, commit=fetched, problems=unsafe)
     if conflicts:
@@ -1032,13 +1068,14 @@ def _verdict(runtime, ident, root, repo, tree, plan):
     except WikiError as error:
         status = 'needs-submodule-sync' if str(error).startswith('needs-submodule-sync') else 'refused'
         return status, [str(error)]
-    problems = _problems(runtime, ident, root, repo, tree)
+    problems = _problems(runtime, ident, root, repo, tree, plan)
     return ('invalid', problems) if problems else None
 
 
-def _problems(runtime, ident, root, repo, tree):
+def _problems(runtime, ident, root, repo, tree, plan):
     tree_root, overrides = candidate_root(root, repo, tree, gitops.ancestors(repo, root))
-    return problems_of(runtime, ident, root, tree_root, overrides)
+    prefix = '' if repo == root else f'{repo.relative_to(root).as_posix()}/'
+    return problems_of(runtime, ident, root, tree_root, overrides, [f'{prefix}{item["path"]}' for item in plan])
 
 
 def _run_move(root, runtime, wiki, repo, journal, outcome):
@@ -1185,12 +1222,14 @@ def do_resolve(root, state_dir, ident):
         leftover = _unmerged(work)
         if leftover:
             raise WikiError(f'unmerged entries remain: {", ".join(sorted(leftover))}')
-        tree = write_tree(repo, _worktree_entries(repo, work, index))
-        problems = _problems(runtime, ident, root, repo, tree)
+        entries = _worktree_entries(repo, work, index)
+        _sources_unchanged(repo, journal, entries)
+        tree = write_tree(repo, entries)
+        plan = plan_between(repo, journal['base'], tree)
+        problems = unsafe_paths(plan) or _problems(runtime, ident, root, repo, tree, plan)
         if problems:
             return dict(ok=False, status='invalid', sync_id=ident, problems=problems,
                         next='fix the files and resolve again, or abort')
-        plan = plan_between(repo, journal['base'], tree)
         check_children(root, repo, plan)
         check_files(repo, plan)
         journal.update(plan=plan, status='open', phase='planned')
@@ -1198,6 +1237,23 @@ def do_resolve(root, state_dir, ident):
         store(runtime, journal)
         checkpoint('journal')
         return _run_move(root, runtime, wiki, repo, journal, 'resolved')
+
+
+def _sources_unchanged(repo, journal, entries):
+    """Every source of the result is exactly one side's bytes (or absent where that side is): never an edit.
+
+    This holds for taken sources, for clean ones and for local ones, whatever the agent or user did in the work
+    tree: a source is an immutable original and can only be taken whole."""
+    spaces = {**_spaces_in(repo, journal['base'], ''), **_spaces_in(repo, journal['fetched'], '')}
+    ours, theirs = tree_entries(repo, journal['base']), tree_entries(repo, journal['fetched'])
+    for path in sorted((set(entries) | set(ours) | set(theirs))):
+        if not _is_source(path, spaces):
+            continue
+        final = entries.get(path, (None, None))[1]
+        sides = {ours.get(path, (None, None))[1], theirs.get(path, (None, None))[1]}
+        if final not in sides:
+            raise WikiError(f'{path}: a source is an immutable original and cannot be edited; take one side with '
+                            'pisar sync take')
 
 
 def _resolve_source(repo, work, index, path, conflict, file):
@@ -1223,6 +1279,8 @@ def _worktree_entries(repo, work, index):
     for line in filter(None, git_bytes(work, 'ls-files', '-s', '-z', index=index).split(b'\0')):
         meta, path = line.split(b'\t', 1)
         mode, oid, _ = meta.decode().split()
+        if mode == '120000':
+            raise WikiError(f'{path.decode("utf-8", "surrogateescape")}: symbolic links cannot be synced')
         if mode == GITLINK:
             entries[path.decode('utf-8', 'surrogateescape')] = (mode, oid)
     for directory, names_, files in os.walk(work):
@@ -1251,6 +1309,9 @@ def do_abort(root, state_dir, ident):
             raise WikiError(f'sync {ident} is {journal["status"]} at {journal.get("phase")}; the branch cannot be '
                             'taken back by abort (pisar sync pull finishes it)')
         repo = repository(root, journal['repo'])
+        if head_commit(repo) != journal['base']:  # Moved, even if the journal does not say so yet.
+            raise WikiError(f'sync {ident} has moved the branch, which cannot be taken back by abort; '
+                            'pisar sync pull finishes it')
         if journal.get('worktree'):
             discard_worktree(repo, work_dir(runtime, ident))
             journal['worktree'] = False

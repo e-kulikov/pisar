@@ -9,10 +9,12 @@ pisar is an offline, standard-library command-line tool for a **file-authoritati
 knowledge repository kept in Git**. Files are the source of truth. pisar finds,
 validates and searches documents, and performs a few explicit, journaled Git
 writes. It reads no meaning into text. It is offline and model-free except
-`pisar domain add --repo` (a git clone), `pisar research` (isolated web research
-by a model; the question leaves the machine, so after the outbound guard it needs
-the user's explicit `--confirm-outbound` whenever the guard reports findings) and
-the launcher `pisar --agent`. **You** (the agent) read sources, understand them and
+`pisar domain add --repo` (a git clone), `pisar sync fetch` and `pisar sync pull`
+(git fetches one branch of a configured remote, only when the user asks for it; see
+"Sync from a remote"), `pisar research` (isolated web research by a model; the
+question leaves the machine, so after the outbound guard it needs the user's
+explicit `--confirm-outbound` whenever the guard reports findings) and the launcher
+`pisar --agent`. **You** (the agent) read sources, understand them and
 write the summaries; pisar checks structure and applies what you prepared.
 
 Successful output is JSON on stdout, except `pisar lesson show`, `--help`, `--version` and `--skill`, which print text, and `pisar --agent`, which forwards the agent's own output. Errors go to stderr prefixed `pisar:`

@@ -111,3 +111,11 @@ class CodexSyncTests(Fixture):
         self.assertTrue(refused[1])
         refused = self.client.text('pisar', ['sync', 'pull', '--remote', 'https://example.invalid/wiki.git'])
         self.assertTrue(refused[1])
+
+    def test_the_pisar_tool_refuses_repositories_outside_the_root_and_option_like_operands(self):
+        for args in (['sync', 'pull', '--repo', '../x'], ['sync', 'pull', '--repo', '/etc'],
+                     ['sync', 'status', '--repo', '.git'], ['sync', 'fetch', '--remote', 'ext::sh'],
+                     ['sync', 'take', '--id', 'sync-000000000000', '--path', '../x', '--side', 'ours'],
+                     ['sync', 'resolve', '--id', '../../x']):
+            with self.subTest(args=args):
+                self.assertTrue(self.client.text('pisar', args)[1], args)

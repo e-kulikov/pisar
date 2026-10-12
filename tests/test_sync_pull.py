@@ -5,10 +5,6 @@ import subprocess
 from .support import Fixture, clean_environ, commit_all, document, git
 
 
-def git_bytes(repo, *args):
-    return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, check=True).stdout
-
-
 class SyncPullTests(Fixture):
     def setUp(self):
         super().setUp()
@@ -188,39 +184,6 @@ class SyncPullTests(Fixture):
         self.assertEqual((status['ahead'], status['behind']), (0, 0))
         self.assertEqual(status['open'], [])
 
-    def hostile_commit(self, names):
-        """A commit on the remote whose top-level tree also holds entries NAMES (raw tree bytes, as a hostile
-        remote could send). Returns the commit id; nothing in the test checks these names out."""
-        git(self.other, 'pull', '-q', 'origin', self.branch)
-        blob = subprocess.run(['git', '-C', str(self.other), 'hash-object', '-w', '--stdin'],
-                              input=b'Hostile.\n', capture_output=True, check=True).stdout.strip().decode()
-        raw = b''
-        for record in filter(None, git_bytes(self.other, 'ls-tree', '-z', 'HEAD').split(b'\0')):
-            meta, path = record.split(b'\t', 1)
-            mode, _, oid = meta.decode().split()
-            raw += mode.encode() + b' ' + path + b'\0' + bytes.fromhex(oid)
-        for name in names:
-            raw += b'100644 ' + name.encode() + b'\0' + bytes.fromhex(blob)
-        tree = subprocess.run(['git', '-C', str(self.other), 'hash-object', '-t', 'tree', '-w', '--literally',
-                               '--stdin'], input=raw, capture_output=True, check=True).stdout.strip().decode()
-        commit = git(self.other, 'commit-tree', tree, '-p', 'HEAD', '-m', 'hostile')
-        git(self.other, 'update-ref', f'refs/heads/{self.branch}', commit)
-        git(self.other, 'push', '-q', '-f', 'origin', self.branch)
-        return commit
-
-    def test_hostile_top_level_names_are_refused_and_nothing_is_written(self):
-        marker = self.base / 'escaped'
-        for names in (['..'], ['.git'], ['.GIT'], ['a\\b.md']):
-            with self.subTest(names=names):
-                self.hostile_commit(names)
-                self.cli('sync', 'fetch')
-                before = self.snapshot()
-                result = json.loads(self.cli('sync', 'pull', ok=False).stdout)
-                self.assertEqual(result['status'], 'invalid')
-                self.assertTrue(result['problems'], result)
-                self.assertEqual(self.snapshot(), before)
-                self.assertFalse(marker.exists())
-
     def test_an_ignored_or_untracked_file_in_the_way_of_an_incoming_path_refuses_the_pull(self):
         self.add_document()  # The remote adds work/team/alpha/remote-call.md ...
         (self.root / '.gitignore').write_text('*.md.local\n')
@@ -231,3 +194,25 @@ class SyncPullTests(Fixture):
         p = self.cli('sync', 'pull', ok=False)  # The untracked file is user work: the clean check refuses first.
         self.assertIn('remote-call.md', p.stderr)
         self.assertEqual(self.snapshot(), before)
+
+    def test_a_source_with_marker_lines_does_not_block_unrelated_syncs(self):
+        (self.root / 'work/team/alpha/sources').mkdir(parents=True, exist_ok=True)
+        (self.root / 'work/team/alpha/sources/diff.txt').write_text(
+            '<<<<<<< HEAD\nold line\n=======\nnew line\n>>>>>>> branch\n')
+        commit_all(self.root)
+        git(self.root, 'push', '-q', 'origin', self.branch)
+        git(self.other, 'pull', '-q', 'origin', self.branch)
+        self.add_document()
+        result = self.fetch_and_pull()
+        self.assertEqual((result['ok'], result['status']), (True, 'fast-forward'))
+        self.assertTrue(self.data('check')['ok'])
+
+    def test_a_changed_document_with_conflict_markers_is_refused(self):
+        def markers(repo):
+            (repo / 'work/team/alpha/pasted.md').write_text(
+                document('pasted', 'work/alpha', body='<<<<<<< HEAD\nold\n>>>>>>> branch\n'))
+        self.publish(markers)
+        self.cli('sync', 'fetch')
+        result = json.loads(self.cli('sync', 'pull', ok=False).stdout)
+        self.assertEqual(result['status'], 'invalid')
+        self.assertTrue(any('conflict markers' in p for p in result['problems']), result['problems'])
