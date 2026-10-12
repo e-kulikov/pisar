@@ -917,6 +917,8 @@ def do_pull(root, state_dir, relative=None, remote=None, branch=None, merge=Fals
         if is_ancestor(repo, fetched, head):
             return dict(ok=True, status='up-to-date', repo=relname, head=head, commit=fetched)
         gitops.clean_except(repo)  # Nothing of the user's is dirty, staged or untracked: the move cannot take it.
+        for parent, link, _ in gitops.ancestors(repo, root):
+            gitops.clean_except(parent)  # The pin of each parent is committed after the move: it must be clean now.
         mode = 'fast-forward' if is_ancestor(repo, head, fetched) else ('merge' if merge else None)
         if mode is None:
             return dict(ok=False, status='diverged', repo=relname, head=head, commit=fetched,
@@ -1028,6 +1030,8 @@ def discard_worktree_of(runtime, repo, journal):
 
 def _resume(root, runtime, wiki, repo, journal):
     gitops.clean_except(repo, [item['path'] for item in journal['plan']])  # Only the sync's own paths may differ.
+    for parent, link, _ in gitops.ancestors(repo, root):
+        gitops.clean_except(parent, [link])  # Only the pin of the child that already moved may differ.
     if journal['phase'] == 'planned' and head_commit(repo) == journal['base']:
         check_children(root, repo, journal['plan'])
         check_files(repo, journal['plan'])
