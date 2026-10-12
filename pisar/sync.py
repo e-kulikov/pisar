@@ -466,24 +466,40 @@ def remove_scratch(runtime, ident):
         shutil.rmtree(directory)
 
 
+def _cleanup_all(*actions):
+    """Attempt every independent cleanup, then re-raise its first failure."""
+    first = None
+    for action in actions:
+        try:
+            action()
+        except BaseException as error:
+            if first is None:
+                first = error
+    if first is not None:
+        raise first
+
+
 def discard_worktree(repo, path):
     """Remove the linked worktree of a sync: its files and its administrative entry."""
-    if path.exists() or path.is_symlink():
-        git(repo, 'worktree', 'remove', '--force', str(path), check=False)
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
-    git(repo, 'worktree', 'prune', check=False)
+    def remove():
+        if path.exists() or path.is_symlink():
+            git(repo, 'worktree', 'remove', '--force', str(path), check=False)
+
+    def remove_files():
+        if path.exists():
+            shutil.rmtree(path)
+
+    def prune():
+        git(repo, 'worktree', 'prune', check=False)
+
+    _cleanup_all(remove, remove_files, prune)
 
 
 def finish_leftovers(runtime, repo, relative):
-    """Clean up the work of completed syncs of this repository that were interrupted before their cleanup."""
-    for journal in journals_of(runtime, relative):
-        if journal.get('status') == 'complete' and journal.get('worktree'):
-            discard_worktree(repo, scratch_path(runtime, journal['operation_id'], 'work'))
-            journal['worktree'] = False
-            store(runtime, journal)
-        if journal.get('status') in ('complete', 'aborted'):
-            remove_scratch(runtime, journal['operation_id'])
+    """Retry independent cleanup of complete and aborted syncs, leaving open work untouched."""
+    _cleanup_all(*(lambda journal=journal: discard_worktree_of(runtime, repo, journal)
+                   for journal in journals_of(runtime, relative)
+                   if journal.get('status') in ('complete', 'aborted')))
 
 
 # --- trees: materialisation and validation -------------------------------------------------------------------
@@ -846,22 +862,23 @@ def publish_entry(repo, runtime, ident, path, old, new):
     journaled states, build the new index in a private copy, write it into the lock and rename it over the index. Git
     writers either finish before the lock is taken (and the comparison sees them) or find the lock and fail.
 
-    Everything after the lock is created runs in one try/finally: an unpublished lock created here is removed on every
-    unwound exit (a return, an exception, a KeyboardInterrupt). A lock whose creation failed is never removed. Only an
-    abrupt exit (no unwinding, as a kill) leaves the lock, and the next run refuses to start while it exists.
+    Everything after the lock is created runs in one try/finally: every unwound exit (a return, an exception, a
+    KeyboardInterrupt) attempts all owned cleanups, even if another fails. Physical removal can fail if the OS
+    rejects it. A lock whose creation failed is never removed. An abrupt exit (no unwinding, as a kill) leaves
+    the lock, and the next run refuses to start while it exists.
 
     The private copy keeps the real index's timestamps, so Git judges the cached entries exactly as it would for the real
     index (review 20d, 2); the lock gets the timestamp of the private index before it is renamed; the lock gets the
     access mode of the index it replaces, or the mode Git would give a new index (review 20d, 3)."""
     index = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'index').strip())
     lock = index.with_name(index.name + '.lock')
+    scratch = scratch_path(runtime, ident, 'index.private')
+    published = False
     try:
         fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
         raise WikiError(f'{lock} exists: another Git process holds the index. pisar sync does not remove it; when no '
                         'git process is running, remove it yourself and run the command again') from None
-    scratch = scratch_path(runtime, ident, 'index.private')
-    published = False
     try:
         os.fchmod(fd, _index_mode(repo, index))
         checkpoint('index-locked')
@@ -888,11 +905,11 @@ def publish_entry(repo, runtime, ident, path, old, new):
         os.replace(lock, index)
         published = True
     finally:
-        if fd is not None:
-            os.close(fd)
-        scratch.unlink(missing_ok=True)
-        if not published:
-            lock.unlink(missing_ok=True)  # created by this call: the only lock we ever remove
+        _cleanup_all(
+            lambda: os.close(fd) if fd is not None else None,
+            lambda: scratch.unlink(missing_ok=True),
+            lambda: lock.unlink(missing_ok=True) if not published else None,
+        )  # created by this call: the only lock we ever remove
 
 
 def _private_copy(repo, index, scratch):
@@ -1408,11 +1425,13 @@ def _run_move(root, runtime, wiki, repo, journal, outcome):
 
 
 def discard_worktree_of(runtime, repo, journal):
-    if journal.get('worktree'):
-        discard_worktree(repo, work_dir(runtime, journal['operation_id']))
-        journal['worktree'] = False
-        store(runtime, journal)
-    remove_scratch(runtime, journal['operation_id'])
+    def remove_worktree():
+        if journal.get('worktree'):
+            discard_worktree(repo, work_dir(runtime, journal['operation_id']))
+            journal['worktree'] = False
+            store(runtime, journal)
+
+    _cleanup_all(remove_worktree, lambda: remove_scratch(runtime, journal['operation_id']))
 
 
 def _resume(root, runtime, wiki, repo, journal):
@@ -1656,12 +1675,9 @@ def do_abort(root, state_dir, ident):
                         work=str(work_dir(runtime, ident)),
                         next=f'edit the files in {work_dir(runtime, ident)}, then pisar sync resolve --id {ident}, '
                              f'or pisar sync abort --id {ident} again')
-        if journal.get('worktree'):
-            discard_worktree(repo, work_dir(runtime, ident))
-            journal['worktree'] = False
-        remove_scratch(runtime, ident)
         journal['status'] = 'aborted'
         store(runtime, journal)
+        discard_worktree_of(runtime, repo, journal)
         return dict(ok=True, status='aborted', sync_id=ident, repo=journal['repo'])
 
 
