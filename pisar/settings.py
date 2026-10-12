@@ -83,6 +83,19 @@ def commit_message():
     return options
 
 
+SYNC_DEFAULTS = {'remote': 'origin', 'branch': None}
+
+
+def sync_option(name, flag=None):
+    """(value, source) of a [sync] setting: flag > config file > default (never the environment)."""
+    if flag is not None:
+        return flag, 'flag'
+    table = config.load().get('sync', {})
+    if name in table:
+        return table[name], 'config'
+    return SYNC_DEFAULTS[name], 'default'
+
+
 def research_agent():
     """(agent, source) of the web researcher behind ``pisar research``; claude unless configured."""
     configuration = config.load()
@@ -125,5 +138,8 @@ def show(flags):
     table = config.load().get('commit_message', {})
     for key, value in commit_message().items():
         result[f'commit_message.{key}'] = dict(value=value, source='config' if key in table else 'default')
+    for key in config.SYNC_KEYS:
+        value, source = sync_option(key)
+        result[f'sync.{key}'] = dict(value=value, source=source)
     file = config.path()
     return dict(file=dict(path=str(file), exists=file.exists()), settings=result)

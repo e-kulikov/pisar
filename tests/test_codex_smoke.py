@@ -125,7 +125,8 @@ class CodexSmokeTests(Fixture):
 
     def test_real_codex_reads_the_pisar_server_and_its_tools(self):
         text = self.codex('mcp', 'get', 'pisar')
-        self.assertIn('enabled_tools: pisar, git, lesson_accept, lesson_review, lesson_draft_read, lesson_draft_write', text)
+        self.assertIn('enabled_tools: pisar, git, lesson_accept, lesson_review, lesson_draft_read, lesson_draft_write, '
+                      'sync_file_read, sync_file_write', text)
         self.assertIn('mcp-serve', text)
         self.assertIn(f'tool_timeout_sec: {codex_agent.SERVER_TOOL_TIMEOUT}', text)
 

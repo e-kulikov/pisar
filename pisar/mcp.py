@@ -16,7 +16,7 @@ import sys
 from . import __version__
 from . import codex_reviewer, lesson
 from .codex_agent import pisar_command, server_environment
-from .operations import atomic_bytes
+from .operations import Runtime, atomic_bytes
 from .safety import WikiError, concrete_id, sha256
 from .spaces import Wiki
 
@@ -26,7 +26,7 @@ TIMEOUT = 1800
 # The pisar subcommands the agent may run, as argument prefixes. `lesson accept` is not here:
 # it is `lesson_accept`, which always asks the user (see Server.accept).
 PISAR = (('spaces',), ('check',), ('search',), ('read',), ('inventory',), ('capture',), ('save',),
-         ('triage',), ('domain',), ('space',), ('guard',), ('config',), ('research',),
+         ('triage',), ('domain',), ('space',), ('guard',), ('config',), ('research',), ('sync',),
          ('lesson', 'start'), ('lesson', 'check'), ('lesson', 'review'), ('lesson', 'show'),
          ('lesson', 'discard'))
 ACCEPT = ('lesson', 'accept')
@@ -103,6 +103,16 @@ TOOLS = (
           {'type': 'object', 'properties': {'batch': {'type': 'string'}, 'sha256': {'type': 'string'},
                                             'text': {'type': 'string'}},
            'required': ['batch', 'sha256', 'text'], 'additionalProperties': False}),
+    _tool('sync_file_read', 'Read one file of the work tree of an open sync (a conflicted merge): its text and '
+                            'sha256. The path is relative to the work tree.',
+          {'type': 'object', 'properties': {'sync_id': {'type': 'string'}, 'path': {'type': 'string'}},
+           'required': ['sync_id', 'path'], 'additionalProperties': False}),
+    _tool('sync_file_write', 'Replace one file of the work tree of an open sync. Pass the sha256 you last read '
+                             '(of empty text for a new file); refused when the file changed since. Files under a '
+                             '`sources` folder are immutable: resolve them with pisar sync take.',
+          {'type': 'object', 'properties': {'sync_id': {'type': 'string'}, 'path': {'type': 'string'},
+                                            'sha256': {'type': 'string'}, 'text': {'type': 'string'}},
+           'required': ['sync_id', 'path', 'sha256', 'text'], 'additionalProperties': False}),
 )
 TOOL_NAMES = tuple(tool['name'] for tool in TOOLS)
 DRAFT_LIMIT = 256 * 1024  # bytes of one draft
@@ -396,6 +406,8 @@ class Server:
                 return self.text(self.review(args))
             if name in ('lesson_draft_read', 'lesson_draft_write'):
                 return self.text(self.draft(name, arguments))
+            if name in ('sync_file_read', 'sync_file_write'):
+                return self.text(self.sync_file(name, arguments))
         except WikiError as error:
             return self.text(str(error), error=True)
         raise _Unknown(f'tool {name}')
@@ -484,6 +496,55 @@ class Server:
                 raise Refused(f'{name}: the draft changed since it was read; read it again and merge')
             atomic_bytes(path, data)
         return json.dumps({'batch': batch, 'sha256': sha256(data)}, ensure_ascii=False, indent=2)
+
+    def sync_file(self, name, arguments):
+        """One file of the work tree of an open sync: read it, or replace it when its digest still matches.
+
+        The work tree is the only place: the path is confined by safety.safe_path (no `..`, no `.git`, no symbolic
+        link on the way) and a path with a `sources` folder is refused. A write holds the writer lock and checks
+        the journal and the digest inside it."""
+        from . import sync
+        allowed = {'sync_id', 'path'} if name == 'sync_file_read' else {'sync_id', 'path', 'sha256', 'text'}
+        if set(arguments) - allowed:
+            raise Refused(f'{name}: unknown arguments: {", ".join(sorted(set(arguments) - allowed))}')
+        ident = concrete_id(arguments.get('sync_id'), 'sync_id')
+        relative = arguments.get('path')
+        if not isinstance(relative, str):
+            raise Refused(f'{name}: path must be a string relative to the work tree')
+        if 'sources' in relative.split('/'):
+            raise Refused(f'{name}: sources are immutable originals; resolve them with pisar sync take')
+        runtime = Runtime(self.state, self.root)
+        if name == 'sync_file_read':
+            return json.dumps(self.sync_record(runtime, ident, relative), ensure_ascii=False, indent=2)
+        text, digest = arguments.get('text'), arguments.get('sha256')
+        if not isinstance(text, str) or not isinstance(digest, str):
+            raise Refused(f'{name}: text and sha256 are required')
+        data = text.encode('utf-8')
+        if len(data) > DRAFT_LIMIT:
+            raise Refused(f'{name}: the file is too large (more than {DRAFT_LIMIT} bytes)')
+        with runtime.lock():
+            record = self.sync_record(runtime, ident, relative)
+            if record['sha256'] != digest:
+                raise Refused(f'{name}: the file changed since it was read; read it again and merge')
+            atomic_bytes(sync.safe_work_path(runtime, ident, relative), data)
+        return json.dumps({'sync_id': ident, 'path': relative, 'sha256': sha256(data)}, ensure_ascii=False, indent=2)
+
+    def sync_record(self, runtime, ident, relative):
+        from . import sync
+        journal = sync.load(runtime, ident)
+        if journal['status'] != 'conflicts':
+            raise Refused(f'sync {ident} is not waiting for conflict resolution')
+        path = sync.safe_work_path(runtime, ident, relative)
+        if not path.exists():
+            return dict(sync_id=ident, path=relative, exists=False, sha256=sha256(b''), text='')
+        if not path.is_file():
+            raise Refused(f'{relative} is not a file')
+        data = path.read_bytes()
+        try:
+            text = data.decode('utf-8')
+        except UnicodeDecodeError:
+            raise Refused(f'{relative} is not UTF-8 text') from None
+        return dict(sync_id=ident, path=relative, exists=True, sha256=sha256(data), text=text)
 
     @staticmethod
     def draft_record(batch, path):

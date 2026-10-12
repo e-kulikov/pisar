@@ -62,7 +62,8 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('pisar/agent-prompt.md', names)
             self.assertIn('pisar/commit-message-prompt.md', names)
             self.assertIn('pisar/agent.py', names)
-            for module in ('codex_agent.py', 'codex_plugin.py', 'codex_reviewer.py', 'research_codex.py', 'mcp.py'):
+            for module in ('codex_agent.py', 'codex_plugin.py', 'codex_reviewer.py', 'research_codex.py', 'mcp.py',
+                           'sync.py', 'sync_command.py'):
                 self.assertIn(f'pisar/{module}', names)
             for bundled in ('skills/lessons/SKILL.md', 'skills/research/SKILL.md',
                             'hooks/hooks.json', 'hooks/protect-descriptors.py'):

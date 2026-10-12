@@ -1,4 +1,6 @@
-"""Explicit local Git ownership and commits; no hooks, remotes or history rewriting."""
+"""Explicit local Git ownership and commits; no hooks or history rewriting.
+
+pisar never pushes, and it reaches a remote only through `pisar sync` (see sync.py)."""
 from pathlib import Path
 import os
 import subprocess
@@ -154,7 +156,7 @@ def diff_text(repo, old, new, limit):
     return text + '\n[diff truncated]\n' if truncated else text
 
 
-def commit(repo, paths, operation_id, verified=None, pins=None, intent=None, message=None):
+def commit(repo, paths, operation_id, verified=None, pins=None, intent=None, message=None, sync=None):
     """Commit PATHS without ever using the shared index.
 
     The tree is built in a private index read from HEAD; VERIFIED maps a path to the exact journaled
@@ -167,7 +169,9 @@ def commit(repo, paths, operation_id, verified=None, pins=None, intent=None, mes
     INTENT, when given, receives {repo, commit, parent} after the commit object exists and before the
     branch moves: the caller journals it, so a crash after the move is recognised by id.
     The branch then advances by compare-and-swap, and the real index is made to agree for ONLY these
-    paths: every other staged or unstaged change of the user is left as it was."""
+    paths: every other staged or unstaged change of the user is left as it was. SYNC, when given, replaces
+    sync_index as that last step (it receives the repository and the paths), so a caller can finish the index
+    with its own checked steps."""
     paths = sorted(set(paths))
     verified = verified or {}
     if not paths:
@@ -191,7 +195,7 @@ def commit(repo, paths, operation_id, verified=None, pins=None, intent=None, mes
                 run(repo, 'update-index', '--force-remove', '--', relative, index=index)
         tree = run(repo, 'write-tree', index=index).strip()
         if tree == run(repo, 'rev-parse', f'{old}^{{tree}}').strip():
-            sync_index(repo, paths)  # Already committed (a retry): finish the interrupted synchronization.
+            (sync or sync_index)(repo, paths)  # Already committed (a retry): finish the interrupted synchronization.
             return None
         # Hooks and signing stay off: writes cannot run user publishing scripts. The subject is
         # informational only: recovery recognises our commits by the ids in the journal.
@@ -203,7 +207,7 @@ def commit(repo, paths, operation_id, verified=None, pins=None, intent=None, mes
         if intent is not None:
             intent(dict(repo=str(repo), commit=new, parent=old))
         run(repo, 'update-ref', '-m', f'wiki: {operation_id}', 'HEAD', new, old)
-    sync_index(repo, paths)
+    (sync or sync_index)(repo, paths)
     return new
 
 

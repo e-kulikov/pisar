@@ -118,12 +118,34 @@ class AgentTests(Fixture):
         settings = json.loads(argv[argv.index('--settings') + 1])
         self.assertEqual(settings, {'permissions': {'ask': ['Bash(pisar lesson accept *)']}})
 
-    def test_only_the_lesson_workspace_is_writable_by_absolute_path(self):
+    def test_only_the_lesson_workspace_and_the_sync_work_trees_are_writable_by_absolute_path(self):
         _, call = self.launch()
         edits = [r for r in values(call['argv'], '--allowedTools') if r.startswith('Edit(')]
-        self.assertEqual(edits, [f'Edit(/{self.state.resolve()}/lessons/**)'])
-        self.assertTrue(edits[0].startswith('Edit(//'))
+        sync_work = f'Edit(/{self.runtime_path()}/sync/*/work/**)'
+        self.assertEqual(edits, [f'Edit(/{self.state.resolve()}/lessons/**)', sync_work])
+        self.assertTrue(all(rule.startswith('Edit(//') for rule in edits))
         self.assertNotIn('--add-dir', call['argv'])
+
+    def runtime_path(self):
+        from pisar.operations import Runtime
+        return Runtime(self.state, self.root).path.resolve()
+
+    def test_sync_work_trees_are_editable_but_their_git_file_and_journals_are_not(self):
+        _, call = self.launch()
+        denied = values(call['argv'], '--disallowedTools')
+        self.assertIn(f'Edit(/{self.runtime_path()}/sync/*/work/.git)', denied)
+        allowed = values(call['argv'], '--allowedTools')
+        self.assertNotIn(f'Edit(/{self.runtime_path()}/sync/**)', allowed)
+        self.assertFalse(any('/sync/*.json' in r or r.endswith('/sync/**') for r in allowed), allowed)
+
+    def test_sync_is_allowed_as_pisar_sync_only_and_nothing_wider_is_added(self):
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        self.assertIn('Bash(pisar sync *)', allowed)
+        self.assertNotIn('Bash(pisar *)', allowed)
+        self.assertNotIn('Bash(pisar sync*)', allowed)
+        self.assertNotIn('Bash(git push*)', allowed)
+        self.assertEqual([r for r in allowed if r.startswith('Bash(') and 'sync' in r], ['Bash(pisar sync *)'])
 
     def test_bundled_plugin_is_extracted_and_passed_with_plugin_dir(self):
         from pisar import claude_plugin

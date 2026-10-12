@@ -409,6 +409,8 @@ class CommittingCommands(unittest.TestCase):
 
     def test_every_committing_command_refuses_a_missing_explanation_when_enabled(self):
         for path in commit_message.COMMITTING:
+            if path in commit_message.DEFERRED:
+                continue  # Checked in test_deferred_commands_ask_for_an_explanation_only_when_they_need_one.
             command, action = path[0], path[1]
             type_action = path[2] if len(path) > 2 else None
             with self.subTest(path=path), \
@@ -418,6 +420,19 @@ class CommittingCommands(unittest.TestCase):
                                  context=None, context_file=None)
                 with self.assertRaisesRegex(WikiError, '--what'):
                     commit_message.explain(args)
+
+    def test_deferred_commands_ask_for_an_explanation_only_when_they_need_one(self):
+        self.assertEqual(commit_message.DEFERRED, (('sync', 'pull'), ('sync', 'resolve')))
+        for path in commit_message.DEFERRED:
+            self.assertIn(path, commit_message.COMMITTING)
+            with self.subTest(path=path), \
+                    mock.patch.object(settings, 'commit_message', return_value=dict(
+                        config.COMMIT_MESSAGE_DEFAULTS, enabled=True)):
+                args = Namespace(command=path[0], action=path[1], type_action=None, what=None, why=None,
+                                 context=None, context_file=None)
+                commit_message.reset(commit_message.explain(args))  # A fast-forward needs no explanation: no error.
+                with self.assertRaisesRegex(WikiError, '--what'):
+                    commit_message.require(None, None)
 
 
 class Explanations(Writer):
