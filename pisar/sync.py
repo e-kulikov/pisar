@@ -28,8 +28,14 @@ BLOBS = ('100644', '100755')
 # Transports a fetch may use; `protocol.allow=never` refuses every other one, `ext::` and helpers included.
 PROTOCOLS = ('-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', '-c', 'protocol.ssh.allow=always',
              '-c', 'protocol.git.allow=always', '-c', 'protocol.file.allow=always')
-HARDENING = ('-c', 'core.attributesFile=/dev/null', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
-             '-c', 'commit.gpgsign=false', '-c', 'core.untrackedCache=false', '--no-optional-locks')
+# Neutral configuration of every sync call: no hook, no monitor, no signing, no attribute file and no end-of-line
+# conversion. Together with an attribute source that is the empty tree (see _command), no conversion can run.
+HARDENING = ('-c', 'core.attributesFile=/dev/null', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=/dev/null',
+             '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-c', 'core.untrackedCache=false',
+             '--no-optional-locks')
+# Repository settings that name a program or rewrite a transport: a sync refuses to run with them (review 20, 2).
+TRANSPORT_PROGRAM_KEY = re.compile(r'^(remote\.([^.]+)\.(uploadpack|receivepack|vcs|proxy)|core\.(sshcommand|gitproxy)|'
+                                   r'url\..+\.(pushinsteadof|insteadof)|protocol\.([^.]+\.)?allow)$', re.I)
 # Git's environment for sync: no ambient GIT_* variable, no system configuration or attribute file.
 ENVIRONMENT = dict(GIT_CONFIG_NOSYSTEM='1', GIT_ATTR_NOSYSTEM='1', GIT_PAGER='cat', GIT_TERMINAL_PROMPT='0',
                    GIT_LITERAL_PATHSPECS='1', GIT_EDITOR='true')
@@ -54,10 +60,23 @@ def check_git():
         raise WikiError(f'pisar sync needs Git {MIN_GIT[0]}.{MIN_GIT[1]} or newer: {text.strip() or "git not found"}')
 
 
+_EMPTY_TREES = {}
+
+
+def empty_tree(repo):
+    """The empty tree of REPO's object format (SHA-1 or SHA-256), which is the attribute source of every sync call."""
+    if str(repo) not in _EMPTY_TREES:
+        _EMPTY_TREES[str(repo)] = subprocess.run(['git', '-C', str(repo), 'hash-object', '-t', 'tree', '--stdin'],
+                                                 input=b'', capture_output=True, check=True).stdout.decode().strip()
+    return _EMPTY_TREES[str(repo)]
+
+
 def _command(repo, args, network=False):
     argv = ['git', '-C', str(repo), *HARDENING, *(PROTOCOLS if network else ()), *args]
     env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
     env.update(ENVIRONMENT)
+    # Attributes come from the empty tree: no filter, driver or conversion named by any file can apply to a sync.
+    env['GIT_ATTR_SOURCE'] = empty_tree(repo)
     return argv, env
 
 
@@ -162,7 +181,26 @@ def repository(root, relative):
     if not repo.is_dir() or gitops.owner(repo, root) != repo.resolve():
         raise WikiError(f'--repo must name a Git repository in the knowledge root: {relative}')
     gitops.ancestors(repo, root)  # Every nested repository is a registered submodule of its parent.
+    _refuse_local_attributes(repo)
     return repo
+
+
+def _refuse_local_attributes(repo):
+    """Refuse a repository whose own info/attributes sets anything: Git reads that file whatever the attribute
+    source, so a sync there could apply a conversion. The user's own .gitattributes is refused as content later."""
+    path = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'info/attributes').strip())
+    if path.is_file() and _attribute_problem(path.read_text(encoding='utf-8', errors='replace')):
+        raise WikiError(f'{path} sets Git attributes; pisar sync refuses to run in this repository')
+
+
+def _transport_guard(repo, name):
+    """Refuse repository settings that name a transport program (or rewrite the URL): nothing configured in the
+    repository may decide which program a fetch runs (review 20, finding 2). Credentials stay the user's own."""
+    for key in git(repo, 'config', '--local', '--name-only', '--list', check=False).split():
+        found = TRANSPORT_PROGRAM_KEY.match(key)
+        if found and (found[2] is None or found[2].lower() == name.lower()):
+            raise WikiError(f'{key} is set in this repository; pisar sync refuses repository-configured transport '
+                            'programs (remove the setting, or configure it outside the repository)')
 
 
 def rel(root, repo):
@@ -176,6 +214,7 @@ def names(repo, remote=None, branch=None):
         raise WikiError(f'remote must be the name of a Git remote, not a URL or path: {name!r}')
     if not git(repo, 'config', '--local', '--get', f'remote.{name}.url', check=False).strip():
         raise WikiError(f'no remote named {name} in {repo}; pisar never adds remotes, configure it with git remote add')
+    _transport_guard(repo, name)
     value, _ = settings.sync_option('branch', branch)
     if value is None:
         head = symbolic_head(repo)
@@ -410,11 +449,13 @@ def _path_problem(path):
 
 
 def _attribute_problem(content):
-    for line in content.splitlines():
-        for token in line.split('#', 1)[0].split()[1:]:
-            name = token.lstrip('-!').split('=', 1)[0]
-            if name in ATTRIBUTE_NAMES or name.startswith('export-'):
-                return name
+    """The first line of CONTENT that is not a comment, or None when CONTENT is comments and blank lines only.
+
+    Only a line whose first non-blank character is '#' is a comment. Anything else (a pattern, a macro, quoting,
+    an escape) is a rule Git would apply, and is refused rather than parsed: refusing is always safe here."""
+    for line in content.split('\n'):
+        if line.strip() and not line.lstrip().startswith('#'):
+            return line.strip()
     return None
 
 
