@@ -148,6 +148,12 @@ class SyncPullTests(Fixture):
         def attributes(repo):
             (repo / '.gitattributes').write_text('*.md filter=evil\n')
         self.publish(attributes)
+        # The repository itself names the filter: the guard refuses it before any fetch or pull runs.
+        p = self.cli('sync', 'fetch', ok=False)
+        self.assertIn('filter.evil.smudge', p.stderr)
+        self.assertFalse(marker.exists())
+        git(self.root, 'config', '--unset-all', 'filter.evil.smudge')
+        git(self.root, 'config', '--unset-all', 'filter.evil.clean')
         self.cli('sync', 'fetch')
         result = json.loads(self.cli('sync', 'pull', ok=False).stdout)
         self.assertEqual(result['status'], 'invalid')

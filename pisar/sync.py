@@ -34,9 +34,14 @@ PROTOCOLS = ('-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', 
 HARDENING = ('-c', 'core.attributesFile=/dev/null', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=/dev/null',
              '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-c', 'core.untrackedCache=false',
              '--no-optional-locks')
-# Repository settings that name a program or rewrite a transport: a sync refuses to run with them (review 20, 2).
-TRANSPORT_PROGRAM_KEY = re.compile(r'^(remote\.([^.]+)\.(uploadpack|receivepack|vcs|proxy)|core\.(sshcommand|gitproxy)|'
-                                   r'url\..+\.(pushinsteadof|insteadof)|protocol\.([^.]+\.)?allow)$', re.I)
+# Repository-owned settings that name a program, rewrite a transport or change conversions. A sync refuses any
+# repository (its own configuration, and what its own files include) that sets one: nothing may decide which program
+# runs (review 20, 2; review 20b, A and B). Keys are matched as Git lists them: the remote name may contain dots.
+DANGEROUS_KEY = re.compile(
+    r'^(filter\..+\.(clean|smudge|process|required)|diff\..+\.(textconv|command)|'
+    r'core\.(fsmonitor|attributesfile|sshcommand|gitproxy)|remote\..+\.(uploadpack|receivepack|vcs|proxy)|'
+    r'url\..+\.(insteadof|pushinsteadof)|protocol(\..+)?\.allow)$', re.I)
+INCLUDE_KEY = re.compile(r'^include(if\..+)?\.path$', re.I)
 # Git's environment for sync: no ambient GIT_* variable, no system configuration or attribute file.
 ENVIRONMENT = dict(GIT_CONFIG_NOSYSTEM='1', GIT_ATTR_NOSYSTEM='1', GIT_PAGER='cat', GIT_TERMINAL_PROMPT='0',
                    GIT_LITERAL_PATHSPECS='1', GIT_EDITOR='true')
@@ -47,6 +52,8 @@ SCRATCH_IDENTITY = dict(GIT_AUTHOR_NAME='pisar sync', GIT_AUTHOR_EMAIL='pisar-sy
 ATTRIBUTE_NAMES = ('filter', 'merge', 'diff', 'textconv', 'eol', 'text', 'ident', 'working-tree-encoding')
 MARKER = re.compile(r'(?m)^(<<<<<<<|>>>>>>>)( |$)')
 KINDS = ('content', 'binary', 'add-add', 'delete-modify', 'mode', 'submodule')
+# Phases in which the branch has not moved: an abort may drop the sync there (see do_abort).
+PRE_MOVE_PHASES = ('prepared', 'planned', 'conflicts')
 # Conflicts whose work file carries no markers: only an explicit take decides them.
 MARKERLESS = ('binary', 'mode', 'delete-modify', 'submodule')
 
@@ -103,9 +110,13 @@ def git(repo, *args, **options):
 
 
 def _dirty(repo):
-    """(status, path) of every dirty, staged or untracked path, read with the neutral configuration of sync."""
+    """(status, path) of every dirty, staged or untracked path of REPO alone, read with the neutral configuration.
+
+    The repository is guarded first, and submodules are ignored: their own settings are not read by this status."""
+    _guard(repo)
     entries = []
-    for record in git_bytes(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames').split(b'\0'):
+    for record in git_bytes(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames',
+                            '--ignore-submodules=all').split(b'\0'):
         if record:
             entries.append((record[:2].decode(), record[3:].decode('utf-8', 'surrogateescape')))
     return entries
@@ -201,8 +212,40 @@ def repository(root, relative):
     if not repo.is_dir() or gitops.owner(repo, root) != repo.resolve():
         raise WikiError(f'--repo must name a Git repository in the knowledge root: {relative}')
     gitops.ancestors(repo, root)  # Every nested repository is a registered submodule of its parent.
-    _refuse_local_attributes(repo)
+    _guard(repo)
     return repo
+
+
+def _guard(repo):
+    """Refuse REPO when its own configuration or attribute file could run a program or rewrite a transport.
+
+    Read for REPO alone: its local and worktree configuration (includes expanded, so an included file counts), its
+    info/attributes, and every include that points outside its Git directory. Global and system configuration is the
+    user's own and is trusted. Sync inspects each repository through this guard before any Git process reads it, and
+    never runs a recursive status, so a submodule's settings are never read as the parent's (review 20b, A)."""
+    for line in git(repo, 'config', '--list', '--show-scope', '--show-origin', '--includes', '--name-only',
+                     check=False).splitlines():
+        scope, origin, key = (line.split('\t', 2) + ['', '', ''])[:3]
+        if scope in ('local', 'worktree') and DANGEROUS_KEY.match(key):
+            raise WikiError(f'{repo}: {key} ({origin}) is set in this repository; pisar sync refuses a repository '
+                            'that names a program or rewrites a transport (remove it, or configure it outside the '
+                            'repository)')
+    _refuse_outside_includes(repo)
+    _refuse_local_attributes(repo)
+
+
+def _refuse_outside_includes(repo):
+    """Refuse an include that reads a file outside the repository's Git directory (its contents are checked above)."""
+    git_dir = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-dir').strip()).resolve()
+    for record in git(repo, 'config', '--local', '-z', '--get-regexp', INCLUDE_KEY.pattern, check=False).split('\0'):
+        if '\n' not in record:
+            continue
+        key, value = record.split('\n', 1)
+        target = Path(os.path.expanduser(value))
+        if not target.is_absolute():
+            target = git_dir / target
+        if not target.resolve().is_relative_to(git_dir):
+            raise WikiError(f'{repo}: {key} includes {value}, outside the repository; pisar sync refuses it')
 
 
 def _refuse_local_attributes(repo):
@@ -211,16 +254,6 @@ def _refuse_local_attributes(repo):
     path = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'info/attributes').strip())
     if path.is_file() and _attribute_problem(path.read_text(encoding='utf-8', errors='replace')):
         raise WikiError(f'{path} sets Git attributes; pisar sync refuses to run in this repository')
-
-
-def _transport_guard(repo, name):
-    """Refuse repository settings that name a transport program (or rewrite the URL): nothing configured in the
-    repository may decide which program a fetch runs (review 20, finding 2). Credentials stay the user's own."""
-    for key in git(repo, 'config', '--local', '--name-only', '--list', check=False).split():
-        found = TRANSPORT_PROGRAM_KEY.match(key)
-        if found and (found[2] is None or found[2].lower() == name.lower()):
-            raise WikiError(f'{key} is set in this repository; pisar sync refuses repository-configured transport '
-                            'programs (remove the setting, or configure it outside the repository)')
 
 
 def rel(root, repo):
@@ -234,7 +267,6 @@ def names(repo, remote=None, branch=None):
         raise WikiError(f'remote must be the name of a Git remote, not a URL or path: {name!r}')
     if not git(repo, 'config', '--local', '--get', f'remote.{name}.url', check=False).strip():
         raise WikiError(f'no remote named {name} in {repo}; pisar never adds remotes, configure it with git remote add')
-    _transport_guard(repo, name)
     value, _ = settings.sync_option('branch', branch)
     if value is None:
         head = symbolic_head(repo)
@@ -263,6 +295,7 @@ def fetch(repo, remote, branch, ref):
     git(repo, '-c', 'fetch.recurseSubmodules=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
         '-c', 'fetch.writeCommitGraph=false', '-c', 'fetch.prune=false', '-c', 'fetch.pruneTags=false',
         '-c', 'transfer.fsckObjects=true', '-c', 'fetch.fsckObjects=true',
+        '-c', f'remote.{remote}.uploadpack=git-upload-pack', '-c', f'remote.{remote}.receivepack=git-receive-pack',
         'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-prune', '--refmap=',
         remote, f'+refs/heads/{branch}:{ref}', network=True)
     return previous, commit_of(repo, ref)
@@ -730,45 +763,42 @@ def _gitlink_pin(repo, revision, link):
 
 
 def classify(repo, plan, blobs=None):
-    """The state of every planned path, from the journaled old and new entries alone:
+    """The state of every planned path, from the journaled old and new entries alone (see _classify_one)."""
+    blobs = blobs if blobs is not None else read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new'])
+                                                                if x and x[0] in BLOBS])
+    return [_classify_one(repo, item, blobs) for item in plan]
+
+
+def _classify_one(repo, item, blobs):
+    """The state of one planned path:
 
     `before`: the index and the working copy are still the old state (nothing of the plan applied yet);
     `written`: the working copy is the new state but the index is still the old one (an interruption between the
-    two steps); `after`: the index is the new state, so there is nothing left to do, whatever the user did later.
+    two steps); `after`: the index is the new state and the working copy too, so there is nothing left to do.
     Anything else is a change nobody journaled: WikiError, and the caller changes nothing (review 20, 3 and 4)."""
-    blobs = blobs if blobs is not None else read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new'])
-                                                                if x and x[0] in BLOBS])
-    states = []
-    for item in plan:
-        path = item['path']
-        old = tuple(item['old']) if item['old'] else None
-        new = tuple(item['new']) if item['new'] else None
-        entry = _index_entry(repo, path)
-        if _gitlink_item(item):
-            if entry == new:
-                states.append('after')
-            elif entry == old:
-                states.append('before')
-            else:
-                raise WikiError(f'{path}: the index holds neither the old nor the new submodule pin; not touched')
-            continue
+    path = item['path']
+    old = tuple(item['old']) if item['old'] else None
+    new = tuple(item['new']) if item['new'] else None
+    entry = _index_entry(repo, path)
+    if _gitlink_item(item):
         if entry == new:
-            if not _working_matches(repo, path, new, blobs):
-                raise WikiError(f'{path}: changed after the sync wrote it; not touched (restore the sync\'s version, '
-                                'then run the command again)')
-            states.append('after')
-            continue
-        if entry != old:
-            raise WikiError(f'{path}: the index holds content the sync did not write (staged or changed); '
-                            'not touched')
-        if _working_matches(repo, path, old, blobs):
-            _shape_ok(repo, item)
-            states.append('before')
-        elif _working_matches(repo, path, new, blobs):
-            states.append('written')
-        else:
-            raise WikiError(f'{path}: changed since the sync was planned; untracked or edited file in the way')
-    return states
+            return 'after'
+        if entry == old:
+            return 'before'
+        raise WikiError(f'{path}: the index holds neither the old nor the new submodule pin; not touched')
+    if entry == new:
+        if not _working_matches(repo, path, new, blobs):
+            raise WikiError(f'{path}: changed after the sync wrote it; not touched (restore the sync\'s version, '
+                            'then run the command again)')
+        return 'after'
+    if entry != old:
+        raise WikiError(f'{path}: the index holds content the sync did not write (staged or changed); not touched')
+    if _working_matches(repo, path, old, blobs):
+        _shape_ok(repo, item)
+        return 'before'
+    if _working_matches(repo, path, new, blobs):
+        return 'written'
+    raise WikiError(f'{path}: changed since the sync was planned; untracked or edited file in the way')
 
 
 def _shape_ok(repo, item):
@@ -788,37 +818,61 @@ def check_files(repo, plan):
         raise WikiError('the repository changed since the sync was planned; nothing was changed')
 
 
-def apply_files(repo, plan):
-    """Install the plan: for each path, the working file, then the index entry (never a reset, never a re-hash).
+def apply_files(repo, plan, ident):
+    """Install the plan, one path at a time: the working file, then the index entry (never a reset, never a re-hash).
 
-    Every state is classified first (see classify): a refusal changes nothing. Then each path moves on its own,
-    `before` -> `written` -> `after`, and an interruption at either side of a step resumes from the state it left."""
+    Every path is classified before the first write (a refusal changes nothing), and again immediately before it is
+    touched, so an edit made while the install runs is refused and kept, not overwritten (review 20b, C). The install
+    stops there; the paths already installed are recognised as `after` on the next run."""
     blobs = read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new']) if x and x[0] in BLOBS])
-    states = classify(repo, plan, blobs)
-    for item, state in zip(plan, states):
-        path = item['path']
+    classify(repo, plan, blobs)
+    for item in plan:
+        state = _classify_one(repo, item, blobs)
         if state == 'after':
             continue
         if state == 'before' and not _gitlink_item(item):
-            _write_plan_file(repo, item, blobs)
+            _write_plan_file(repo, item, blobs, ident)
             checkpoint('file-written')
         if item['new'] is None:
-            git(repo, 'update-index', '--force-remove', '--', path)
+            git(repo, 'update-index', '--force-remove', '--', item['path'])
         else:
-            git(repo, 'update-index', '--add', '--cacheinfo', f'{item["new"][0]},{item["new"][1]},{path}')
+            git(repo, 'update-index', '--add', '--cacheinfo', f'{item["new"][0]},{item["new"][1]},{item["path"]}')
         checkpoint('index-set')
 
 
-def _write_plan_file(repo, item, blobs):
+def _temp_name(ident, path):
+    """The sync's own temporary file for PATH: derived from the sync id, so a leftover is recognised as ours."""
+    parent, _, name = path.rpartition('/')
+    temp = f'.pisar-sync-{ident}-{sha256(path.encode())[:12]}.tmp'
+    return f'{parent}/{temp}' if parent else temp
+
+
+def _write_plan_file(repo, item, blobs, ident):
     path = repo / item['path']
     if item['new'] is None:
         if path.exists():
             path.unlink()
         _prune_empty(repo, path.parent)
         return
+    _publish_file(path, blobs[item['new'][1]], 0o755 if item['new'][0] == '100755' else 0o644,
+                  repo / _temp_name(ident, item['path']))
+
+
+def _publish_file(path, data, mode, scratch):
+    """Replace PATH with DATA and MODE together: the bytes go to a sibling file that already has its final mode, and
+    that file is renamed over PATH (review 20b, D). A crash leaves either the old file or the complete new one."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_bytes(path, blobs[item['new'][1]])
-    os.chmod(path, 0o755 if item['new'][0] == '100755' else 0o644)
+    if scratch.is_symlink():
+        raise WikiError(f'{scratch}: a link is in the way of the sync\'s temporary file')
+    if scratch.exists():
+        scratch.unlink()  # ours by name: left by an earlier interrupted publication of this path
+    fd = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        os.fchmod(stream.fileno(), mode)
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(scratch, path)
 
 
 def _prune_empty(repo, directory):
@@ -882,7 +936,7 @@ def move(root, runtime, wiki, repo, journal):
         store(runtime, journal)
     elif head != target:
         raise WikiError(f'Git HEAD changed outside operation: {relname}')
-    apply_files(repo, journal['plan'])
+    apply_files(repo, journal['plan'], ident)
     checkpoint('files')
     journal['phase'] = 'files'
     store(runtime, journal)
@@ -1121,13 +1175,20 @@ def do_pull(root, state_dir, relative=None, remote=None, branch=None, merge=Fals
         return _start_merge(root, runtime, wiki, repo, relname, names_, head, fetched, ident, dry_run)
 
 
+def _own_paths(journal):
+    """The paths a sync may find dirty when it resumes: its planned paths and their temporary files."""
+    ident = journal['operation_id']
+    return [item['path'] for item in journal['plan'] or []] + [_temp_name(ident, item['path'])
+                                                              for item in journal['plan'] or []]
+
+
 def _would_resume(repo, journal):
     """The report of a dry run on an open journal: the phase, the steps a resume takes, and the state of each path."""
     result = dict(ok=True, status='would-resume', sync_id=journal['operation_id'], repo=journal['repo'],
                   phase=journal['phase'], steps=[])
     steps = result['steps']
     try:
-        _clean(repo, [item['path'] for item in journal['plan']])
+        _clean(repo, _own_paths(journal))
         if journal['phase'] == 'prepared':
             steps.append('write the merge commit from the journaled tree, move the branch, install the files, pin')
             return result
@@ -1274,7 +1335,7 @@ def discard_worktree_of(runtime, repo, journal):
 
 def _resume(root, runtime, wiki, repo, journal):
     """Continue an open journal. Nothing is replayed over user work: the paths are classified first (see classify)."""
-    _clean(repo, [item['path'] for item in journal['plan']])  # Only the sync's own planned paths may be dirty.
+    _clean(repo, _own_paths(journal))  # Only the sync's own planned paths and temporary files may be dirty.
     for parent, link, _ in gitops.ancestors(repo, root):
         _clean(parent, [link])  # Only the pin of the child that already moved may differ.
     if journal['phase'] == 'prepared':
@@ -1489,13 +1550,15 @@ def _worktree_entries(repo, work, index):
 
 
 def do_abort(root, state_dir, ident):
-    """Drop a sync that has not moved the branch: its worktree and scratch files go; the repository is untouched."""
+    """Drop a sync whose branch has not moved. A prepared or planned sync is dropped (its worktree too); a prepared
+    conflicted resolution goes back to editing, with its worktree kept, and a second abort drops it. A sync whose
+    branch carries its commit cannot be taken back: a pull finishes it. The repository is never changed here."""
     check_git()
     root = Path(root).resolve()
     runtime = Runtime(state_dir, root)
     with runtime.lock():
         journal = load(runtime, ident)
-        if journal['status'] not in ('open', 'conflicts') or journal.get('phase') not in ('planned', 'conflicts'):
+        if journal['status'] not in ('open', 'conflicts') or journal.get('phase') not in PRE_MOVE_PHASES:
             raise WikiError(f'sync {ident} is {journal["status"]} at {journal.get("phase")}; the branch cannot be '
                             'taken back by abort (pisar sync pull finishes it)')
         repo = repository(root, journal['repo'])
@@ -1503,6 +1566,14 @@ def do_abort(root, state_dir, ident):
         if target and is_ancestor(repo, target, head_commit(repo)):  # The branch carries the sync's commit.
             raise WikiError(f'sync {ident} has moved the branch, which cannot be taken back by abort; '
                             'pisar sync pull finishes it')
+        if journal['phase'] == 'prepared' and journal.get('worktree'):
+            journal.update(status='conflicts', phase='conflicts', target=None, tree=None, plan=None, when=None,
+                           messages={})
+            store(runtime, journal)
+            return dict(ok=True, status='back-to-conflicts', sync_id=ident, repo=journal['repo'],
+                        work=str(work_dir(runtime, ident)),
+                        next=f'edit the files in {work_dir(runtime, ident)}, then pisar sync resolve --id {ident}, '
+                             f'or pisar sync abort --id {ident} again')
         if journal.get('worktree'):
             discard_worktree(repo, work_dir(runtime, ident))
             journal['worktree'] = False
@@ -1510,3 +1581,5 @@ def do_abort(root, state_dir, ident):
         journal['status'] = 'aborted'
         store(runtime, journal)
         return dict(ok=True, status='aborted', sync_id=ident, repo=journal['repo'])
+
+

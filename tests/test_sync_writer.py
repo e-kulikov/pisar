@@ -4,7 +4,9 @@ creation are the real code. A retry must neither write a second message nor crea
 from pathlib import Path
 from unittest import mock
 
+
 from pisar import config, sync
+from pisar.safety import WikiError
 from .sync_faults import Faults, RemoteFixture, run_interrupted
 from .support import document, git
 
@@ -96,3 +98,69 @@ class EnabledWriterTests(RemoteFixture):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.journals(), journals)
         self.assertEqual(len(self.writer.calls), 1)  # the message is cached; the dry run asked for none
+
+
+class PreMoveAbortTests(EnabledWriterTests):
+    """A prepared (pre-move) sync can be aborted: the branch and the repository stay as they were (review 20b, E)."""
+
+    def failing_writer(self):
+        return mock.patch('pisar.commit_message.compose', side_effect=WikiError('writer unavailable'))
+
+    def test_a_writer_failure_leaves_a_prepared_journal_that_can_be_aborted(self):
+        self.new_world('abort-writer-failure')
+        self.diverge()
+        self.start()
+        before = self.snapshot()
+        with self.failing_writer(), self.assertRaisesRegex(Exception, 'writer unavailable'):
+            sync.do_pull(self.root, self.state, merge=True)
+        self.assertEqual(next(iter(sync.journals_of(sync.Runtime(self.state, self.root), '.')))['phase'], 'prepared')
+        ident = sync.journals_of(sync.Runtime(self.state, self.root), '.')[0]['operation_id']
+        result = sync.do_abort(self.root, self.state, ident)
+        self.assertEqual(result['status'], 'aborted')
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(git(self.root, 'worktree', 'list').splitlines()), 1)
+
+    def test_an_interruption_before_or_after_the_commit_object_can_be_aborted(self):
+        for fault in ('message-ready', 'merge-commit'):
+            with self.subTest(fault=fault):
+                self.new_world(f'abort-{fault}')
+                self.diverge()
+                self.start()
+                before = self.snapshot()
+                with Faults(fault):
+                    self.assertTrue(run_interrupted(sync.do_pull, self.root, self.state, merge=True))
+                ident = sync.open_journal(sync.Runtime(self.state, self.root), '.')['operation_id']
+                self.assertEqual(sync.do_abort(self.root, self.state, ident)['status'], 'aborted')
+                self.assertEqual(self.snapshot(), before)
+
+    def test_a_resolution_that_failed_before_the_move_goes_back_to_editing_then_aborts(self):
+        self.new_world('abort-resolve')
+        self.publish(lambda repo: (repo / 'work/team/alpha/call.md').write_text(
+            document(related=('work/beta',), body='Remote wording.')))
+        (self.root / 'work/team/alpha/call.md').write_text(document(related=('work/beta',), body='Local wording.'))
+        git(self.root, 'commit', '-q', '-am', 'local wording')
+        self.start()
+        before = self.snapshot()
+        conflicted = sync.do_pull(self.root, self.state, merge=True)
+        ident = conflicted['sync_id']
+        (Path(conflicted['work']) / 'work/team/alpha/call.md').write_text(
+            document(related=('work/beta',), body='Both kept.'))
+        with self.failing_writer(), self.assertRaisesRegex(Exception, 'writer unavailable'):
+            sync.do_resolve(self.root, self.state, ident)
+        back = sync.do_abort(self.root, self.state, ident)
+        self.assertEqual(back['status'], 'back-to-conflicts')
+        self.assertTrue(Path(conflicted['work']).is_dir())
+        self.assertEqual(sync.open_journal(sync.Runtime(self.state, self.root), '.')['status'], 'conflicts')
+        self.assertEqual(sync.do_abort(self.root, self.state, ident)['status'], 'aborted')
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(git(self.root, 'worktree', 'list').splitlines()), 1)
+
+    def test_abort_is_refused_once_the_ref_moved(self):
+        self.new_world('abort-moved')
+        self.diverge()
+        self.start()
+        with Faults('moved'):
+            self.assertTrue(run_interrupted(sync.do_pull, self.root, self.state, merge=True))
+        ident = sync.open_journal(sync.Runtime(self.state, self.root), '.')['operation_id']
+        with self.assertRaisesRegex(Exception, 'cannot be taken back'):
+            sync.do_abort(self.root, self.state, ident)
