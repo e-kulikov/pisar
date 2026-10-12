@@ -216,3 +216,11 @@ class SyncPullTests(Fixture):
         result = json.loads(self.cli('sync', 'pull', ok=False).stdout)
         self.assertEqual(result['status'], 'invalid')
         self.assertTrue(any('conflict markers' in p for p in result['problems']), result['problems'])
+
+    def test_a_setext_underline_of_equals_signs_in_a_document_is_not_a_conflict(self):
+        def heading(repo):
+            (repo / 'work/team/alpha/heading.md').write_text(
+                document('heading', 'work/alpha', body='Title\n=======\n\nBody under a setext heading.'))
+        self.publish(heading)
+        result = self.fetch_and_pull()
+        self.assertEqual((result['ok'], result['status']), (True, 'fast-forward'))

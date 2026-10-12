@@ -232,3 +232,24 @@ class SyncResumeTests(Fixture):
                 raise Interrupted(point)
         with mock.patch('pisar.sync.checkpoint', side_effect=stop):
             return sync.do_resolve(root, state, ident)
+
+    def test_abort_after_an_interruption_and_a_user_commit_works_and_a_landed_move_still_refuses(self):
+        root, state, _ = self.scenario('abort-user-commit', remote=self.add_remote_document)
+        self.start(root, state)
+        with self.assertRaises(Interrupted):
+            self.run_with_fault('journal', 'journal')
+        git(root, 'commit', '-q', '--allow-empty', '-m', 'ordinary local commit')
+        ident = sync.open_journal(sync.Runtime(state, root), '.')['operation_id']
+        self.assertEqual(sync.do_abort(root, state, ident)['status'], 'aborted')
+        self.assertEqual(git(root, 'log', '-1', '--format=%s'), 'ordinary local commit')
+        self.assertIsNone(sync.open_journal(sync.Runtime(state, root), '.'))
+
+    def test_abort_refuses_when_the_sync_landed_even_if_the_user_committed_after_it(self):
+        root, state, _ = self.scenario('abort-landed', remote=self.add_remote_document)
+        self.start(root, state)
+        with self.assertRaises(Interrupted):
+            self.run_with_fault('moved', 'moved')
+        git(root, 'commit', '-q', '--allow-empty', '-m', 'ordinary local commit')
+        ident = sync.open_journal(sync.Runtime(state, root), '.')['operation_id']
+        with self.assertRaisesRegex(Exception, 'cannot be taken back'):
+            sync.do_abort(root, state, ident)

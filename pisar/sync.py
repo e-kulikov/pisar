@@ -39,7 +39,6 @@ SCRATCH_IDENTITY = dict(GIT_AUTHOR_NAME='pisar sync', GIT_AUTHOR_EMAIL='pisar-sy
 # Attribute names that change how Git stores or converts a file: a fetched .gitattributes naming one is refused.
 ATTRIBUTE_NAMES = ('filter', 'merge', 'diff', 'textconv', 'eol', 'text', 'ident', 'working-tree-encoding')
 MARKER = re.compile(r'(?m)^(<<<<<<<|>>>>>>>)( |$)')
-SEPARATOR = re.compile(r'(?m)^=======$')
 KINDS = ('content', 'binary', 'add-add', 'delete-modify', 'mode', 'submodule')
 # Conflicts whose work file carries no markers: only an explicit take decides them.
 MARKERLESS = ('binary', 'mode', 'delete-modify', 'submodule')
@@ -491,7 +490,7 @@ def problems_of(runtime, ident, root, tree, overrides, changed):
             if 'sources' in path.split('/') or not (scratch / path).is_file():
                 continue
             text = (scratch / path).read_bytes().decode('utf-8', 'replace')
-            if MARKER.search(text) or SEPARATOR.search(text) and path.endswith('.md'):
+            if MARKER.search(text):
                 problems.append(f'{path}: unresolved conflict markers')
         return problems
     finally:
@@ -1214,7 +1213,7 @@ def do_resolve(root, state_dir, ident):
                 _restage(work, index, path, None)
                 continue
             text = file.read_bytes().decode('utf-8', 'replace')
-            if MARKER.search(text) or (conflict['kind'] in ('content', 'add-add') and SEPARATOR.search(text)):
+            if MARKER.search(text):
                 raise WikiError(f'{path}: conflict markers remain; edit the file or take a side with pisar sync take')
             ours = conflict['stages']['2'] or conflict['stages']['3'] or conflict['stages']['1']
             mode = '100755' if os.access(file, os.X_OK) and ours and ours[0] == '100755' else '100644'
@@ -1309,7 +1308,8 @@ def do_abort(root, state_dir, ident):
             raise WikiError(f'sync {ident} is {journal["status"]} at {journal.get("phase")}; the branch cannot be '
                             'taken back by abort (pisar sync pull finishes it)')
         repo = repository(root, journal['repo'])
-        if head_commit(repo) != journal['base']:  # Moved, even if the journal does not say so yet.
+        target = journal.get('target')
+        if target and is_ancestor(repo, target, head_commit(repo)):  # The branch carries the sync's commit.
             raise WikiError(f'sync {ident} has moved the branch, which cannot be taken back by abort; '
                             'pisar sync pull finishes it')
         if journal.get('worktree'):

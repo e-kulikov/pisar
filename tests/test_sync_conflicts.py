@@ -246,3 +246,13 @@ class SyncConflictTests(Fixture):
         self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'work/team/alpha/call.md', '--side', 'ours')
         p = self.cli('sync', 'resolve', '--id', result['sync_id'], ok=False)
         self.assertIn('immutable', p.stderr)
+
+    def test_abort_still_works_after_the_user_committed_on_the_local_branch(self):
+        self.both_edit_call()
+        result = self.sync()
+        git(self.root, 'commit', '-q', '--allow-empty', '-m', 'an ordinary local commit')
+        out = json.loads(self.cli('sync', 'abort', '--id', result['sync_id']).stdout)
+        self.assertEqual(out['status'], 'aborted')
+        self.assertEqual(len(git(self.root, 'worktree', 'list').splitlines()), 1)
+        self.assertEqual(git(self.root, 'log', '-1', '--format=%s'), 'an ordinary local commit')
+        self.assertEqual(json.loads(self.cli('sync', 'status').stdout)['open'], [])
