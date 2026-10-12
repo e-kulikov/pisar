@@ -1249,6 +1249,12 @@ pisar sync abort --id ID                                    # drop a sync that h
   whose remote pin names a child commit that is not present, or not checked out at
   that commit, is refused with `needs-submodule-sync`. A parent that already moved
   (its pin committed by a child sync) diverges from its remote: use `--merge`.
+- **Index lock.** Sync changes the index only while holding Git's own `index.lock`
+  (created exclusively, never removed by sync). If a command reports that `index.lock`
+  exists, another Git process holds the index; wait for it. If a previous run was killed
+  and no Git process runs, remove `index.lock` yourself (`rm` the file in the repository's
+  Git directory) and run the sync command again. A same-path change made by another Git
+  command during a sync is refused and kept, never overwritten.
 - **Journal and retry.** Every move is journaled under the runtime directory and is
   finished by running the same command again. An interrupted pull, merge or resolve
   resumes without a second merge commit or a second journal. The branch moves by

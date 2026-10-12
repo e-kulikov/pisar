@@ -818,7 +818,7 @@ def check_files(repo, plan):
         raise WikiError('the repository changed since the sync was planned; nothing was changed')
 
 
-def apply_files(repo, plan, ident):
+def apply_files(repo, runtime, plan, ident):
     """Install the plan, one path at a time: the working file, then the index entry (never a reset, never a re-hash).
 
     Every path is classified before the first write (a refusal changes nothing), and again immediately before it is
@@ -833,11 +833,61 @@ def apply_files(repo, plan, ident):
         if state == 'before' and not _gitlink_item(item):
             _write_plan_file(repo, item, blobs, ident)
             checkpoint('file-written')
-        if item['new'] is None:
-            git(repo, 'update-index', '--force-remove', '--', item['path'])
-        else:
-            git(repo, 'update-index', '--add', '--cacheinfo', f'{item["new"][0]},{item["new"][1]},{item["path"]}')
+        publish_entry(repo, runtime, ident, item['path'], item['old'], item['new'])
         checkpoint('index-set')
+
+
+def publish_entry(repo, runtime, ident, path, old, new):
+    """Move the real index entry of PATH from OLD to NEW (each a (mode, oid), or None for no entry), and nothing else.
+
+    This is the only code that writes the real index. It follows Git's own protocol: create `index.lock` exclusively
+    (refused, and never removed, when it exists), then, while holding it, compare the entry Git holds now with the
+    journaled states, build the new index in a private copy, write it into the lock and rename it over the index. Git
+    writers either finish before the lock is taken (and the comparison sees them) or find the lock and fail. A crash
+    after the lock is taken leaves the lock file, which Git also reports; the sync never removes a lock it did not create
+    in the same run, and it refuses to start while one exists."""
+    index = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'index').strip())
+    lock = index.with_name(index.name + '.lock')
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except FileExistsError:
+        raise WikiError(f'{lock} exists: another Git process holds the index. pisar sync does not remove it; when no '
+                        'git process is running, remove it yourself and run the command again') from None
+    checkpoint('index-locked')
+    scratch = scratch_path(runtime, ident, 'index.private')
+    published = False
+    try:
+        current = _index_entry(repo, path)  # read while the lock is held: no Git writer can change it now
+        wanted_new = tuple(new) if new else None
+        if current == wanted_new:
+            return
+        if current != (tuple(old) if old else None):
+            raise WikiError(f'{path}: the index changed while the sync ran (entry {current}); not overwritten')
+        scratch.unlink(missing_ok=True)
+        if index.exists():
+            scratch.write_bytes(index.read_bytes())
+        else:
+            git_bytes(repo, 'read-tree', 'HEAD', index=scratch)
+        if new is None:
+            git_bytes(repo, 'update-index', '--force-remove', '--', path, index=scratch)
+        else:
+            git_bytes(repo, 'update-index', '--add', '--cacheinfo', f'{new[0]},{new[1]},{path}', index=scratch)
+        checkpoint('index-compared')
+        with os.fdopen(fd, 'wb') as stream:
+            fd = None
+            stream.write(scratch.read_bytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(lock, index)
+        published = True
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        if not published:
+            lock.unlink(missing_ok=True)  # ours: created by this call
+        raise
+    finally:
+        scratch.unlink(missing_ok=True)
 
 
 def _temp_name(ident, path):
@@ -936,7 +986,7 @@ def move(root, runtime, wiki, repo, journal):
         store(runtime, journal)
     elif head != target:
         raise WikiError(f'Git HEAD changed outside operation: {relname}')
-    apply_files(repo, journal['plan'], ident)
+    apply_files(repo, runtime, journal['plan'], ident)
     checkpoint('files')
     journal['phase'] = 'files'
     store(runtime, journal)
@@ -970,11 +1020,12 @@ def pin_ancestors(root, runtime, wiki, repo, journal):
             head = gitops.commit(parent, [link], journal['operation_id'], pins={link: current},
                                  intent=_pending_hook(runtime, journal, relname),
                                  message=operations.commit_writer(wiki, Store(runtime), journal, parent),
-                                 sync=lambda where, paths: _finish_pin(where, link, old_pin, current))
+                                 sync=lambda where, paths: _finish_pin(runtime, journal['operation_id'], where, link,
+                                                                       old_pin, current))
             head = head_commit(parent)
             landed = True
         else:
-            _finish_pin(parent, link, old_pin, current)
+            _finish_pin(runtime, journal['operation_id'], parent, link, old_pin, current)
         if landed:
             _landed(journal, relname, head)
         journal['pending'][relname] = None
@@ -984,16 +1035,11 @@ def pin_ancestors(root, runtime, wiki, repo, journal):
     return current
 
 
-def _finish_pin(repo, link, old_pin, new_commit):
+def _finish_pin(runtime, ident, repo, link, old_pin, new_commit):
     """Make the index entry of the gitlink LINK the pin that HEAD records (NEW_COMMIT). Only the journaled old entry
     (OLD_PIN, a (mode, oid)) is replaced; any other index state is refused, and nothing is reset."""
-    entry = _index_entry(repo, link)
-    if entry == (GITLINK, new_commit):
-        return
-    if entry != old_pin:
-        raise WikiError(f'{link}: the index holds neither the old nor the new pin; not touched')
     checkpoint('ancestor-moved')
-    git(repo, 'update-index', '--cacheinfo', f'{GITLINK},{new_commit},{link}')
+    publish_entry(repo, runtime, ident, link, old_pin, (GITLINK, new_commit))
 
 
 def _is_source(path, spaces):
