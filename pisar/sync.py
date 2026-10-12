@@ -9,6 +9,7 @@ Journals and work areas live under the runtime directory of the root: `<state>/r
 """
 import json
 import os
+import stat
 import time
 from pathlib import Path
 import re
@@ -843,51 +844,86 @@ def publish_entry(repo, runtime, ident, path, old, new):
     This is the only code that writes the real index. It follows Git's own protocol: create `index.lock` exclusively
     (refused, and never removed, when it exists), then, while holding it, compare the entry Git holds now with the
     journaled states, build the new index in a private copy, write it into the lock and rename it over the index. Git
-    writers either finish before the lock is taken (and the comparison sees them) or find the lock and fail. A crash
-    after the lock is taken leaves the lock file, which Git also reports; the sync never removes a lock it did not create
-    in the same run, and it refuses to start while one exists."""
+    writers either finish before the lock is taken (and the comparison sees them) or find the lock and fail.
+
+    Everything after the lock is created runs in one try/finally: an unpublished lock created here is removed on every
+    unwound exit (a return, an exception, a KeyboardInterrupt). A lock whose creation failed is never removed. Only an
+    abrupt exit (no unwinding, as a kill) leaves the lock, and the next run refuses to start while it exists.
+
+    The private copy keeps the real index's timestamps, so Git judges the cached entries exactly as it would for the real
+    index (review 20d, 2); the lock gets the timestamp of the private index before it is renamed; the lock gets the
+    access mode of the index it replaces, or the mode Git would give a new index (review 20d, 3)."""
     index = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'index').strip())
     lock = index.with_name(index.name + '.lock')
     try:
-        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
         raise WikiError(f'{lock} exists: another Git process holds the index. pisar sync does not remove it; when no '
                         'git process is running, remove it yourself and run the command again') from None
-    checkpoint('index-locked')
     scratch = scratch_path(runtime, ident, 'index.private')
     published = False
     try:
+        os.fchmod(fd, _index_mode(repo, index))
+        checkpoint('index-locked')
         current = _index_entry(repo, path)  # read while the lock is held: no Git writer can change it now
         wanted_new = tuple(new) if new else None
         if current == wanted_new:
-            return
+            return  # nothing to publish: the finally releases our lock
         if current != (tuple(old) if old else None):
             raise WikiError(f'{path}: the index changed while the sync ran (entry {current}); not overwritten')
-        scratch.unlink(missing_ok=True)
-        if index.exists():
-            scratch.write_bytes(index.read_bytes())
-        else:
-            git_bytes(repo, 'read-tree', 'HEAD', index=scratch)
+        _private_copy(repo, index, scratch)
         if new is None:
             git_bytes(repo, 'update-index', '--force-remove', '--', path, index=scratch)
         else:
             git_bytes(repo, 'update-index', '--add', '--cacheinfo', f'{new[0]},{new[1]},{path}', index=scratch)
         checkpoint('index-compared')
+        data = scratch.read_bytes()
+        stamp = os.stat(scratch)
         with os.fdopen(fd, 'wb') as stream:
             fd = None
-            stream.write(scratch.read_bytes())
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+        os.utime(lock, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         os.replace(lock, index)
         published = True
-    except Exception:
+    finally:
         if fd is not None:
             os.close(fd)
-        if not published:
-            lock.unlink(missing_ok=True)  # ours: created by this call
-        raise
-    finally:
         scratch.unlink(missing_ok=True)
+        if not published:
+            lock.unlink(missing_ok=True)  # created by this call: the only lock we ever remove
+
+
+def _private_copy(repo, index, scratch):
+    """The private index to update: the real index's bytes with the real index's timestamps, so Git loads it as the
+    real index and judges its racy entries alike."""
+    scratch.unlink(missing_ok=True)
+    if not index.exists():
+        git_bytes(repo, 'read-tree', 'HEAD', index=scratch)
+        return
+    stamp = os.stat(index)
+    scratch.write_bytes(index.read_bytes())
+    os.utime(scratch, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+
+
+def _index_mode(repo, index):
+    """The access mode for the index being published: the mode of the existing index, else Git's own rule for a new one
+    (core.sharedRepository, else 0666 minus the umask), set explicitly so the umask does not decide it."""
+    if index.exists():
+        return stat.S_IMODE(index.stat().st_mode)
+    shared = git(repo, 'config', '--get', 'core.sharedRepository', check=False).strip().lower()
+    if shared in ('group', 'true', '1'):
+        return 0o660
+    if shared in ('all', 'world', 'everybody', '2'):
+        return 0o664
+    if re.fullmatch(r'0?[0-7]{3,4}', shared):
+        return int(shared, 8) & 0o777
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
 
 
 def _temp_name(ident, path):
