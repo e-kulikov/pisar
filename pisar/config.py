@@ -6,6 +6,7 @@ empty strings and relative paths are errors naming the file and the key.
 """
 import os
 from pathlib import Path
+import re
 import tomllib
 from .safety import WikiError
 
@@ -18,6 +19,10 @@ COMMIT_MESSAGE_DEFAULTS = dict(enabled=False, agent='claude', model='sonnet', ef
 COMMIT_MESSAGE_TIMEOUT = (10, 600)
 # The agents that can write commit messages; commit_message.BACKENDS must have exactly these names.
 COMMIT_MESSAGE_AGENTS = ('claude', 'codex')
+# The [sync] table: the remote is a configured remote NAME (never a URL or path) and the branch a short refname.
+SYNC_KEYS = ('remote', 'branch')
+SYNC_REMOTE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+SYNC_BRANCH = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*')
 
 
 def config_home():
@@ -68,9 +73,11 @@ def _table(file, key, value, allowed):
 
 def _validate(file, data):
     _table(file, '', data, ('default_agent', 'research_agent', 'root', 'state_dir', 'ruwana', 'agents',
-                            'commit_message'))
+                            'commit_message', 'sync'))
     if 'commit_message' in data:
         _validate_commit_message(file, data['commit_message'])
+    if 'sync' in data:
+        _validate_sync(file, data['sync'])
     for key in ('root', 'state_dir'):
         if key in data:
             _string(file, key, data[key])
@@ -125,3 +132,23 @@ def _validate_commit_message(file, value):
         _string(file, 'commit_message.prompt_file', value['prompt_file'])
         if not Path(value['prompt_file']).is_absolute():
             raise _error(file, 'commit_message.prompt_file', f'must be an absolute path: {value["prompt_file"]}')
+
+
+def valid_branch(value):
+    """A short branch name: components of letters, digits, dots, underscores and dashes, no `..`, no `.lock`."""
+    if not SYNC_BRANCH.fullmatch(value) or '..' in value:
+        return False
+    return not any(part.endswith(('.lock', '.')) for part in value.split('/'))
+
+
+def _validate_sync(file, value):
+    _table(file, 'sync', value, SYNC_KEYS)
+    if 'remote' in value:
+        _string(file, 'sync.remote', value['remote'])
+        if not SYNC_REMOTE.fullmatch(value['remote']):
+            raise _error(file, 'sync.remote', 'must be the name of a Git remote (letters, digits, ".", "_", "-"), '
+                                              f'not a URL or path: {value["remote"]!r}')
+    if 'branch' in value:
+        _string(file, 'sync.branch', value['branch'])
+        if not valid_branch(value['branch']):
+            raise _error(file, 'sync.branch', f'must be a short branch name: {value["branch"]!r}')

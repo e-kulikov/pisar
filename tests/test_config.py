@@ -72,6 +72,8 @@ class ConfigTests(Fixture):
             'agents.codex.reviewer.effort': {'value': 'high', 'source': 'default'},
             'agents.codex.researcher.model': {'value': 'gpt-5.5', 'source': 'default'},
             'agents.codex.researcher.effort': {'value': 'medium', 'source': 'default'},
+            'sync.remote': {'value': 'origin', 'source': 'default'},
+            'sync.branch': {'value': None, 'source': 'default'},
         })
 
     def test_file_values_are_reported_with_config_source(self):
@@ -115,6 +117,8 @@ effort = "max"
             'agents.codex.reviewer.effort': ('high', 'default'),
             'agents.codex.researcher.model': ('gpt-5.5', 'default'),
             'agents.codex.researcher.effort': ('medium', 'default'),
+            'sync.remote': ('origin', 'default'),
+            'sync.branch': (None, 'default'),
         }
         self.assertEqual({k: (v['value'], v['source']) for k, v in settings.items()}, expected)
 
