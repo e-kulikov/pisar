@@ -44,7 +44,10 @@ SECRET_CATEGORIES = ('private-key', 'jwt', 'api-token', 'credential')
 # any write. `space type list` writes nothing and is not here.
 COMMITTING = (('save', None), ('capture', None), ('triage', 'accept'), ('lesson', 'accept'),
               ('domain', 'add'), ('space', 'create'), ('space', 'move'), ('space', 'archive'), ('space', 'restore'),
-              ('space', 'type', 'add'))
+              ('space', 'type', 'add'), ('sync', 'pull'), ('sync', 'resolve'))
+# Committing commands whose explanation is required only when they actually write a commit that needs it (a
+# merge commit of sync): sync.py calls require() itself, so a fast-forward never asks for --what and --why.
+DEFERRED = (('sync', 'pull'), ('sync', 'resolve'))
 MISSING = 'commit messages are written by an agent when [commit_message] enabled = true: this command needs ' \
           '--what (what changed) and --why (why it changed)'
 
@@ -120,7 +123,8 @@ def explain(args):
         return None
     what = plain(args.what, '--what', WHAT_LIMIT) if getattr(args, 'what', None) is not None else None
     why = plain(args.why, '--why', WHY_LIMIT) if getattr(args, 'why', None) is not None else None
-    require(what, why)
+    if command_path(args) not in DEFERRED:
+        require(what, why)
     # The context only ever reaches the writer: with the writer disabled it is neither read nor checked.
     context = _context(args) if settings.commit_message()['enabled'] else None
     return _REQUEST.set(dict(what=what, why=why, context=context))

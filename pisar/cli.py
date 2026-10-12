@@ -3,7 +3,7 @@ import json
 import sys
 from types import SimpleNamespace
 from . import (__version__, agent, commit_message, config_command, guard, lesson_command, mcp, research_command,
-               settings, spacecmd)
+               settings, spacecmd, sync_command)
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -77,6 +77,7 @@ def parser():
     spacecmd.add_parser(commands)
     lesson_command.add_parser(commands)
     research_command.add_parser(commands)
+    sync_command.add_parser(commands)
     for path in commit_message.COMMITTING:
         leaf = commands.choices[path[0]]
         for name in (n for n in path[1:] if n is not None):
@@ -121,6 +122,10 @@ def main(argv=None):
             return 0
         if args.command == 'research':
             result = research_command.run(args, args)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1 if result.get('ok') is False else 0
+        if args.command == 'sync':
+            result = sync_command.run(args, SimpleNamespace(root=args.root, state_dir=args.state_dir))
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 1 if result.get('ok') is False else 0
         wiki = Wiki(args.root)
