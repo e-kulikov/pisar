@@ -345,6 +345,11 @@ repository. Nothing else runs it; never run it on your own initiative.
 pisar never pushes. A remote whose content breaks `pisar check` is reported with
 its problems and is not written.
 
+Attributes: fetched content may carry only comment-only `.gitattributes` files (lines
+whose first non-blank character is `#`). Any other attribute line is refused, with the
+file and the rule named. Do not try to work around it: tell the user the rule must be
+removed from the remote, or handled outside pisar.
+
 ## Research: look something up on the web
 
 ```sh

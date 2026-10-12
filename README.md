@@ -1217,9 +1217,17 @@ pisar sync abort --id ID                                    # drop a sync that h
   the pinned submodules) is checked with the rules of `pisar check`: documents, spaces,
   declared record types, duplicate ids, `wiki:` references, cross-domain references and
   domain markers. A remote that breaks them is reported, and the local branch does not
-  move. Git attributes that change how files are stored (`filter`, `merge`, `diff`,
-  `eol`, `text`, `ident`, ...) and symbolic links in synced content are refused.
-  Fetched content is never checked out by Git and no program it names runs.
+  move. **Attributes policy:** only comment-only `.gitattributes` files are accepted
+  from fetched content (a line whose first non-blank character is `#`). Any other line
+  is refused, and the refusal names the file and the rule. Attribute rules can change how
+  Git stores files, so pisar does not parse them: to bring such a change in, remove the
+  rule from the remote (or, if you need it, configure it and sync outside pisar). The
+  same goes for a repository whose own `info/attributes` sets anything. Symbolic links in
+  synced content are refused too. Fetched content is never checked out by Git, and no
+  program the repository or the remote names is run: a repository that configures a
+  filter, a diff driver, a transport program (`uploadpack`, `vcs`, `proxy`, ssh command,
+  git proxy), a URL rewrite, a fsmonitor or an attribute file, directly or through an
+  include, is refused with the key and its file named.
 - **Diverged history.** Without `--merge` the pull stops with `diverged`. With
   `--merge` pisar merges the three trees itself: a path changed on one side takes that
   side; two text changes are merged line by line; anything else is a conflict.
