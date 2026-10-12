@@ -212,12 +212,8 @@ class SyncResumeTests(Fixture):
                 before = self.history(root)
                 with self.assertRaises(Interrupted):
                     self.resolve_with_fault(root, state, ident, fault)
-                if fault == 'merge-commit':
-                    sync.do_resolve(root, state, ident)  # Still a conflict until the merge commit is journaled.
-                    done = 'resolved'
-                else:
-                    done = sync.do_pull(root, state, merge=True)['status']
-                    self.assertIn(done, ('merge', 'up-to-date'))
+                done = sync.do_pull(root, state, merge=True)['status']
+                self.assertIn(done, ('merge', 'up-to-date'))
                 after = self.history(root)
                 self.assertEqual(after['merges'], before['merges'] + 1, fault)
                 self.assertEqual(git(root, 'status', '--porcelain'), '')

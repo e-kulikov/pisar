@@ -102,9 +102,8 @@ class SyncSubmoduleTests(Fixture):
         child_head = self.new_child_commit()
         self.cli('sync', 'fetch', '--repo', 'work/module')
         before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
-        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.base / 'noconfig')}), \
-                mock.patch('pisar.sync.checkpoint', side_effect=stop):
-            with self.assertRaises(Interrupted):
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.base / 'noconfig')}):
+            with mock.patch('pisar.sync.checkpoint', side_effect=stop), self.assertRaises(Interrupted):
                 sync.do_pull(self.root, self.state, relative='work/module')
             result = sync.do_pull(self.root, self.state, relative='work/module')
         self.assertEqual(result['status'], 'fast-forward')

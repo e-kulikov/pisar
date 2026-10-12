@@ -9,6 +9,7 @@ Journals and work areas live under the runtime directory of the root: `<state>/r
 """
 import json
 import os
+import time
 from pathlib import Path
 import re
 import shutil
@@ -80,13 +81,16 @@ def _command(repo, args, network=False):
     return argv, env
 
 
-def git_bytes(repo, *args, input=None, check=True, network=False, index=None, identity=False):
-    """Raw output of one Git command in REPO; WikiError on failure when CHECK. INDEX names a private index."""
+def git_bytes(repo, *args, input=None, check=True, network=False, index=None, identity=False, dates=None):
+    """Raw output of one Git command in REPO; WikiError on failure when CHECK. INDEX names a private index,
+    DATES (a Unix time) fixes the author and committer date of a commit object."""
     argv, env = _command(repo, args, network)
     if index is not None:
         env['GIT_INDEX_FILE'] = str(index)
     if identity:
         env.update(SCRATCH_IDENTITY)
+    if dates is not None:
+        env.update(GIT_AUTHOR_DATE=f'{dates} +0000', GIT_COMMITTER_DATE=f'{dates} +0000')
     result = subprocess.run(argv, input=input, capture_output=True, env=env)
     if check and result.returncode:
         raise WikiError(f'git {args[0]} failed in {repo}: {result.stderr.decode("utf-8", "replace").strip()}')
@@ -96,6 +100,22 @@ def git_bytes(repo, *args, input=None, check=True, network=False, index=None, id
 def git(repo, *args, **options):
     """Text output (surrogateescape) of one Git command; options as in git_bytes."""
     return git_bytes(repo, *args, **options).decode('utf-8', 'surrogateescape')
+
+
+def _dirty(repo):
+    """(status, path) of every dirty, staged or untracked path, read with the neutral configuration of sync."""
+    entries = []
+    for record in git_bytes(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames').split(b'\0'):
+        if record:
+            entries.append((record[:2].decode(), record[3:].decode('utf-8', 'surrogateescape')))
+    return entries
+
+
+def _clean(repo, allowed=()):
+    """Refuse unless the only dirty paths of REPO are ALLOWED (the sync's own planned paths, on a resume)."""
+    conflicts = [path for _, path in _dirty(repo) if path not in allowed]
+    if conflicts:
+        raise WikiError(f'dirty/staged repository {repo}: {", ".join(conflicts)}')
 
 
 def commit_of(repo, revision):
@@ -680,63 +700,125 @@ def _gitlink_item(item):
     return any(x and x[0] == GITLINK for x in (item['old'], item['new']))
 
 
-def check_files(repo, plan):
-    """Every file the plan writes or removes must be exactly as the plan expects: absent, or its old bytes."""
-    blobs = read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new']) if x and x[0] in BLOBS])
+def _index_entry(repo, path):
+    """(mode, oid) of the stage-0 index entry of PATH, None when there is none. Unmerged entries are refused."""
+    rows = [row for row in git(repo, 'ls-files', '--stage', '-z', '--', path).split('\0') if row]
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise WikiError(f'{path}: more than one index entry; not touched')
+    meta, name = rows[0].split('\t', 1)
+    mode, oid, stage = meta.split()
+    if stage != '0' or name != path:
+        raise WikiError(f'{path}: unmerged index entry; not touched')
+    return mode, oid
+
+
+def _working_matches(repo, path, state, blobs):
+    """Whether the working file of PATH is exactly STATE (mode, oid), or absent when STATE is None."""
+    file = repo / path
+    if state is None:
+        return not (file.exists() or file.is_symlink())
+    if file.is_symlink() or not file.is_file() or file.read_bytes() != blobs[state[1]]:
+        return False
+    return bool(os.access(file, os.X_OK)) == (state[0] == '100755')
+
+
+def _gitlink_pin(repo, revision, link):
+    """The (mode, oid) that REVISION records at LINK, or None."""
+    return tree_entries(repo, revision).get(link)
+
+
+def classify(repo, plan, blobs=None):
+    """The state of every planned path, from the journaled old and new entries alone:
+
+    `before`: the index and the working copy are still the old state (nothing of the plan applied yet);
+    `written`: the working copy is the new state but the index is still the old one (an interruption between the
+    two steps); `after`: the index is the new state, so there is nothing left to do, whatever the user did later.
+    Anything else is a change nobody journaled: WikiError, and the caller changes nothing (review 20, 3 and 4)."""
+    blobs = blobs if blobs is not None else read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new'])
+                                                                if x and x[0] in BLOBS])
+    states = []
     for item in plan:
+        path = item['path']
+        old = tuple(item['old']) if item['old'] else None
+        new = tuple(item['new']) if item['new'] else None
+        entry = _index_entry(repo, path)
         if _gitlink_item(item):
+            if entry == new:
+                states.append('after')
+            elif entry == old:
+                states.append('before')
+            else:
+                raise WikiError(f'{path}: the index holds neither the old nor the new submodule pin; not touched')
             continue
-        path = repo / item['path']
-        parts = item['path'].split('/')
-        for depth in range(1, len(parts)):
-            parent = repo / '/'.join(parts[:depth])
-            if parent.exists() and (not parent.is_dir() or parent.is_symlink()):
-                raise WikiError(f'{item["path"]}: a file is in the way of its directory')
-        if path.is_symlink() or path.is_dir():
-            raise WikiError(f'{item["path"]}: a directory or link is in the way')
-        if path.exists():
-            expected = blobs[item['old'][1]] if item['old'] else None
-            if path.read_bytes() != expected:
-                raise WikiError(f'{item["path"]}: changed since the sync was planned; untracked or edited file in the way')
-        if item['new'] is not None and gitops.attribute_problems(repo, item['path']):
-            raise WikiError(f'{item["path"]}: Git attributes would change how this file is stored; refused')
+        if entry == new:
+            if not _working_matches(repo, path, new, blobs):
+                raise WikiError(f'{path}: changed after the sync wrote it; not touched (restore the sync\'s version, '
+                                'then run the command again)')
+            states.append('after')
+            continue
+        if entry != old:
+            raise WikiError(f'{path}: the index holds content the sync did not write (staged or changed); '
+                            'not touched')
+        if _working_matches(repo, path, old, blobs):
+            _shape_ok(repo, item)
+            states.append('before')
+        elif _working_matches(repo, path, new, blobs):
+            states.append('written')
+        else:
+            raise WikiError(f'{path}: changed since the sync was planned; untracked or edited file in the way')
+    return states
+
+
+def _shape_ok(repo, item):
+    """Refuse a planned path that cannot be written: a file in the way of a directory, or a link or a directory."""
+    parts = item['path'].split('/')
+    for depth in range(1, len(parts)):
+        parent = repo / '/'.join(parts[:depth])
+        if parent.exists() and (not parent.is_dir() or parent.is_symlink()):
+            raise WikiError(f'{item["path"]}: a file is in the way of its directory')
+    if item['new'] is not None and gitops.attribute_problems(repo, item['path']):
+        raise WikiError(f'{item["path"]}: Git attributes would change how this file is stored; refused')
+
+
+def check_files(repo, plan):
+    """Before the first move: every planned path must be exactly in its old state (see classify)."""
+    if any(state != 'before' for state in classify(repo, plan)):
+        raise WikiError('the repository changed since the sync was planned; nothing was changed')
 
 
 def apply_files(repo, plan):
-    """Write the new bytes of the plan into the working tree (or remove them), then make the index agree for
-    these paths only. Idempotent: a file already at its new bytes is left alone; one at its old bytes (or absent,
-    where the old state had no file) is replaced. Any other content is the user's edit and is never overwritten."""
+    """Install the plan: for each path, the working file, then the index entry (never a reset, never a re-hash).
+
+    Every state is classified first (see classify): a refusal changes nothing. Then each path moves on its own,
+    `before` -> `written` -> `after`, and an interruption at either side of a step resumes from the state it left."""
     blobs = read_blobs(repo, [x[1] for item in plan for x in (item['old'], item['new']) if x and x[0] in BLOBS])
-    for item in plan:
-        if _gitlink_item(item):
+    states = classify(repo, plan, blobs)
+    for item, state in zip(plan, states):
+        path = item['path']
+        if state == 'after':
             continue
-        path = repo / item['path']
-        if path.is_dir() or path.is_symlink():
-            raise WikiError(f'{item["path"]}: a directory or link is in the way; not overwritten')
-        current = path.read_bytes() if path.is_file() else None
-        old = blobs[item['old'][1]] if item['old'] else None
+        if state == 'before' and not _gitlink_item(item):
+            _write_plan_file(repo, item, blobs)
+            checkpoint('file-written')
         if item['new'] is None:
-            if current is None:
-                continue
-            if current != old:
-                raise WikiError(f'{item["path"]}: changed since the sync was planned; not removed')
+            git(repo, 'update-index', '--force-remove', '--', path)
+        else:
+            git(repo, 'update-index', '--add', '--cacheinfo', f'{item["new"][0]},{item["new"][1]},{path}')
+        checkpoint('index-set')
+
+
+def _write_plan_file(repo, item, blobs):
+    path = repo / item['path']
+    if item['new'] is None:
+        if path.exists():
             path.unlink()
-            _prune_empty(repo, path.parent)
-            continue
-        data = blobs[item['new'][1]]
-        if current is not None and current == data:
-            os.chmod(path, 0o755 if item['new'][0] == '100755' else 0o644)
-            continue
-        if current is not None and current != old:
-            raise WikiError(f'{item["path"]}: changed since the sync was planned; not overwritten')
-        if current is None and path.exists():
-            raise WikiError(f'{item["path"]}: not a regular file; not overwritten')
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_bytes(path, data)
-        os.chmod(path, 0o755 if item['new'][0] == '100755' else 0o644)
-    paths = [item['path'] for item in plan]
-    if paths:
-        git(repo, 'reset', '-q', '--', *paths)
+        _prune_empty(repo, path.parent)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_bytes(path, blobs[item['new'][1]])
+    os.chmod(path, 0o755 if item['new'][0] == '100755' else 0o644)
 
 
 def _prune_empty(repo, directory):
@@ -751,15 +833,15 @@ def checkpoint(name):
     """A named point where a run may be interrupted; tests replace this with a fault (see test_sync_resume)."""
 
 
-def new_journal(root, relname, repo, names_, mode, base, fetched, merge_base, plan, ident):
+def new_journal(root, relname, repo, names_, mode, base, fetched, merge_base, plan, ident, phase='planned'):
     name, value, ref = names_
     heads = {relname: base}
     for parent, _, _ in gitops.ancestors(repo, root):
         heads[rel(root, parent)] = head_commit(parent)
     return dict(schema_version=1, format=FORMAT, operation_id=ident, repo=relname, remote=name, remote_branch=value,
                 fetched_ref=ref, local_ref=local_branch(repo), mode=mode, base=base, merge_base=merge_base,
-                fetched=fetched, target=None, status='open', phase='planned', plan=plan, heads=heads, pending={},
-                commits=[], conflicts=[], choices={}, decided={}, worktree=False, messages={})
+                fetched=fetched, target=None, tree=None, when=int(time.time()), status='open', phase=phase, plan=plan,
+                heads=heads, pending={}, commits=[], conflicts=[], choices={}, decided={}, worktree=False, messages={})
 
 
 def _pending_hook(runtime, journal, relname):
@@ -775,10 +857,11 @@ def _landed(journal, relname, commit):
 
 
 def move(root, runtime, wiki, repo, journal):
-    """Move the local branch to the journal's target and finish the working tree, index and ancestors.
+    """Move the local branch to the journal's target, then install the files and pin the ancestors.
 
-    Every step is idempotent and recognises what an earlier run did: the branch by its commit id (compare-and-
-    swap from the journaled base), the files by their bytes, the ancestors by their journaled pending commits."""
+    Each step recognises what an earlier run did, and never replays over anything else: the branch by its commit id
+    (compare-and-swap from the journaled base), the files and index by their journaled states (see classify), the
+    ancestors by their journaled commits and index entries."""
     relname, ident, target, base = journal['repo'], journal['operation_id'], journal['target'], journal['base']
     head = head_commit(repo)
     if journal['phase'] == 'planned':
@@ -811,7 +894,10 @@ def move(root, runtime, wiki, repo, journal):
 
 
 def pin_ancestors(root, runtime, wiki, repo, journal):
-    """Commit each ancestor's pin to the commit below it, children before parents, one journaled commit each."""
+    """Pin each ancestor to the commit below it, children before parents, one journaled commit each.
+
+    An ancestor that already holds its commit is finished, not skipped: its index entry for the child is brought to
+    the commit HEAD records (see _finish_pin) before the ancestor is recorded as done."""
     current = journal['target']
     for parent, link, _ in gitops.ancestors(repo, root):
         relname = rel(root, parent)
@@ -822,33 +908,51 @@ def pin_ancestors(root, runtime, wiki, repo, journal):
             known.add(pending['commit'])
         if head not in known:
             raise WikiError(f'Git HEAD changed outside operation: {relname}')
-        if pending and head == pending['commit']:
-            _landed(journal, relname, head)
-            journal['pending'][relname] = None
-            store(runtime, journal)
-        pinned = tree_entries(parent, head).get(link)
+        old_pin = _gitlink_pin(parent, journal['heads'][relname], link)
+        pinned = _gitlink_pin(parent, head, link)
+        landed = head != journal['heads'][relname]
         if pinned is None or pinned[1] != current:
-            gitops.clean_except(parent, [link])
-            moved = gitops.commit(parent, [link], journal['operation_id'], pins={link: current},
-                                  intent=_pending_hook(runtime, journal, relname),
-                                  message=operations.commit_writer(wiki, Store(runtime), journal, parent))
+            _clean(parent, [link])
+            head = gitops.commit(parent, [link], journal['operation_id'], pins={link: current},
+                                 intent=_pending_hook(runtime, journal, relname),
+                                 message=operations.commit_writer(wiki, Store(runtime), journal, parent),
+                                 sync=lambda where, paths: _finish_pin(where, link, old_pin, current))
             head = head_commit(parent)
-            if moved is not None:
-                _landed(journal, relname, head)
-            journal['pending'][relname] = None
-            store(runtime, journal)
-            checkpoint('pinned')
+            landed = True
+        else:
+            _finish_pin(parent, link, old_pin, current)
+        if landed:
+            _landed(journal, relname, head)
+        journal['pending'][relname] = None
+        store(runtime, journal)
+        checkpoint('pinned')
         current = head
     return current
 
 
+def _finish_pin(repo, link, old_pin, new_commit):
+    """Make the index entry of the gitlink LINK the pin that HEAD records (NEW_COMMIT). Only the journaled old entry
+    (OLD_PIN, a (mode, oid)) is replaced; any other index state is refused, and nothing is reset."""
+    entry = _index_entry(repo, link)
+    if entry == (GITLINK, new_commit):
+        return
+    if entry != old_pin:
+        raise WikiError(f'{link}: the index holds neither the old nor the new pin; not touched')
+    checkpoint('ancestor-moved')
+    git(repo, 'update-index', '--cacheinfo', f'{GITLINK},{new_commit},{link}')
+
+
 def _is_source(path, spaces):
-    """True for a path directly inside a `sources` folder of a space (immutable originals)."""
-    owners = [s for s in spaces if path.startswith(s + '/')]
+    """True for a path directly inside a `sources` folder of a space (immutable originals).
+
+    SPACES holds the space directories of a repository, relative to it: '' is the space at the repository's own
+    root (a submodule whose .wiki.toml sits at its top), and its sources are `sources/...` paths."""
+    owners = [space for space in spaces if space == '' or path.startswith(space + '/')]
     if not owners:
         return False
     owner = max(owners, key=len)
-    return path[len(owner) + 1:].startswith('sources/')
+    rest = path[len(owner) + 1:] if owner else path
+    return rest.startswith('sources/')
 
 
 def _meta(repo, entry):
@@ -998,13 +1102,15 @@ def do_pull(root, state_dir, relative=None, remote=None, branch=None, merge=Fals
                                  f'resolve --id {journal["operation_id"]}, or pisar sync abort --id {journal["operation_id"]}')
             if journal['fetched'] != fetched:
                 raise WikiError(f'the fetched ref moved since sync {journal["operation_id"]}; abort it, then pull again')
+            if dry_run:  # Read only: what the resume would do, decided on the same checks, nothing written.
+                return _would_resume(repo, journal)
             return _resume(root, runtime, wiki, repo, journal)
         head = head_commit(repo)
         if is_ancestor(repo, fetched, head):
             return dict(ok=True, status='up-to-date', repo=relname, head=head, commit=fetched)
-        gitops.clean_except(repo)  # Nothing of the user's is dirty, staged or untracked: the move cannot take it.
+        _clean(repo)  # Nothing of the user's is dirty, staged or untracked: the move cannot take it.
         for parent, _, _ in gitops.ancestors(repo, root):
-            gitops.clean_except(parent)  # The pin of each parent is committed after the move: it must be clean now.
+            _clean(parent)  # The pin of each parent is committed after the move: it must be clean now.
         mode = 'fast-forward' if is_ancestor(repo, head, fetched) else ('merge' if merge else None)
         if mode is None:
             return dict(ok=False, status='diverged', repo=relname, head=head, commit=fetched,
@@ -1013,6 +1119,30 @@ def do_pull(root, state_dir, relative=None, remote=None, branch=None, merge=Fals
         if mode == 'fast-forward':
             return _start_fast_forward(root, runtime, wiki, repo, relname, names_, head, fetched, ident, dry_run)
         return _start_merge(root, runtime, wiki, repo, relname, names_, head, fetched, ident, dry_run)
+
+
+def _would_resume(repo, journal):
+    """The report of a dry run on an open journal: the phase, the steps a resume takes, and the state of each path."""
+    result = dict(ok=True, status='would-resume', sync_id=journal['operation_id'], repo=journal['repo'],
+                  phase=journal['phase'], steps=[])
+    steps = result['steps']
+    try:
+        _clean(repo, [item['path'] for item in journal['plan']])
+        if journal['phase'] == 'prepared':
+            steps.append('write the merge commit from the journaled tree, move the branch, install the files, pin')
+            return result
+        if journal['phase'] == 'planned':
+            steps.append('move the branch to the journaled commit (compare-and-swap), install the files, pin')
+        elif journal['phase'] == 'moved':
+            steps.append('install the files, pin the ancestors')
+        elif journal['phase'] == 'files':
+            steps.append('pin the ancestors')
+        result['items'] = [dict(path=item['path'], state=state)
+                           for item, state in zip(journal['plan'], classify(repo, journal['plan']))]
+    except WikiError as error:
+        return dict(ok=False, status='refused', sync_id=journal['operation_id'], repo=journal['repo'],
+                    phase=journal['phase'], problems=[str(error)])
+    return result
 
 
 def _start_fast_forward(root, runtime, wiki, repo, relname, names_, head, fetched, ident, dry_run):
@@ -1071,20 +1201,27 @@ def _start_merge(root, runtime, wiki, repo, relname, names_, head, fetched, iden
         status, problems = verdict or ('would-merge', [])
         return dict(ok=not verdict, status=status, repo=relname, head=head, commit=fetched, problems=problems,
                     changes=[item['path'] for item in plan])
-    journal = new_journal(root, relname, repo, names_, 'merge', head, fetched, bases[0], plan, ident)
-    journal['target'] = _merge_commit(repo, runtime, wiki, journal, tree)
+    commit_message.require(*_explanation())  # Refused before any journal is written.
+    journal = new_journal(root, relname, repo, names_, 'merge', head, fetched, bases[0], plan, ident,
+                          phase='prepared')
+    journal['tree'] = tree
+    store(runtime, journal)  # Prepared: the tree and the plan are journaled before any commit object exists.
+    journal['target'] = _merge_commit(repo, runtime, wiki, journal)
+    journal['phase'] = 'planned'
     store(runtime, journal)
     checkpoint('journal')
     return _run_move(root, runtime, wiki, repo, journal, 'merge')
 
 
-def _merge_commit(repo, runtime, wiki, journal, tree):
-    """The one merge commit of this sync: created once and journaled; a retry reuses its id."""
+def _merge_commit(repo, runtime, wiki, journal):
+    """The merge commit of this sync, from the journaled tree. Its message comes from the writer once (cached in the
+    journal); its dates come from the journal, so a retry after an interruption rebuilds the same commit object."""
     commit_message.require(*_explanation())
     message = operations.commit_writer(wiki, Store(runtime), journal, repo)(
-        dict(repo=repo, old=journal['base'], tree=tree, paths=[item['path'] for item in journal['plan']]))
-    commit = git(repo, 'commit-tree', tree, '-p', journal['base'], '-p', journal['fetched'],
-                 input=f'{message}\n'.encode()).strip()
+        dict(repo=repo, old=journal['base'], tree=journal['tree'], paths=[item['path'] for item in journal['plan']]))
+    checkpoint('message-ready')
+    commit = git(repo, 'commit-tree', journal['tree'], '-p', journal['base'], '-p', journal['fetched'],
+                 input=f'{message}\n'.encode(), dates=journal['when']).strip()
     checkpoint('merge-commit')
     return commit
 
@@ -1136,10 +1273,20 @@ def discard_worktree_of(runtime, repo, journal):
 
 
 def _resume(root, runtime, wiki, repo, journal):
-    gitops.clean_except(repo, [item['path'] for item in journal['plan']])  # Only the sync's own paths may differ.
+    """Continue an open journal. Nothing is replayed over user work: the paths are classified first (see classify)."""
+    _clean(repo, [item['path'] for item in journal['plan']])  # Only the sync's own planned paths may be dirty.
     for parent, link, _ in gitops.ancestors(repo, root):
-        gitops.clean_except(parent, [link])  # Only the pin of the child that already moved may differ.
-    if journal['phase'] == 'planned' and head_commit(repo) == journal['base']:
+        _clean(parent, [link])  # Only the pin of the child that already moved may differ.
+    if journal['phase'] == 'prepared':
+        if head_commit(repo) != journal['base']:
+            raise WikiError(f'Git HEAD changed outside operation: {journal["repo"]}')
+        check_children(root, repo, journal['plan'])
+        check_files(repo, journal['plan'])
+        journal['target'] = _merge_commit(repo, runtime, wiki, journal)
+        journal['phase'] = 'planned'
+        store(runtime, journal)
+        checkpoint('journal')
+    elif journal['phase'] == 'planned' and head_commit(repo) == journal['base']:
         check_children(root, repo, journal['plan'])
         check_files(repo, journal['plan'])
     return _run_move(root, runtime, wiki, repo, journal, journal['mode'])
@@ -1272,8 +1419,11 @@ def do_resolve(root, state_dir, ident):
                         next='fix the files and resolve again, or abort')
         check_children(root, repo, plan)
         check_files(repo, plan)
-        journal.update(plan=plan, status='open', phase='planned')
-        journal['target'] = _merge_commit(repo, runtime, wiki, journal, tree)
+        commit_message.require(*_explanation())  # Refused before the journal changes state.
+        journal.update(plan=plan, tree=tree, status='open', phase='prepared', target=None, when=int(time.time()))
+        store(runtime, journal)
+        journal['target'] = _merge_commit(repo, runtime, wiki, journal)
+        journal['phase'] = 'planned'
         store(runtime, journal)
         checkpoint('journal')
         return _run_move(root, runtime, wiki, repo, journal, 'resolved')
