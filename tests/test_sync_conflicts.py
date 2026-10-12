@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from unittest import mock
 
 from .support import Fixture, clean_environ, commit_all, document, git
 
@@ -178,3 +179,17 @@ class SyncConflictTests(Fixture):
         self.assertEqual(json.loads(p.stdout)['status'], 'taken')
         p = self.cli('sync', 'take', '--id', result['sync_id'], '--path', 'personal/home', '--side', 'ours', ok=False)
         self.assertIn('not a conflicted path', p.stderr)
+
+    def test_an_unsafe_conflicted_name_from_the_remote_is_never_written_into_the_work_tree(self):
+        from pisar import sync
+        self.locally(lambda r: (r / 'work/team/alpha/call.md').write_text(document(body='Local.')))
+        self.publish(lambda r: (r / 'work/team/alpha/call.md').write_text(document(body='Remote.')))
+        before = self.repo_state()
+        self.cli('sync', 'fetch')
+        with mock.patch.object(sync, '_path_problem',
+                               side_effect=lambda p: 'unsafe path (test)' if p.endswith('call.md') else None), \
+                mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.base / 'noconfig')}):
+            result = sync.do_pull(self.root, self.state, merge=True)
+        self.assertEqual(result['status'], 'invalid')
+        self.assertEqual(self.repo_state(), before)
+        self.assertEqual(len(git(self.root, 'worktree', 'list').splitlines()), 1)

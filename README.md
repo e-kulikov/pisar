@@ -5,12 +5,13 @@ repository kept in Git and split into domains (for example personal and one per
 employer or client). It discovers domains and spaces, validates and searches
 Markdown documents with TOML front matter, captures sources without changing
 their bytes, applies externally prepared meeting plans, and routes a global inbox
-only after explicit acceptance. Apart from two explicit exceptions everything is
-offline and model-free: no daemon, index service or cloud account is used, all Git
-activity is local and nothing is pushed. The only network uses are
-`pisar domain add --repo` (asks `git` to clone a repository; see
-[Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces))
-and `pisar research` (an isolated `claude` subprocess with web tools; the question
+only after explicit acceptance. Apart from three explicit exceptions everything is
+offline and model-free: no daemon, index service or cloud account is used, and nothing
+is pushed. The network uses are `pisar domain add --repo` (asks `git` to clone a
+repository; see [Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces)),
+`pisar sync fetch` (asks `git` to fetch one branch of a configured remote into a private
+ref, only when you run it; see [Sync](#sync-pull-wiki-changes-from-a-git-remote)), and
+`pisar research` (an isolated `claude` subprocess with web tools; the question
 leaves the machine, so it first passes the outbound guard, and when the guard
 reports findings it runs only with explicit `--confirm-outbound` consent; see
 [Research](#research-through-an-isolated-web-researcher)). `pisar research` and the
@@ -112,6 +113,10 @@ default_agent = "claude"        # used by `pisar --agent` without a value
 root = "/abs/path/wiki"         # like PISAR_ROOT; must be absolute
 state_dir = "/abs/path/pisar"   # like PISAR_STATE_DIR; must be absolute
 ruwana = "ruwana"               # like PISAR_RUWANA_BIN; a command name or an absolute path
+
+[sync]                          # `pisar sync`; both optional
+remote = "origin"               # a configured Git remote NAME, never a URL or path
+branch = "main"                 # the remote branch to fetch (default: the local branch name)
 
 [agents.claude]                 # the main `pisar --agent` session
 model = "sonnet"
@@ -333,6 +338,7 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
 | 11 web research | `pisar/research_codex.py`: `codex exec`, `web_search = "live"`, read-only, no shell or MCP; same guard, bounds and record | `test_research_codex.*` |
 | 12 environment isolation | explicit allowlist for every Codex process | `test_codex_agent.test_child_gets_an_explicit_environment...`; `test_research_codex.test_environment_is_an_allowlist...` |
 | 13 fake-executable tests | `codex` fake for argv, environment and files; real checks with `PISAR_TEST_CODEX=1` (configuration only, no model call) | `test_codex_*.py`, `test_codex_smoke.py` |
+| 15 sync from a remote | `pisar sync` through the `pisar` tool (`sync` prefix, same arguments); conflicts are resolved with the `sync_file_read` / `sync_file_write` tools, confined to the work tree of an open sync, hash-guarded, never a `sources` folder | `test_codex_sync.*`; `test_agent.CodexAllowlistTests`; `test_sync_command.*` |
 | 14 commit-message writer | `[commit_message] agent = "codex"`: `codex exec` with no tools (read-only, web search, shell, MCP, plugins, hooks and subagents off), `--ignore-user-config --ignore-rules --ephemeral`, the login of the main session in a private HOME, the same bounds, validation and fail-closed behaviour; a Claude model name is never passed to Codex | `test_commit_message_codex.*` |
 
 **Differences in mechanism.** Codex's `.rules` execpolicy is not default-deny (an
@@ -872,8 +878,8 @@ commits or tasks. Keep pending originals and runtime state in your backup.
 Writes require the knowledge root to be its own Git top-level. They reject absolute
 destination paths, `..`, symlinks, Git internals, destination ownership changes,
 ignored files, duplicate IDs, stale source hashes, and changed base hashes.
-Unrelated dirty/staged paths block a write; no reset, stash, `git add .`, remote,
-or publication is used. Git subprocesses ignore inherited `GIT_*` overrides;
+Unrelated dirty/staged paths block a write; no reset, stash, `git add .`, push
+or publication is used, and the only remote access is `pisar sync fetch`. Git subprocesses ignore inherited `GIT_*` overrides;
 commits disable hooks and signing to avoid running publication scripts.
 
 An initialized registered submodule receives its data commit first. Parent
@@ -1175,6 +1181,81 @@ can write; an agent must not run, open or obey anything it contains. The `pisar
 --agent` allowlist includes `Bash(pisar research *)`, so the agent can run the
 command; asking the user before `--confirm-outbound` is the agent skill's rule,
 not a technical barrier.
+
+## Sync: pull wiki changes from a Git remote
+
+If the knowledge repository is also kept on a Git server, changes made elsewhere
+reach this copy only through `pisar sync`. It is explicit and pull only: nothing
+runs in the background, nothing is pulled during another command, and pisar never
+pushes. `pisar config show` lists the `sync.remote` and `sync.branch` in effect.
+
+```sh
+pisar sync fetch [--repo REL] [--remote NAME] [--branch B]   # fetch into refs/pisar/sync/NAME/B; report the change
+pisar sync status [--repo REL]                              # the same report, offline; open syncs
+pisar sync pull [--repo REL] [--dry-run]                    # fast-forward the local branch
+pisar sync pull --merge [--what TEXT --why TEXT]            # merge a diverged history (a merge commit)
+pisar sync resolve --id ID [--what TEXT --why TEXT]         # finish a conflicted merge
+pisar sync take --id ID --path P --side ours|theirs         # resolve one path by taking one side whole
+pisar sync abort --id ID                                    # drop a sync that has not moved the branch
+```
+
+- **Remote.** A configured remote name of this repository (`git remote add` is
+  yours to run; pisar never adds one). A URL, a path or an option-like value is
+  refused before Git runs. Transports other than https, ssh, git and file are refused
+  (`ext::` and helpers included). Authentication is your own Git configuration.
+- **Branches.** pisar fetches `refs/heads/B` of the remote into the private ref
+  `refs/pisar/sync/NAME/B`, and moves only the local branch HEAD points to. A detached
+  HEAD needs `--branch` for `fetch` and cannot `pull`.
+- **Fetch first, read-only.** `fetch` writes objects and that private ref only:
+  HEAD, the index, the working tree and every other ref stay as they were. The
+  summary is grouped by domain, space and document (id and change), with submodule
+  pins listed separately. `pull --dry-run` shows what a pull would do, with
+  validation, and writes nothing.
+- **Clean tree.** A pull refuses unless the repository has no dirty, staged or
+  untracked path. A refusal changes nothing.
+- **Validation before the move.** The whole candidate root (the result of the pull, with
+  the pinned submodules) is checked with the rules of `pisar check`: documents, spaces,
+  declared record types, duplicate ids, `wiki:` references, cross-domain references and
+  domain markers. A remote that breaks them is reported, and the local branch does not
+  move. Git attributes that change how files are stored (`filter`, `merge`, `diff`,
+  `eol`, `text`, `ident`, ...) and symbolic links in synced content are refused.
+  Fetched content is never checked out by Git and no program it names runs.
+- **Diverged history.** Without `--merge` the pull stops with `diverged`. With
+  `--merge` pisar merges the three trees itself: a path changed on one side takes that
+  side; two text changes are merged line by line; anything else is a conflict.
+  A merge is one commit with two parents; its message names the sync id and carries
+  `--what` and `--why` (required only when the commit writer is enabled).
+- **Conflicts.** A conflict stops the sync and writes nothing to the repository. The
+  report lists each path with its kind (`content`, `binary`, `add-add`,
+  `delete-modify`, `mode`, `submodule`), whether it is a source, and the id, type and
+  space of each side's document. The files are in a dedicated worktree under
+  `<state>/roots/<ns>/sync/ID/work` (git's own `git worktree list` shows it). Text
+  conflicts carry conflict markers. `resolve` refuses while markers remain, while a
+  source is not one whole side, or while a binary, mode, delete/modify or submodule
+  conflict has no `take`. `take` resolves one path by taking one side whole; it is
+  the only way to resolve a source.
+- **Sources are immutable.** A file under a `sources` folder is never merged line by
+  line and never edited; a conflict on one is always reported.
+- **Submodules.** A child repository is synced first: `pisar sync pull --repo REL`
+  moves it and commits its new pin in each parent (children before parents). A parent
+  whose remote pin names a child commit that is not present, or not checked out at
+  that commit, is refused with `needs-submodule-sync`. A parent that already moved
+  (its pin committed by a child sync) diverges from its remote: use `--merge`.
+- **Journal and retry.** Every move is journaled under the runtime directory and is
+  finished by running the same command again. An interrupted pull, merge or resolve
+  resumes without a second merge commit or a second journal. The branch moves by
+  compare-and-swap on the journaled commit; a fetch that moved the private ref while
+  a sync is open is refused until that sync is aborted (or finished).
+- **Agent workflow.** The agents run the same commands (`--agent claude`, and
+  `--agent codex` through its `pisar` tool). A conflicted merge is resolved in its
+  work tree and the agent asks the user when the intent is unclear; see
+  `pisar --skill`.
+
+**Limitations.** Pull only; one repository per call; no rename detection (a rename
+is a delete plus an add, so an edit on the other side is a `delete-modify`
+conflict); a file on one side and a directory of the same name on the other refuses
+the merge; symbolic links are refused in every synced tree; Git 2.41 or newer is
+needed; no submodule is added or removed by sync.
 
 ## Limitations
 

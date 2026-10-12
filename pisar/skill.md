@@ -101,8 +101,8 @@ pisar read <root-relative-path>
 Every write requires the root to be a clean Git top level. Unrelated dirty or
 staged paths block the operation; commit or set aside that work first. Never
 work around it with `git add .`, `git reset --hard`, `git stash` or by deleting
-journals. pisar makes **local commits only**: no push, no remote, hooks and
-signing disabled.
+journals. pisar makes **local commits only** and never pushes; it reaches a remote
+only through `pisar sync` (see "Sync from a remote"). Hooks and signing are disabled.
 
 ### 1. Capture a source into a known space
 
@@ -309,6 +309,39 @@ Never strip text on your own and never run `accept` without the user's go-ahead.
   knowledge files only, leave task files and current status alone, do it in each
   affected submodule before its parent, and review the staged diff before
   committing. Task status is authoritative in ruwana, not in a meeting summary.
+
+## Sync from a remote: bring in changes made elsewhere
+
+Use it when the user says the wiki changed on another machine or in the shared
+repository. Nothing else runs it; never run it on your own initiative.
+
+1. `pisar sync fetch` (fetches the configured remote branch into a private ref and
+   reports what would change: domains, spaces, documents, submodule pins). Read the
+   report and tell the user what changed before you go on.
+2. `pisar sync pull` fast-forwards the local branch. Refused while anything in the
+   repository is uncommitted; ask the user to commit or set that work aside. A
+   diverged history stops with `diverged`: run `pisar sync pull --merge` only when the
+   user agrees to a merge commit.
+3. A submodule (a domain repository) comes first: `pisar sync pull --repo REL`, then
+   the root. A `needs-submodule-sync` refusal names the children to sync first.
+4. A conflict stops the sync and changes nothing. The report lists each path with its
+   kind and, for documents, each side's id, type and space. Resolve it in the work
+   tree named by the report:
+   - read the conflicted file in the work tree (the text holds conflict markers for
+     a text conflict) and write the reconciled text there, with the file tools your
+     session lists for this purpose (only the work tree is writable; pass the digest
+     of what you read); keep each document's id and `space_ids` as they were on both sides;
+   - when a side should simply win, use `pisar sync take --id ID --path P --side ours|theirs`;
+   - never edit a file under a `sources` folder: take one side whole with `take`;
+   - when the intent is unclear, ask the user which side or which wording to keep;
+   - then `pisar sync resolve --id ID --what "..." --why "..."`. It validates the
+     result and refuses while markers remain.
+5. `pisar sync abort --id ID` drops a conflicted sync and leaves the repository as it
+   was. Once the branch moved there is no abort: finish with `pisar sync pull`.
+6. `pisar sync status` shows an open sync and the fetched change at any time.
+
+pisar never pushes. A remote whose content breaks `pisar check` is reported with
+its problems and is not written.
 
 ## Research: look something up on the web
 

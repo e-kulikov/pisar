@@ -1,6 +1,7 @@
 """Submodules: a parent never records a child commit that is not present; children are synced first and their
 pins are committed in the parents. Remotes are local repositories in the temporary base directory."""
 import json
+import os
 import subprocess
 
 from .support import Fixture, clean_environ, commit_all, document, git
@@ -41,9 +42,10 @@ class SyncSubmoduleTests(Fixture):
         self.pin_on_remote(child_head)
         before = git(self.root, 'rev-parse', 'HEAD')
         self.cli('sync', 'fetch')
-        p = self.cli('sync', 'pull', ok=False)
-        self.assertIn('needs-submodule-sync', p.stderr)
-        self.assertIn('work/module', p.stderr)
+        result = json.loads(self.cli('sync', 'pull', ok=False).stdout)
+        self.assertEqual(result['status'], 'needs-submodule-sync')
+        self.assertIn('work/module', result['problems'][0])
+        self.assertIn('children before parents', result['problems'][0])
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), before)
 
     def test_child_then_parent_keeps_the_parent_free_of_modified_submodules(self):
@@ -85,3 +87,28 @@ class SyncSubmoduleTests(Fixture):
         self.cli('sync', 'fetch')
         p = self.cli('sync', 'pull', ok=False)
         self.assertIn('unexpected-submodule', p.stderr + p.stdout)
+
+    def test_an_interrupted_child_sync_pins_the_parent_once_when_it_resumes(self):
+        from unittest import mock
+        from pisar import sync
+
+        class Interrupted(Exception):
+            pass
+
+        def stop(point):
+            if point == 'pinned':
+                raise Interrupted(point)
+
+        child_head = self.new_child_commit()
+        self.cli('sync', 'fetch', '--repo', 'work/module')
+        before = int(git(self.root, 'rev-list', '--count', 'HEAD'))
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.base / 'noconfig')}), \
+                mock.patch('pisar.sync.checkpoint', side_effect=stop):
+            with self.assertRaises(Interrupted):
+                sync.do_pull(self.root, self.state, relative='work/module')
+            result = sync.do_pull(self.root, self.state, relative='work/module')
+        self.assertEqual(result['status'], 'fast-forward')
+        self.assertEqual(int(git(self.root, 'rev-list', '--count', 'HEAD')), before + 1)
+        self.assertEqual(git(self.root, 'ls-tree', 'HEAD', 'work/module').split()[2], child_head)
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(json.loads(self.cli('sync', 'status', '--repo', 'work/module').stdout)['open'], [])

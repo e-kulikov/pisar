@@ -46,7 +46,8 @@ PROFILE = 'pisar'
 # Codex's default tool timeout is shorter than a lesson review, a research run or a user's time
 # to read a lesson before accepting it; the pisar server's own bounds stay in force inside it.
 SERVER_TOOL_TIMEOUT = 3600
-SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review', 'lesson_draft_read', 'lesson_draft_write')
+SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review', 'lesson_draft_read', 'lesson_draft_write',
+                'sync_file_read', 'sync_file_write')
 
 
 # Codex-specific wording appended to the shared agent prompt: the tools that stand in for Bash.

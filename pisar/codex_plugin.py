@@ -24,6 +24,9 @@ Run git with the `git` tool: `args` starts with the subcommand, for example
 `lesson_draft_write` (pass the sha256 you last read), not by editing draft.md.
 Accept a lesson only with the `lesson_accept` tool; it asks the user to confirm.
 Review a lesson revision with the `lesson_review` tool.
+Sync from a remote with the `pisar` tool (`["sync", "pull"]`, `["sync", "status"]`). A conflicted merge is
+resolved in its work tree with `sync_file_read` and `sync_file_write` (pass the sha256 you last read), then
+`["sync", "resolve", "--id", "ID"]`; never edit files under a `sources` folder.
 '''
 REVIEW_STEP = '''5. Review is mandatory: call the `lesson_review` tool with `["--batch", "ID"]`.
    It sends the current revision (its text and sha256) to the senior reviewer,

@@ -1,4 +1,6 @@
-"""Explicit local Git ownership and commits; no hooks, remotes or history rewriting."""
+"""Explicit local Git ownership and commits; no hooks or history rewriting.
+
+pisar never pushes, and it reaches a remote only through `pisar sync` (see sync.py)."""
 from pathlib import Path
 import os
 import subprocess

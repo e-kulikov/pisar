@@ -353,6 +353,11 @@ def work_dir(runtime, ident):
     return sync_dir(runtime) / ident / 'work'
 
 
+def safe_work_path(runtime, ident, relative):
+    """The path of RELATIVE inside the work tree of sync IDN, confined by safety.safe_path (see mcp.sync_file)."""
+    return safe_path(work_dir(runtime, ident), relative)
+
+
 def scratch_path(runtime, ident, name):
     path = sync_dir(runtime) / ident / name
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -602,6 +607,11 @@ def check_children(root, repo, plan):
                if item['new'] and item['new'][0] == GITLINK and head_commit(repo / item['path']) != item['new'][1]]
     if lagging:
         raise WikiError(f'needs-submodule-sync: {", ".join(lagging)}; sync those submodules first (children before parents)')
+
+
+def unsafe_paths(plan):
+    """Problems of the paths a fetched plan would write (reported as an invalid remote, never written)."""
+    return [f'{item["path"]}: {_path_problem(item["path"])}' for item in plan if _path_problem(item['path'])]
 
 
 def _gitlink_item(item):
@@ -917,7 +927,7 @@ def do_pull(root, state_dir, relative=None, remote=None, branch=None, merge=Fals
         if is_ancestor(repo, fetched, head):
             return dict(ok=True, status='up-to-date', repo=relname, head=head, commit=fetched)
         gitops.clean_except(repo)  # Nothing of the user's is dirty, staged or untracked: the move cannot take it.
-        for parent, link, _ in gitops.ancestors(repo, root):
+        for parent, _, _ in gitops.ancestors(repo, root):
             gitops.clean_except(parent)  # The pin of each parent is committed after the move: it must be clean now.
         mode = 'fast-forward' if is_ancestor(repo, head, fetched) else ('merge' if merge else None)
         if mode is None:
@@ -932,13 +942,12 @@ def do_pull(root, state_dir, relative=None, remote=None, branch=None, merge=Fals
 def _start_fast_forward(root, runtime, wiki, repo, relname, names_, head, fetched, ident, dry_run):
     tree = git(repo, 'rev-parse', f'{fetched}^{{tree}}').strip()
     plan = plan_between(repo, head, tree)
-    check_children(root, repo, plan)
-    check_files(repo, plan)
-    problems = _problems(runtime, ident, root, repo, tree)
-    if problems or dry_run:
+    verdict = _verdict(runtime, ident, root, repo, tree, plan)
+    if verdict or dry_run:
         remove_scratch(runtime, ident)
-        return dict(ok=not problems, status='invalid' if problems else 'would-fast-forward', repo=relname,
-                    head=head, commit=fetched, problems=problems, changes=[item['path'] for item in plan])
+        status, problems = verdict or ('would-fast-forward', [])
+        return dict(ok=not verdict, status=status, repo=relname, head=head, commit=fetched, problems=problems,
+                    changes=[item['path'] for item in plan])
     journal = new_journal(root, relname, repo, names_, 'fast-forward', head, fetched, None, plan, ident)
     journal['target'] = fetched
     store(runtime, journal)
@@ -959,6 +968,10 @@ def _start_merge(root, runtime, wiki, repo, relname, names_, head, fetched, iden
                                        is_source=lambda path: _is_source(path, spaces))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    unsafe = [f'{c["path"]}: {_path_problem(c["path"])}' for c in conflicts if _path_problem(c['path'])]
+    if unsafe:  # A conflicted path is written into the work tree: an unsafe name from the remote is never written.
+        remove_scratch(runtime, ident)
+        return dict(ok=False, status='invalid', repo=relname, head=head, commit=fetched, problems=unsafe)
     if conflicts:
         if dry_run:
             return dict(ok=False, status='would-conflict', repo=relname, head=head, commit=fetched,
@@ -976,13 +989,12 @@ def _start_merge(root, runtime, wiki, repo, relname, names_, head, fetched, iden
                          f'pisar sync resolve --id {ident}')
     tree = write_tree(repo, clean)
     plan = plan_between(repo, head, tree)
-    check_children(root, repo, plan)
-    check_files(repo, plan)
-    problems = _problems(runtime, ident, root, repo, tree)
-    if problems or dry_run:
+    verdict = _verdict(runtime, ident, root, repo, tree, plan)
+    if verdict or dry_run:
         remove_scratch(runtime, ident)
-        return dict(ok=not problems, status='invalid' if problems else 'would-merge', repo=relname, head=head,
-                    commit=fetched, problems=problems, changes=[item['path'] for item in plan])
+        status, problems = verdict or ('would-merge', [])
+        return dict(ok=not verdict, status=status, repo=relname, head=head, commit=fetched, problems=problems,
+                    changes=[item['path'] for item in plan])
     journal = new_journal(root, relname, repo, names_, 'merge', head, fetched, bases[0], plan, ident)
     journal['target'] = _merge_commit(repo, runtime, wiki, journal, tree)
     store(runtime, journal)
@@ -1004,6 +1016,24 @@ def _merge_commit(repo, runtime, wiki, journal, tree):
 def _explanation():
     current = commit_message.current()
     return current.get('what'), current.get('why')
+
+
+def _verdict(runtime, ident, root, repo, tree, plan):
+    """None when the move may go ahead; otherwise (status, problems) and nothing is written.
+
+    A fetched path that is unsafe, or a candidate that breaks the check rules, is `invalid`; a local state that
+    does not match the plan (a child not yet synced, an untracked file in the way) is `refused`."""
+    unsafe = unsafe_paths(plan)
+    if unsafe:
+        return 'invalid', unsafe
+    try:
+        check_children(root, repo, plan)
+        check_files(repo, plan)
+    except WikiError as error:
+        status = 'needs-submodule-sync' if str(error).startswith('needs-submodule-sync') else 'refused'
+        return status, [str(error)]
+    problems = _problems(runtime, ident, root, repo, tree)
+    return ('invalid', problems) if problems else None
 
 
 def _problems(runtime, ident, root, repo, tree):
