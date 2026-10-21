@@ -937,6 +937,72 @@ class SyncLifecycleTests(unittest.TestCase):
                 sync.apply(wiki, self.state, fetched['operation_id'])
         self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), before)
 
+    def _share_nontext_source_context(self):
+        source = self.root / 'work/10-projects/alpha/sources/scan.pdf'
+        source.write_bytes(b'%PDF synthetic')
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+
+    def test_conflicts_only_auto_pull_allows_incomplete_unneeded_context(self):
+        self._share_nontext_source_context()
+        incoming = self.incoming('work/10-projects/alpha/new.md', document('new-note', 'work/alpha'))
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        reviewer = mock.Mock(side_effect=AssertionError('clean pull called reviewer'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            result = sync.pull(Wiki(self.root), self.state, review_backend=reviewer)
+        self.assertEqual(result['status'], 'applied-automatically')
+        self.assertEqual(sync_git.head(self.root), incoming)
+        operation = sync._load(operations.Runtime(self.state, self.root), result['operation_id'])
+        self.assertEqual(operation['semantic_review']['coverage'], 'uncovered')
+        self.assertEqual(result['semantic_review']['label'], 'not semantically reviewed')
+        self.assertEqual(operation['review']['kind'], 'reduced-coverage')
+        reviewer.assert_not_called()
+
+    def test_conflicts_only_manual_allows_incomplete_unneeded_context(self):
+        self._share_nontext_source_context()
+        self.incoming('work/10-projects/alpha/new.md', document('new-note', 'work/alpha'))
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        sync.prepare(wiki, self.state, ident)
+        before = (sync_git.head(self.root), (self.root / '.git/index').read_bytes())
+        reviewer = mock.Mock(side_effect=AssertionError('clean review called reviewer'))
+        with mock.patch.object(sync_review, 'policy', return_value=sync_review.SemanticPolicy(review='conflicts')):
+            result = sync.semantic_review(wiki, self.state, ident, backend=reviewer)
+        self.assertEqual(result['status'], 'uncovered')
+        self.assertEqual(result['label'], 'not semantically reviewed')
+        operation = sync._load(operations.Runtime(self.state, self.root), ident)
+        self.assertEqual(operation['status'], 'prepared')
+        self.assertIsNone(operation['accepted'])
+        self.assertEqual((sync_git.head(self.root), (self.root / '.git/index').read_bytes()), before)
+        reviewer.assert_not_called()
+
+    def test_conflicts_only_actual_conflict_refuses_incomplete_context(self):
+        self._share_nontext_source_context()
+        relative = 'work/10-projects/alpha/note.md'
+        self.incoming(relative, document('note', 'work/alpha', body='Remote assertion.'))
+        (self.root / relative).write_text(document('note', 'work/alpha', body='Local assertion.'))
+        commit_all(self.root)
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        self.assertEqual(sync.prepare(wiki, self.state, ident, merge=True)['status'], 'conflict')
+        runtime = operations.Runtime(self.state, self.root)
+        candidate = sync._candidate(runtime, ident)
+        (candidate / relative).write_text(document('note', 'work/alpha', body='Owner resolution.'))
+        commit_all(candidate)
+        sync.prepare(wiki, self.state, ident, merge=True)
+        self.assertEqual(sync._load(runtime, ident)['conflict_provenance'], 'conflicted')
+        before = (sync_git.head(self.root), (self.root / '.git/index').read_bytes())
+        reviewer = mock.Mock()
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            with self.assertRaisesRegex(WikiError, 'context is incomplete.*scan.pdf'):
+                sync.semantic_review(wiki, self.state, ident, backend=reviewer)
+        reviewer.assert_not_called()
+        self.assertEqual((sync_git.head(self.root), (self.root / '.git/index').read_bytes()), before)
+
     def test_nontext_source_context_stops_semantic_review_with_explicit_reason(self):
         source = self.root / 'work/10-projects/alpha/sources/scan.pdf'
         source.write_bytes(b'%PDF synthetic')

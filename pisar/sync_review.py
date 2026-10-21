@@ -596,9 +596,6 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
         review_requests = requests(wiki, operation, candidate)
         for request in review_requests:
             request['policy'] = current_policy.__dict__
-            if not request['context_complete']:
-                omitted = ', '.join(request['omitted_context'][:10])
-                raise WikiError(f'semantic review context is incomplete; inspect omitted files: {omitted}')
         candidate_revision = _candidate_revision(operation, review_requests, current_policy)
         for request in review_requests:
             request['candidate_revision'] = candidate_revision
@@ -648,6 +645,10 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
             operation['status'] = 'prepared'
             sync._save(runtime, operation)
             return {'operation_id': ident, 'status': 'uncovered', 'label': 'not semantically reviewed'}
+        for request in review_requests:
+            if not request['context_complete']:
+                omitted = ', '.join(request['omitted_context'][:10])
+                raise WikiError(f'semantic review context is incomplete; inspect omitted files: {omitted}')
         if prior:
             operation['review'] = None
             operation['semantic_review'] = None
