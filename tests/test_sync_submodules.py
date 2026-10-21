@@ -84,6 +84,17 @@ class SyncSubmoduleTests(unittest.TestCase):
         with self.assertRaisesRegex(WikiError, 'candidate-compatibility.*merge.guard.driver'):
             sync.prepare(wiki, self.state, fetched['operation_id'])
 
+    def test_child_task_checks_use_selected_ruwana(self):
+        from unittest import mock
+        self.incoming_child_and_root_pin(child_task=True)
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        selected = str(self.base / 'child-selected-ruwana')
+        with mock.patch('pisar.ruwana.Ruwana', side_effect=WikiError('synthetic child adapter stop')) as adapter:
+            with self.assertRaisesRegex(WikiError, 'synthetic child adapter stop'):
+                sync.prepare(wiki, self.state, fetched['operation_id'], ruwana=selected)
+        self.assertEqual(adapter.call_args.args[1], selected)
+
     def incoming_child_and_root_pin(self, *, child_metadata=None, child_task=False):
         writer = self.base / 'root-writer'
         subprocess.run(['git', 'clone', '--no-local', '-q', str(self.root_remote), str(writer)],

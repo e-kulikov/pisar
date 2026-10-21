@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -91,7 +92,12 @@ def _target_ref(repo, target):
     return tracking
 
 
-def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=None):
+def _ruwana_binary(selected=None):
+    binary = str(settings.ruwana(selected))
+    return os.path.abspath(binary) if os.sep in binary else binary
+
+
+def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=None, ruwana=None):
     changed = set()
     history_commits = set()
     base_commits = []
@@ -115,7 +121,7 @@ def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=N
             changed.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
     if any('.ruwana' in Path(name).parts for name in changed):
         from .ruwana import Ruwana
-        binary = settings.ruwana()
+        binary = _ruwana_binary(ruwana)
         fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path',
                   'created', 'modified', 'related', 'tags', 'tasks')
 
@@ -427,7 +433,8 @@ def _operation(runtime, ident):
     return operation
 
 
-def prepare(wiki, state_dir, ident, *, merge=False):
+def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
+    ruwana = _ruwana_binary(ruwana)
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         operation = _operation(runtime, ident)
@@ -448,7 +455,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
             if merge_head:
                 unmerged = sync_git.run(candidate, 'ls-files', '--unmerged', '-z')
                 if unmerged and operation.get('live_graph') and len(operation['live_graph']) > 1:
-                    sync_graph.prepare_graph(operation, candidate,
+                    sync_graph.prepare_graph(operation, candidate, ruwana=ruwana,
                         message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
                     if operation.get('_graph_conflicts'):
                         return dict(operation_id=ident, status='conflict', candidate=str(candidate),
@@ -474,7 +481,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
             if outcome['state'] == 'conflict':
                 if operation.get('live_graph') and len(operation['live_graph']) > 1:
                     operation['candidate'] = operation['ours']
-                    sync_graph.prepare_graph(operation, candidate,
+                    sync_graph.prepare_graph(operation, candidate, ruwana=ruwana,
                         message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
                     if operation.get('_graph_conflicts'):
                         return dict(operation_id=ident, status='conflict', candidate=str(candidate),
@@ -495,7 +502,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
             raise WikiError('candidate no longer preserves the recorded O/T histories')
         operation['candidate'] = result
         if operation.get('live_graph') and len(operation['live_graph']) > 1:
-            sync_graph.prepare_graph(operation, candidate,
+            sync_graph.prepare_graph(operation, candidate, ruwana=ruwana,
                                      message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
             if operation.get('_graph_conflicts'):
                 return dict(operation_id=ident, status='conflict', candidate=str(candidate),
@@ -505,7 +512,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
             operation['graph'] = [dict(path='.', candidate=result,
                                        tree=sync_git.text(candidate, 'rev-parse', f'{result}^{{tree}}').strip(),
                                        branch=operation['branch'], ours=operation['ours'])]
-        _task_changes(candidate, operation['ours'], operation['theirs'], result)
+        _task_changes(candidate, operation['ours'], operation['theirs'], result, ruwana=ruwana)
         _validate_originals(candidate, operation['ours'], operation['theirs'], result)
         _validate_processing(candidate)
         if sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'):
@@ -819,9 +826,9 @@ def publish(wiki, state_dir, ident, *, dry_run=False, bootstrap_map=None):
         return dict(operation_id=ident, status='published', commit=commit_to_publish)
 
 
-def publish_only(wiki, state_dir, relative='.', target=Target()):
+def publish_only(wiki, state_dir, relative='.', target=Target(), *, ruwana=None):
     fetched = fetch(wiki, state_dir, relative, target, kind='publish-only')
-    return prepare(wiki, state_dir, fetched['operation_id'])
+    return prepare(wiki, state_dir, fetched['operation_id'], ruwana=ruwana)
 
 
 def semantic_review(wiki, state_dir, ident, *, backend=None):
@@ -829,11 +836,13 @@ def semantic_review(wiki, state_dir, ident, *, backend=None):
     return sync_review.review_operation(wiki, state_dir, ident, backend=backend)
 
 
-def resolve(wiki, state_dir, ident, *, backend=None, revision=None, decision=None, review_backend=None):
+def resolve(wiki, state_dir, ident, *, backend=None, revision=None, decision=None, review_backend=None,
+            ruwana=None):
     """Propose a scoped candidate resolution or commit an explicitly approved proposal."""
     from . import sync_resolver
     return sync_resolver.resolve_operation(wiki, state_dir, ident, backend=backend, revision=revision,
-                                           decision=decision, review_backend=review_backend)
+                                           decision=decision, review_backend=review_backend,
+                                           ruwana=_ruwana_binary(ruwana))
 
 
 def feedback(wiki, state_dir, ident, rating, category=None):
@@ -847,7 +856,8 @@ def feedback_summary(wiki, state_dir):
 
 
 def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run=False,
-         review_backend=None):
+         review_backend=None, ruwana=None):
+    ruwana = _ruwana_binary(ruwana)
     if dry_run:
         repo = _repo(wiki, relative)
         snapshot = sync_git.observe(repo)
@@ -856,7 +866,7 @@ def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run
         return dict(status='dry-run', branch=snapshot.branch, head=snapshot.head,
                     cached_remote_tip=remote_tip or None, remote_freshness='unknown')
     fetched = fetch(wiki, state_dir, relative, target)
-    result = prepare(wiki, state_dir, fetched['operation_id'], merge=merge)
+    result = prepare(wiki, state_dir, fetched['operation_id'], merge=merge, ruwana=ruwana)
     if result.get('status') == 'prepared' and settings.semantic_policy().get('approval') == 'auto':
         from . import sync_review
         reviewed = semantic_review(wiki, state_dir, fetched['operation_id'], backend=review_backend)

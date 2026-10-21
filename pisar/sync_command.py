@@ -77,15 +77,15 @@ def run(args, wiki, state_dir):
     if args.action == 'pull':
         return sync.pull(wiki, state_dir, args.repo,
                          Target(args.remote, args.branch, _bootstrap_map(args.bootstrap_map)),
-                         merge=args.merge, dry_run=args.dry_run)
+                         merge=args.merge, dry_run=args.dry_run, ruwana=args.ruwana)
     if args.action == 'prepare':
-        return sync.prepare(wiki, state_dir, args.operation, merge=args.merge)
+        return sync.prepare(wiki, state_dir, args.operation, merge=args.merge, ruwana=args.ruwana)
     if args.action == 'review':
         return sync.semantic_review(wiki, state_dir, args.operation)
     if args.action == 'resolve':
-        return sync.resolve(wiki, state_dir, args.operation)
+        return sync.resolve(wiki, state_dir, args.operation, ruwana=args.ruwana)
     if args.action == 'resolve-accept':
-        return sync.resolve(wiki, state_dir, args.operation, revision=args.revision, decision=args.decision)
+        return sync.resolve(wiki, state_dir, args.operation, revision=args.revision, decision=args.decision, ruwana=args.ruwana)
     if args.action == 'manual-review':
         return sync.manual_review(wiki, state_dir, args.operation)
     if args.action == 'status':
@@ -101,7 +101,7 @@ def run(args, wiki, state_dir):
             target = Target(args.remote, args.branch, _bootstrap_map(args.bootstrap_map))
             if args.dry_run:
                 return sync.pull(wiki, state_dir, args.repo, target, dry_run=True)
-            return sync.publish_only(wiki, state_dir, args.repo, target)
+            return sync.publish_only(wiki, state_dir, args.repo, target, ruwana=args.ruwana)
         return sync.publish(wiki, state_dir, args.operation, dry_run=args.dry_run,
                             bootstrap_map=_bootstrap_map(args.bootstrap_map))
     if args.action == 'feedback':

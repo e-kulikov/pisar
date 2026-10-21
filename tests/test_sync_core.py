@@ -355,6 +355,56 @@ class SyncLifecycleTests(unittest.TestCase):
                                decision='Retain the incoming assertion with its recorded uncertainty.')
         self.assertEqual(accepted['status'], 'accepted')
 
+    def test_cli_sync_task_checks_use_explicit_ruwana_before_snapshot_checkout(self):
+        import contextlib
+        import io
+        import os
+        from pisar import cli
+        self.incoming('.ruwana/tasks/one.md', 'Synthetic task bytes.\n')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        selected = self.base / 'selected-ruwana'
+        for binary in (str(selected), os.path.relpath(selected)):
+            with self.subTest(binary=binary), mock.patch.dict(os.environ, self.env, clear=True), \
+                    mock.patch('pisar.ruwana.Ruwana', side_effect=WikiError('synthetic adapter stop')) as adapter, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = cli.main(['--root', str(self.root), '--state-dir', str(self.state),
+                                   '--ruwana', binary, 'sync', 'prepare', '--operation', fetched['operation_id']])
+                self.assertNotEqual(result, 0)
+                self.assertEqual(adapter.call_args.args[1], str(selected))
+
+    def test_mcp_sync_task_checks_use_server_selected_ruwana(self):
+        import io
+        from pisar import mcp
+        self.incoming('.ruwana/tasks/one.md', 'Synthetic task bytes.\n')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        selected = str(self.base / 'server-selected-ruwana')
+        server = mcp.Server(self.root, self.state, selected, io.StringIO(), io.StringIO(), self.env)
+        with mock.patch('pisar.ruwana.Ruwana', side_effect=WikiError('synthetic adapter stop')) as adapter:
+            result = server.tool('sync_prepare', {'operation': fetched['operation_id']})
+        self.assertTrue(result.get('isError'))
+        self.assertEqual(adapter.call_args.args[1], selected)
+
+    def test_mcp_resolver_task_gate_keeps_server_selected_ruwana(self):
+        import io
+        import os
+        from pisar import mcp
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        selected = self.base / 'resolver-selected-ruwana'
+        server = mcp.Server(self.root, self.state, os.path.relpath(selected),
+                            io.StringIO(), io.StringIO(), self.env)
+        before = self._candidate_state_and_commits(candidate)
+        with mock.patch.object(server, '_confirm_sync'), \
+                mock.patch.object(sync, '_task_changes', side_effect=WikiError('synthetic task gate stop')) as gate:
+            result = server.tool('sync_resolve', {'operation': fetched['operation_id'],
+                                                  'revision': proposal['revision'], 'decision': 'Preserve both.'})
+        self.assertTrue(result.get('isError'))
+        self.assertEqual(gate.call_args.kwargs['ruwana'], str(selected))
+        self.assertEqual(self._candidate_state_and_commits(candidate), before)
+
     def test_auto_no_change_pull_releases_reservation_before_next_incoming_update(self):
         wiki = Wiki(self.root)
         before = self._candidate_state_and_commits(self.root)

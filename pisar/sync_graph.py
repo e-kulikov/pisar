@@ -339,7 +339,7 @@ def discover(root, commit='HEAD'):
     return tuple(result)
 
 
-def prepare_graph(operation, root_candidate, *, message=None):
+def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
     """Reconcile every incoming pin with its live child, bottom-up."""
     from . import operations, sync
     operation.pop('_graph_conflicts', None)
@@ -562,7 +562,7 @@ def prepare_graph(operation, root_candidate, *, message=None):
     for item in candidates[1:]:
         child_candidate = Path(item['candidate'])
         sync._task_changes(child_candidate, item['ours'], item['theirs'], item['commit'],
-                           wiki_root=root_candidate, relative=item['path'])
+                           wiki_root=root_candidate, relative=item['path'], ruwana=ruwana)
         sync._validate_originals(child_candidate, item['ours'], item['theirs'], item['commit'])
     result = verify_graph(graph)
     if not result['ok']:

@@ -575,13 +575,14 @@ class Server:
             if bootstrap_map is not None and not isinstance(bootstrap_map, dict):
                 raise Refused('sync_publish_prepare: bootstrap_map must be an object')
             result = sync.publish_only(Wiki(self.root), self.state,
-                                       target=sync.Target(bootstrap_map=bootstrap_map))
+                                       target=sync.Target(bootstrap_map=bootstrap_map), ruwana=self.ruwana)
         elif name == 'sync_prepare':
             if set(arguments) - {'operation', 'merge'} or type(arguments.get('merge', False)) is not bool:
                 raise Refused('sync_prepare accepts operation and an optional boolean merge')
             if not isinstance(operation, str):
                 raise Refused('sync_prepare: operation is required')
-            result = sync.prepare(Wiki(self.root), self.state, operation, merge=arguments.get('merge', False))
+            result = sync.prepare(Wiki(self.root), self.state, operation, merge=arguments.get('merge', False),
+                                  ruwana=self.ruwana)
         elif name == 'sync_status':
             if set(arguments) != {'operation'}:
                 raise Refused('sync_status accepts only operation')
@@ -623,7 +624,8 @@ class Server:
                 self._confirm_sync(name, f'Commit resolver proposal {revision} for operation {operation}; '
                                    f'candidate paths: {paths}; resolver summary: {summaries}?'
                                    + (f' Owner decision: {decision}' if decision else ''))
-            result = sync.resolve(Wiki(self.root), self.state, operation, revision=revision, decision=decision)
+            result = sync.resolve(Wiki(self.root), self.state, operation, revision=revision, decision=decision,
+                                  ruwana=self.ruwana)
         elif name == 'sync_feedback_summary':
             if arguments:
                 raise Refused('sync_feedback_summary takes no arguments')

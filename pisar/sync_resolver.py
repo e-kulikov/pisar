@@ -545,10 +545,11 @@ def _recover_commit(candidate, intent):
 
 
 def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, decision=None,
-                      review_backend=None):
+                      review_backend=None, ruwana=None):
     """Create a candidate resolution proposal, or approve and commit a stored proposal."""
     from datetime import datetime, timezone
     from . import sync, sync_review
+    ruwana = sync._ruwana_binary(ruwana)
     runtime = operations.Runtime(state_dir, wiki.root)
     if revision is not None:
         with runtime.lock():
@@ -628,7 +629,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                     if sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z'):
                         raise WikiError('candidate has untracked files before resolver commit')
                     sync_git.text(candidate, 'diff', '--cached', '--check')
-                    sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
+                    sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree, ruwana=ruwana)
                     sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
                     sync._validate_processing(candidate, staged_tree)
                     operation['candidate'] = proposal['candidate_head']
@@ -842,7 +843,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             proposal, response = make_proposal(transaction)
     if policy['approval'] == 'auto':
         return resolve_operation(wiki, state_dir, ident, backend=backend, revision=proposal['revision'],
-                                 review_backend=review_backend)
+                                 review_backend=review_backend, ruwana=ruwana)
     return response
 
 
