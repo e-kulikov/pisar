@@ -586,6 +586,11 @@ class SyncSubmoduleTests(unittest.TestCase):
     def test_nested_retained_pin_fixup_propagates_to_root_candidate(self):
         self.incoming_child_and_root_pin()
         wiki = Wiki(self.root)
+        live_child = self.root / self.child_path
+        live_grandchild = live_child / 'nested'
+        for repo in (live_child, live_grandchild):
+            self.git(repo, 'config', 'user.name', 'Synthetic fixture')
+            self.git(repo, 'config', 'user.email', 'synthetic@example.invalid')
         first = sync.pull(wiki, self.state)
         sync.manual_review(wiki, self.state, first['operation_id'])
         sync.accept(wiki, self.state, first['operation_id'], first['revision'])
