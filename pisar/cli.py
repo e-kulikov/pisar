@@ -3,7 +3,7 @@ import json
 import sys
 from types import SimpleNamespace
 from . import (__version__, agent, commit_message, config_command, guard, lesson_command, mcp, research_command,
-               settings, spacecmd)
+               settings, spacecmd, sync_command)
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -77,6 +77,7 @@ def parser():
     spacecmd.add_parser(commands)
     lesson_command.add_parser(commands)
     research_command.add_parser(commands)
+    sync_command.add_parser(commands)
     for path in commit_message.COMMITTING:
         leaf = commands.choices[path[0]]
         for name in (n for n in path[1:] if n is not None):
@@ -115,6 +116,10 @@ def main(argv=None):
         args.ruwana = settings.ruwana(args.ruwana)
         if args.command == 'mcp-serve':
             return mcp.run(args)
+        if args.command == 'sync' and args.action == 'status':
+            result = sync_command.run(args, Wiki(args.root), args.state_dir)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command == 'guard':
             result = guard.run(args, args)
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -131,6 +136,10 @@ def main(argv=None):
             else:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == 'sync':
+            result = sync_command.run(args, wiki, args.state_dir)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2 if result.get('status') in ('conflict', 'diverged', 'pending', 'needs-approval') else 0
         domains = None
         if getattr(args, 'include', None) or getattr(args, 'exclude', None):
             domains = wiki.select(args.include, args.exclude)

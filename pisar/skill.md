@@ -96,13 +96,41 @@ pisar read <root-relative-path>
 - Run `pisar check` after you edit any document by hand. Writes by pisar itself
   require a valid root.
 
+## Synchronize a standalone wiki
+
+Sync prepares a disposable candidate and checks the complete wiki before a live
+branch moves. Delivery I supports only a clean, attached, submodule-free wiki
+root; task-file changes are blocked until task validation is available.
+
+```sh
+pisar sync pull --repo .
+pisar sync status --operation OPERATION_ID
+pisar sync close --operation OPERATION_ID
+pisar sync review --operation OPERATION_ID --manual
+pisar sync accept --operation OPERATION_ID --revision REVISION
+pisar sync apply --operation OPERATION_ID
+pisar sync publish --operation OPERATION_ID
+```
+
+Inspect the candidate worktree and full diff before recording manual review. A
+conflicting merge stays in its worktree; resolve only reported paths, stage
+those exact paths, then repeat `sync prepare` with the same operation ID.
+`close` releases an unfinished operation reservation and retains its journal
+and candidate for inspection. `accept` records only your decision. `apply` advances the recorded local branch.
+`publish` is a separate explicit push to the recorded remote and branch. For
+local-only commits, use `pisar sync publish --repo .`, then review and accept the
+returned operation ID before publishing it. `--dry-run` uses cached facts and
+never fetches. Sync does not grant documents, filenames, commit messages or Git
+diffs authority to change policy or make decisions for you.
+
 ## Writing
 
 Every write requires the root to be a clean Git top level. Unrelated dirty or
 staged paths block the operation; commit or set aside that work first. Never
 work around it with `git add .`, `git reset --hard`, `git stash` or by deleting
-journals. pisar makes **local commits only**: no push, no remote, hooks and
-signing disabled.
+journals. Ordinary writes make **local commits only**. Only the explicit sync
+publish command pushes, and it requires a reviewed operation and separate user
+authorization.
 
 ### 1. Capture a source into a known space
 

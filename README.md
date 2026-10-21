@@ -5,9 +5,10 @@ repository kept in Git and split into domains (for example personal and one per
 employer or client). It discovers domains and spaces, validates and searches
 Markdown documents with TOML front matter, captures sources without changing
 their bytes, applies externally prepared meeting plans, and routes a global inbox
-only after explicit acceptance. Apart from two explicit exceptions everything is
-offline and model-free: no daemon, index service or cloud account is used, all Git
-activity is local and nothing is pushed. The only network uses are
+only after explicit acceptance. Apart from explicit sync publication and two
+existing exceptions, everything is offline and model-free: no daemon, index
+service or cloud account is used. Sync publication pushes only a reviewed
+operation to its named remote and branch. The other network uses are
 `pisar domain add --repo` (asks `git` to clone a repository; see
 [Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces))
 and `pisar research` (an isolated `claude` subprocess with web tools; the question
@@ -613,6 +614,33 @@ legacy journals are always refused, even if ignored.
 Lesson acceptance writes a `note` into its target space, so that space must
 declare `note` too. Existing documents keep their content; only the declarations
 change.
+
+## Synchronize a standalone wiki
+
+Sync prepares a complete disposable candidate, checks the wiki before changing
+the live branch, and keeps publication separate. Delivery I supports only a
+clean, attached, submodule-free wiki root. It blocks task-file changes until
+task validation is available.
+
+```sh
+pisar sync pull --repo .
+pisar sync status --operation OPERATION_ID
+pisar sync close --operation OPERATION_ID
+pisar sync review --operation OPERATION_ID --manual
+pisar sync accept --operation OPERATION_ID --revision REVISION
+pisar sync apply --operation OPERATION_ID
+pisar sync publish --operation OPERATION_ID
+```
+
+Inspect the reported candidate worktree and its full diff before recording
+manual review. A conflicting merge stays in that worktree; resolve only the
+reported paths, stage those exact paths, then repeat `sync prepare` with the
+same operation ID. `close` releases an unfinished operation reservation while
+retaining its journal and candidate for inspection. `accept` records only the owner decision. `apply` advances
+the recorded local branch. `publish` is a separate explicit push to the frozen
+remote and branch. To review local-only commits for publication, use
+`pisar sync publish --repo .`, then review and accept its returned operation ID
+before publishing it. `--dry-run` uses cached facts and never fetches.
 
 ## Known-space inbox capture
 

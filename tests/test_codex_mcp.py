@@ -72,6 +72,10 @@ class McpClient:
         result = self.call(name, args)
         return result['content'][0]['text'], bool(result.get('isError'))
 
+    def text_with(self, name, arguments):
+        result = self.call_with(name, arguments)
+        return result['content'][0]['text'], bool(result.get('isError'))
+
     def initialize(self):
         capabilities = {'elicitation': {}} if self.elicit is not None else {}
         return self.request('initialize', {'protocolVersion': mcp.PROTOCOL, 'capabilities': capabilities,
@@ -131,7 +135,7 @@ class McpTests(Fixture):
         client.initialize()
         return client
 
-    def test_handshake_and_exactly_the_three_tools(self):
+    def test_handshake_and_declared_tools(self):
         client = McpClient(self, ['--root', str(self.root), '--state-dir', str(self.state),
                                   '--ruwana', 'ruwana', 'mcp-serve'])
         init = client.initialize()
@@ -139,6 +143,9 @@ class McpTests(Fixture):
         self.assertEqual(init['result']['capabilities'], {'tools': {}})
         tools = client.request('tools/list')['result']['tools']
         self.assertEqual(sorted(t['name'] for t in tools), sorted(mcp.TOOL_NAMES))
+        self.assertIn('sync_accept', mcp.TOOL_NAMES)
+        self.assertIn('sync_apply', mcp.TOOL_NAMES)
+        self.assertIn('sync_publish', mcp.TOOL_NAMES)
 
     def test_unknown_method_is_a_json_rpc_error(self):
         client = self.server()
@@ -167,6 +174,21 @@ class McpTests(Fixture):
             with self.subTest(args=args):
                 _, error = client.text('pisar', args)
                 self.assertTrue(error)
+
+    def test_sync_owner_decisions_are_not_available_through_generic_pisar(self):
+        from pisar import mcp
+        for args in (['sync', 'accept', '--operation', 'x', '--revision', 'y'],
+                     ['sync', 'apply', '--operation', 'x'], ['sync', 'publish', '--operation', 'x']):
+            with self.subTest(args=args), self.assertRaises(mcp.Refused):
+                mcp.check_pisar(args)
+
+    def test_sync_accept_decline_never_writes_a_decision(self):
+        client = self.server(elicit='decline')
+        text, error = client.text_with('sync_accept', {'operation': 'sync-example', 'revision': 'digest'})
+        self.assertTrue(error)
+        self.assertIn('not confirmed by the user', text)
+        self.assertEqual(len(client.asked), 1)
+        self.assertFalse(self.state.exists())
 
     def test_pisar_never_runs_lesson_accept_itself(self):
         client = self.server(elicit='accept')

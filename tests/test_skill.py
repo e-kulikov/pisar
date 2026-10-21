@@ -38,6 +38,8 @@ class SkillTests(Fixture):
             self.assertIn(f'pisar {name}', text, name)
         for name in actions:
             self.assertIn(f'triage {name}', text, name)
+        for action in ('pull', 'status', 'review', 'accept', 'apply', 'publish'):
+            self.assertIn(f'sync {action}', text)
 
     def test_skill_documents_every_global_option_and_variable(self):
         text = self.skill().stdout

@@ -1,11 +1,12 @@
 """``pisar mcp-serve``: the stdio MCP server through which the Codex agent acts.
 
 Codex's own shell is disabled in the agent session (see codex_agent.py), so every
-operation the Claude agent may run through Bash is offered here as a tool that
+operation the agent may run through bounded tools is offered here as a tool that
 checks its arguments first. Nothing is ever run through a shell: each allowed
 operation is one fixed program (this pisar, or git) with a validated argument
 list. Tools are the same list as CLAUDE_ALLOWED in agent.py, plus
-``lesson_accept``, which the user must confirm through an MCP elicitation.
+``lesson_accept`` and sync decision tools, which the user must confirm through
+an MCP elicitation.
 """
 import json
 import os
@@ -103,6 +104,26 @@ TOOLS = (
           {'type': 'object', 'properties': {'batch': {'type': 'string'}, 'sha256': {'type': 'string'},
                                             'text': {'type': 'string'}},
            'required': ['batch', 'sha256', 'text'], 'additionalProperties': False}),
+    _tool('sync_fetch', 'Fetch the configured default sync target (origin/main) and freeze its exact tip.',
+          {'type': 'object', 'properties': {}, 'additionalProperties': False}),
+    _tool('sync_prepare', 'Prepare a disposable sync candidate; this never changes a live branch.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'merge': {'type': 'boolean'}},
+           'required': ['operation'], 'additionalProperties': False}),
+    _tool('sync_status', 'Read cached facts for a sync operation without fetching.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
+           'additionalProperties': False}),
+    _tool('sync_review', 'Record human review only after the user confirms they inspected the candidate.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
+           'additionalProperties': False}),
+    _tool('sync_accept', 'Record owner acceptance after a separate user confirmation.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'revision': {'type': 'string'}},
+           'required': ['operation', 'revision'], 'additionalProperties': False}),
+    _tool('sync_apply', 'Apply the exact accepted sync candidate after separate user confirmation.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
+           'additionalProperties': False}),
+    _tool('sync_publish', 'Publish an exact applied or publish-only candidate after separate user confirmation.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
+           'additionalProperties': False}),
 )
 TOOL_NAMES = tuple(tool['name'] for tool in TOOLS)
 DRAFT_LIMIT = 256 * 1024  # bytes of one draft
@@ -396,6 +417,8 @@ class Server:
                 return self.text(self.review(args))
             if name in ('lesson_draft_read', 'lesson_draft_write'):
                 return self.text(self.draft(name, arguments))
+            if name.startswith('sync_'):
+                return self.text(self.sync_tool(name, arguments))
         except WikiError as error:
             return self.text(str(error), error=True)
         raise _Unknown(f'tool {name}')
@@ -514,6 +537,72 @@ class Server:
         if not self.elicit(message):
             raise Refused('lesson_accept: not confirmed by the user; nothing was accepted')
         return self.capture([*self.pisar(), 'lesson', 'accept', *args])
+
+    def sync_tool(self, name, arguments):
+        from . import sync
+        from .spaces import Wiki
+        operation = arguments.get('operation')
+        if name == 'sync_fetch':
+            if arguments:
+                raise Refused('sync_fetch takes no arguments')
+            result = sync.fetch(Wiki(self.root), self.state)
+        elif name == 'sync_prepare':
+            if set(arguments) - {'operation', 'merge'} or type(arguments.get('merge', False)) is not bool:
+                raise Refused('sync_prepare accepts operation and an optional boolean merge')
+            if not isinstance(operation, str):
+                raise Refused('sync_prepare: operation is required')
+            result = sync.prepare(Wiki(self.root), self.state, operation, merge=arguments.get('merge', False))
+        elif name == 'sync_status':
+            if set(arguments) != {'operation'}:
+                raise Refused('sync_status accepts only operation')
+            if not isinstance(operation, str):
+                raise Refused('sync_status: operation is required')
+            result = sync.inspect(Wiki(self.root), self.state, operation)
+        elif name == 'sync_review':
+            if set(arguments) != {'operation'}:
+                raise Refused('sync_review accepts only operation')
+            if not isinstance(operation, str):
+                raise Refused('sync_review: operation is required')
+            details = sync.inspect(Wiki(self.root), self.state, operation)
+            message = (f'Have you personally reviewed the complete sync candidate for operation {operation} '
+                       f'(revision {details.get("revision")})? Inspect it with `pisar sync status` and the '
+                       'candidate worktree before confirming. This records review only; it does not accept or apply.')
+            self._confirm_sync(name, message)
+            result = sync.manual_review(Wiki(self.root), self.state, operation)
+        elif name == 'sync_accept':
+            if set(arguments) != {'operation', 'revision'}:
+                raise Refused('sync_accept accepts only operation and revision')
+            revision = arguments.get('revision')
+            if not isinstance(operation, str) or not isinstance(revision, str):
+                raise Refused('sync_accept: operation and revision are required')
+            self._confirm_sync(name, f'Accept sync operation {operation} at exact revision {revision}? Acceptance changes only the local decision record.')
+            result = sync.accept(Wiki(self.root), self.state, operation, revision)
+        elif name == 'sync_apply':
+            if set(arguments) != {'operation'}:
+                raise Refused('sync_apply accepts only operation')
+            if not isinstance(operation, str):
+                raise Refused('sync_apply: operation is required')
+            details = sync.inspect(Wiki(self.root), self.state, operation)
+            self._confirm_sync(name, f'Apply sync operation {operation}, candidate {details.get("candidate")}, to its recorded local branch?')
+            result = sync.apply(Wiki(self.root), self.state, operation)
+        elif name == 'sync_publish':
+            if set(arguments) != {'operation'}:
+                raise Refused('sync_publish accepts only operation')
+            if not isinstance(operation, str):
+                raise Refused('sync_publish: operation is required')
+            details = sync.inspect(Wiki(self.root), self.state, operation)
+            commit = details.get('applied') or details.get('candidate')
+            self._confirm_sync(name, f'Publish sync operation {operation}, commit {commit}, to {details.get("remote")} refs/heads/{details.get("target_branch")}?')
+            result = sync.publish(Wiki(self.root), self.state, operation)
+        else:
+            raise Refused(f'unknown sync tool: {name}')
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    def _confirm_sync(self, tool, message):
+        if 'elicitation' not in self.client:
+            raise Refused(f'{tool}: this client cannot ask for confirmation; nothing was changed')
+        if not self.elicit(message):
+            raise Refused(f'{tool}: not confirmed by the user; nothing was changed')
 
 
 EOF = object()  # the read loop's end of input; no JSON value is ever this object

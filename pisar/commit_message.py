@@ -44,7 +44,7 @@ SECRET_CATEGORIES = ('private-key', 'jwt', 'api-token', 'credential')
 # any write. `space type list` writes nothing and is not here.
 COMMITTING = (('save', None), ('capture', None), ('triage', 'accept'), ('lesson', 'accept'),
               ('domain', 'add'), ('space', 'create'), ('space', 'move'), ('space', 'archive'), ('space', 'restore'),
-              ('space', 'type', 'add'))
+              ('space', 'type', 'add'), ('sync', 'prepare'))
 MISSING = 'commit messages are written by an agent when [commit_message] enabled = true: this command needs ' \
           '--what (what changed) and --why (why it changed)'
 
