@@ -513,6 +513,28 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(self._candidate_state_and_commits(candidate),
                          (baseline['state'], baseline['commits']))
 
+    def test_failed_prospective_review_preserves_concurrent_staged_only_content(self):
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        path = 'work/10-projects/alpha/note.md'
+        baseline = {}
+        foreign = sync_git.run(candidate, 'hash-object', '-w', '--stdin',
+                               input=b'Concurrent staged-only content.\n').decode().strip()
+
+        def failing_review(request):
+            sync_git.text(candidate, 'update-index', '--cacheinfo', f'100644,{foreign},{path}')
+            baseline['state'] = self._candidate_state_and_commits(candidate)
+            raise WikiError('synthetic prospective review failure')
+
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            with self.assertRaisesRegex(WikiError, 'prospective review failure'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution,
+                             review_backend=failing_review)
+        self.assertEqual(sync_git.text(candidate, 'rev-parse', f':{path}').strip(), foreign)
+        self.assertEqual(self._candidate_state_and_commits(candidate), baseline['state'])
+
     def test_auto_fresh_needs_decision_precedes_any_candidate_commit(self):
         policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
         wiki, fetched, candidate = self._auto_resolver_failure_fixture()
@@ -1513,6 +1535,18 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(sync.apply(wiki, self.state, candidate['operation_id'])['status'], 'not-applicable')
         self.assertEqual(sync.publish(wiki, self.state, candidate['operation_id'])['status'], 'published')
         self.assertEqual(self.git(self.remote, 'rev-parse', 'refs/heads/main'), local_tip)
+
+    def test_dry_runs_preserve_index_with_stale_stat_data(self):
+        import os
+        path = self.root / 'work/10-projects/alpha/note.md'
+        index = self.root / '.git/index'
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
+        before = index.read_bytes()
+        result = sync.pull(Wiki(self.root), self.state, dry_run=True)
+        self.assertEqual(result['status'], 'dry-run')
+        self.assertEqual(index.read_bytes(), before)
+        self.assertFalse(self.state.exists())
 
     def test_dry_run_status_does_not_create_runtime(self):
         wiki = Wiki(self.root)

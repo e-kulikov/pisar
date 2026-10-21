@@ -62,20 +62,6 @@ def _candidate_transaction(candidate, paths):
         raise
 
 
-@contextmanager
-def _preserve_index_on_failure(candidate):
-    """Git may refresh index stat data during read-only checks; preserve exact bytes on failure."""
-    index = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
-    if not index.is_absolute():
-        index = Path(candidate) / index
-    original = index.read_bytes()
-    try:
-        yield
-    except BaseException:
-        index.write_bytes(original)
-        raise
-
-
 class _SemanticGatePending(Exception):
     def __init__(self, review):
         self.review = review
@@ -310,7 +296,7 @@ class CandidateTools:
             if sync_git.run(self.repo, 'ls-files', '--others', '--exclude-standard', '-z'):
                 raise WikiError('candidate has untracked files before resolver commit')
             sync_git.text(self.repo, 'diff', '--cached', '--check')
-            tree = sync_git.text(self.repo, 'write-tree').strip()
+            tree = sync_git.index_tree(self.repo)
         else:
             tree = checked_tree
         branch = sync_git.text(self.repo, 'symbolic-ref', '--quiet', 'HEAD', check=False).strip()
@@ -553,45 +539,44 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                         or any(item.get('disposition') in HARD_DISPOSITIONS for item in report['statements'])):
                     raise WikiError('resolver report does not satisfy automatic-resolution gates')
             try:
-                with _preserve_index_on_failure(candidate):
-                    from .documents import check as check_documents
-                    structural = check_documents(Wiki(candidate))
-                    if not structural['ok']:
-                        raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
-                    staged_tree = sync_git.text(candidate, 'write-tree').strip()
-                    if sync_git.run(candidate, 'diff-files', '--name-only'):
-                        raise WikiError('candidate has unstaged changes before resolver commit')
-                    if sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z'):
-                        raise WikiError('candidate has untracked files before resolver commit')
-                    sync_git.text(candidate, 'diff', '--cached', '--check')
-                    sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
-                    sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
-                    sync._validate_processing(candidate, staged_tree)
-                    operation['candidate'] = proposal['candidate_head']
-                    operation['status'] = 'resolving'
-                    tool.authorize_commit(report)
-                    reviewed = None
-                    if policy['approval'] == 'auto':
-                        reviewed = sync_review.review_prospective_tree(
-                            wiki, operation, candidate, staged_tree, backend=review_backend,
-                            runtime_base=runtime.base)
-                        if (sync_review.policy().__dict__ != policy
-                                or reviewed.get('policy') != policy):
-                            raise WikiError('semantic policy changed during prospective review; run resolution again')
-                        if acceptance_decision(
-                                {'reports': reviewed.get('reports', []), 'technical_checks_passed': True,
-                                 'candidate_current': True, 'resolver_commit_valid': True,
-                                 'fresh_review': bool(reviewed.get('reports'))},
-                                reviewed.get('policy', {})) != 'accepted':
-                            raise _SemanticGatePending(reviewed)
-                        tool._fresh()
-                        if sync_git.text(candidate, 'write-tree').strip() != staged_tree:
-                            raise WikiError('candidate tree changed during prospective semantic review')
-                        if (sync_git.run(candidate, 'diff-files', '--name-only')
-                                or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
-                            raise WikiError('candidate worktree changed during prospective semantic review')
-                        if sync_review.policy().__dict__ != policy:
-                            raise WikiError('semantic policy changed before resolver commit; run resolution again')
+                from .documents import check as check_documents
+                structural = check_documents(Wiki(candidate))
+                if not structural['ok']:
+                    raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
+                staged_tree = sync_git.index_tree(candidate)
+                if sync_git.run(candidate, 'diff-files', '--name-only'):
+                    raise WikiError('candidate has unstaged changes before resolver commit')
+                if sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z'):
+                    raise WikiError('candidate has untracked files before resolver commit')
+                sync_git.text(candidate, 'diff', '--cached', '--check')
+                sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
+                sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
+                sync._validate_processing(candidate, staged_tree)
+                operation['candidate'] = proposal['candidate_head']
+                operation['status'] = 'resolving'
+                tool.authorize_commit(report)
+                reviewed = None
+                if policy['approval'] == 'auto':
+                    reviewed = sync_review.review_prospective_tree(
+                        wiki, operation, candidate, staged_tree, backend=review_backend,
+                        runtime_base=runtime.base)
+                    if (sync_review.policy().__dict__ != policy
+                            or reviewed.get('policy') != policy):
+                        raise WikiError('semantic policy changed during prospective review; run resolution again')
+                    if acceptance_decision(
+                            {'reports': reviewed.get('reports', []), 'technical_checks_passed': True,
+                             'candidate_current': True, 'resolver_commit_valid': True,
+                             'fresh_review': bool(reviewed.get('reports'))},
+                            reviewed.get('policy', {})) != 'accepted':
+                        raise _SemanticGatePending(reviewed)
+                    tool._fresh()
+                    if sync_git.index_tree(candidate) != staged_tree:
+                        raise WikiError('candidate tree changed during prospective semantic review')
+                    if (sync_git.run(candidate, 'diff-files', '--name-only')
+                            or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
+                        raise WikiError('candidate worktree changed during prospective semantic review')
+                    if sync_review.policy().__dict__ != policy:
+                        raise WikiError('semantic policy changed before resolver commit; run resolution again')
             except _SemanticGatePending as pending:
                 return {'operation_id': ident, 'status': 'needs-decision',
                         'semantic_review': {key: value for key, value in pending.review.items()

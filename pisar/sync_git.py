@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import subprocess
+import tempfile
 
 from . import gitops
 from .safety import WikiError
@@ -19,7 +20,7 @@ class RepoSnapshot:
 
 
 def command(repo, *args):
-    return ['git', '--no-pager', '-C', str(repo), *gitops.HARDENED, *POLICY, *args]
+    return ['git', '--no-pager', '--no-optional-locks', '-C', str(repo), *gitops.HARDENED, *POLICY, *args]
 
 
 def run(repo, *args, check=True, input=None):
@@ -48,6 +49,18 @@ def parents(repo, commit):
 def _git_path(repo, name):
     value = Path(text(repo, 'rev-parse', '--git-path', name).strip())
     return value if value.is_absolute() else Path(repo) / value
+
+
+def index_tree(repo):
+    """Ask Git for the staged tree without rewriting the candidate's index cache."""
+    with tempfile.TemporaryDirectory(prefix='pisar-index-check-') as temporary:
+        index = Path(temporary) / 'index'
+        index.write_bytes(_git_path(repo, 'index').read_bytes())
+        result = subprocess.run(command(repo, 'write-tree'), capture_output=True,
+                                env={**gitops.environment(), 'GIT_INDEX_FILE': str(index)})
+        if result.returncode:
+            raise WikiError('git write-tree failed during candidate check')
+        return result.stdout.decode('ascii').strip()
 
 
 def observe(repo, *, allow_dirty=False):
