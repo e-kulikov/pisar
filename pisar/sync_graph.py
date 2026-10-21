@@ -209,6 +209,8 @@ def publish_children(operation, graph, save, bootstrap_map=None):
                 completed.append(target.path)
                 save(operation)
             continue
+        if not sync_git._ancestor(target.repo, target.baseline, target.candidate):
+            raise WikiError(f'remote-advanced: {target.path}')
         command = sync_git.command(target.repo, 'push', '--porcelain', '--no-follow-tags',
             '--recurse-submodules=check', target.remote,
             f'{target.candidate}:refs/heads/{target.branch}')
@@ -220,6 +222,8 @@ def publish_children(operation, graph, save, bootstrap_map=None):
         except WikiError:
             observed = None
         if not observed or not sync_git._ancestor(target.repo, target.candidate, observed):
+            if result.returncode and observed:
+                raise WikiError(f'remote-advanced: child push was rejected: {target.path}')
             if result.returncode:
                 raise WikiError('publication-unknown: child push result could not be observed')
             raise WikiError(f'child publication was not reachable at destination: {target.path}')

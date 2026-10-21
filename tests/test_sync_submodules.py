@@ -1173,6 +1173,35 @@ class SyncSubmoduleTests(unittest.TestCase):
         ident = result['operation_id']
         self.assertEqual(sync.close(wiki, self.state, ident)['status'], 'closed')
 
+    def test_child_publication_refuses_nonfast_forward_baseline_as_remote_advanced(self):
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'local-only.md').write_text('Unpublished local child history.\n')
+        self.git(child, 'add', '--', 'local-only.md')
+        self.git(child, 'commit', '-qm', 'local child work')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local child work')
+        self.incoming_child_and_root_pin()
+        extra = self.base / 'extra-child'
+        subprocess.run(['git', 'clone', '-q', str(self.child_remote), str(extra)], env=self.env, check=True)
+        self.git(extra, 'config', 'user.name', 'Synthetic fixture')
+        self.git(extra, 'config', 'user.email', 'synthetic@example.invalid')
+        (extra / 'later.md').write_text('later\n')
+        self.git(extra, 'add', 'later.md')
+        self.git(extra, 'commit', '-qm', 'unpinned')
+        self.git(extra, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        remote_tip = self.git(self.child_remote, 'rev-parse', 'main')
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state, merge=True)
+        ident = result['operation_id']
+        sync.manual_review(wiki, self.state, ident)
+        sync.accept(wiki, self.state, ident, result['revision'])
+        sync.apply(wiki, self.state, ident)
+        with self.assertRaisesRegex(WikiError, 'remote-advanced'):
+            sync.publish(wiki, self.state, ident)
+        self.assertEqual(self.git(self.child_remote, 'rev-parse', 'main'), remote_tip)
+
 
 if __name__ == '__main__':
     unittest.main()
