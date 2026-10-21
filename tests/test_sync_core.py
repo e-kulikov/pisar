@@ -1,5 +1,6 @@
 """Real-Git regression coverage for the delivery-I candidate primitives."""
 import subprocess
+import sys
 import tempfile
 import json
 from pathlib import Path
@@ -880,6 +881,25 @@ class SyncLifecycleTests(unittest.TestCase):
                          decision='Approve only on the attached candidate branch.')
 
         self.assertEqual(self._candidate_state_and_commits(candidate), before)
+
+    def test_semantic_reviewer_runs_without_writer_lock(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        runtime = operations.Runtime(self.state, self.root)
+
+        def reviewer(request):
+            result = subprocess.run(
+                [sys.executable, '-c',
+                 'import fcntl, sys; f = open(sys.argv[1], "a+b"); '
+                 'fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)',
+                 str(runtime.path / 'writer.lock')],
+                env=clean_environ(), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return self._needs_decision(request)
+
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
 
     def test_candidate_change_while_reviewer_runs_discards_the_stale_report(self):
         self.incoming()

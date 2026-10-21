@@ -681,14 +681,14 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
             operation['accepted'] = None
             operation['status'] = 'prepared'
             sync._save(runtime, operation)
-        reports = []
-        if review_requests:
-            active_backend = backend or _configured_backend(wiki, runtime.base)
-            for request in review_requests:
-                checked = validate_review(request, active_backend(request))
-                if backend is None:
-                    checked['model'] = current_policy.model
-                reports.append(checked)
+    reports = []
+    if review_requests:
+        active_backend = backend or _configured_backend(wiki, runtime.base)
+        for request in review_requests:
+            checked = validate_review(request, active_backend(request))
+            if backend is None:
+                checked['model'] = current_policy.model
+            reports.append(checked)
     if not reports:
         with runtime.writer(ident):
             operation = sync._load(runtime, ident)
