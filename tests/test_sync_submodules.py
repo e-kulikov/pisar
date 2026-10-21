@@ -193,6 +193,38 @@ class SyncSubmoduleTests(unittest.TestCase):
         self.assertEqual(self.git(self.root, 'rev-parse', f'HEAD:{self.child_path}'), incoming_child)
         self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
 
+    def test_interrupted_prepare_refuses_unjournaled_child_correction_without_changes(self):
+        from unittest import mock
+        from pisar import operations
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        runtime = operations.Runtime(self.state, self.root)
+        with mock.patch.object(sync, '_save', side_effect=OSError('final preparation journal interrupted')):
+            with self.assertRaisesRegex(OSError, 'journal interrupted'):
+                sync.prepare(wiki, self.state, ident)
+        self.assertNotIn('graph', sync._load(runtime, ident))
+        candidate = sync._candidate(runtime, ident)
+        child = candidate / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        correction = child / 'correction.txt'
+        correction.write_text('Committed manual candidate correction.\n')
+        commit_all(child)
+
+        def snapshot(repo):
+            index = Path(self.git(repo, 'rev-parse', '--absolute-git-dir')) / 'index'
+            files = tuple(sorted((path.relative_to(repo).as_posix(), path.read_bytes())
+                                 for path in repo.rglob('*')
+                                 if path.is_file() and '.git' not in path.relative_to(repo).parts))
+            return self.git(repo, 'rev-parse', 'HEAD'), index.read_bytes(), files
+
+        before = {path: snapshot(path) for path in (candidate, child, child / 'nested')}
+        with self.assertRaisesRegex(WikiError, 'unexpected retained candidate HEAD'):
+            sync.prepare(wiki, self.state, ident)
+        self.assertEqual({path: snapshot(path) for path in before}, before)
+        self.assertEqual(correction.read_text(), 'Committed manual candidate correction.\n')
+
     def test_apply_interruption_retries_exact_child_candidate(self):
         incoming_child, incoming_root = self.incoming_child_and_root_pin()
         wiki = Wiki(self.root)

@@ -394,6 +394,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
             commit = item['ours']
         else:
             commit = None
+        new_checkout = False
         if candidate_path.exists():
             if candidate_path.is_symlink() or not candidate_path.is_dir():
                 raise WikiError(f'candidate submodule path is unsafe: {relative}')
@@ -415,6 +416,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
                         raise WikiError(f'candidate submodule checkout did not deinitialize cleanly: {relative}')
                     candidate_path.rmdir()
                 candidate_path.parent.mkdir(parents=True, exist_ok=True)
+                new_checkout = True
                 clone = subprocess.run(['git', 'clone', '--no-local', '--no-checkout', '--',
                                         str(source), str(candidate_path)], capture_output=True,
                                        env=gitops.environment())
@@ -422,6 +424,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
                     raise WikiError(f'could not materialize ordinary candidate submodule: {relative}')
         else:
             candidate_path.parent.mkdir(parents=True, exist_ok=True)
+            new_checkout = True
             proc = subprocess.run(['git', 'clone', '--no-local', '--no-checkout', '--', str(source), str(candidate_path)],
                                  capture_output=True, env=gitops.environment())
             if proc.returncode:
@@ -462,6 +465,8 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
                 return CandidateGraph(root_candidate, ())
             sync_git.text(candidate_path, 'diff', '--cached', '--check')
             commit = sync_git.commit_merge(candidate_path, message=message)
+        elif not new_checkout and candidate_head not in (item['ours'], commit):
+            raise WikiError(f'unexpected retained candidate HEAD; inspect manual child work: {relative}')
         elif commit is None:
             sync_git.text(candidate_path, 'switch', '--detach', item['ours'])
             merge = subprocess.run(sync_git.command(candidate_path, 'merge', '--no-ff', '--no-commit',
