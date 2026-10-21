@@ -829,6 +829,16 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(completed['status'], 'prepared')
         self.assertNotEqual(sync_git.head(candidate), operation['candidate'])
         self.assertNotEqual(sync_git.head(self.root), sync_git.head(candidate))
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=needs_decision)
+            with self.assertRaisesRegex(WikiError, 'automatic acceptance hard gates'):
+                sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+            accepted = sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'],
+                                   decision='Preserve the proposed statement with owner approval.')
+            self.assertEqual(accepted['status'], 'accepted')
+            applied = sync.apply(wiki, self.state, fetched['operation_id'])
+        self.assertEqual(applied['status'], 'applied')
+        self.assertEqual(sync_git.head(self.root), sync_git.head(candidate))
 
     def test_auto_resolver_policy_change_during_fresh_review_precedes_commit(self):
         policy = [sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)]

@@ -676,6 +676,8 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
             raise WikiError('acceptance revision does not match the reviewed report')
         if operation['review'].get('policy') != current_policy:
             raise WikiError('semantic policy changed after review; review the current candidate again')
+        if decision is not None and (not isinstance(decision, str) or not decision.strip()):
+            raise WikiError('owner decision must be nonempty')
         semantic = operation.get('semantic_review')
         if current_policy.get('approval') == 'auto':
             report_path = (runtime.path / 'sync-reports' / ident /
@@ -697,7 +699,10 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
                       'resolver_commit_valid': resolver_commit_valid,
                       'fresh_review': bool(semantic and semantic.get('coverage') == 'all'
                                            and semantic.get('revision'))}
-            if operation['review'].get('kind') == 'reduced-coverage':
+            if decision is not None and operation['review'].get('kind') == 'semantic':
+                sync_review.checked_stored_reports(wiki, runtime, operation, candidate)
+                authorized = technical_ok and bundle['candidate_current'] and resolver_commit_valid
+            elif operation['review'].get('kind') == 'reduced-coverage':
                 sync_review.validate_reduced_coverage(runtime, operation)
                 authorized = technical_ok and bundle['candidate_current'] and resolver_commit_valid
             elif semantic and semantic.get('coverage') == 'no-change' and operation['review'].get('kind') == 'no-change':
@@ -710,7 +715,6 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
                 authorized = acceptance_decision(bundle, current_policy) == 'accepted'
             if not authorized:
                 raise WikiError('automatic acceptance hard gates are not satisfied')
-            decision = None
         elif operation['review'].get('kind') == 'semantic':
             _, reports = sync_review.checked_stored_reports(
                 wiki, runtime, operation, _candidate(runtime, ident))
