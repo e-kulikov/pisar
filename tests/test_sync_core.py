@@ -405,6 +405,48 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(gate.call_args.kwargs['ruwana'], str(selected))
         self.assertEqual(self._candidate_state_and_commits(candidate), before)
 
+    def test_auto_pull_integrates_history_only_fast_forward_and_continues(self):
+        self.git(self.clone, 'commit', '--allow-empty', '-qm', 'Synthetic history-only update')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        incoming = sync_git.head(self.clone)
+        old_tree = sync_git.text(self.root, 'rev-parse', 'HEAD^{tree}').strip()
+        wiki = Wiki(self.root)
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        reviewer = mock.Mock(side_effect=AssertionError('history-only change invoked reviewer'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            first = sync.pull(wiki, self.state, review_backend=reviewer)
+            self.assertEqual(first['status'], 'applied-automatically')
+            self.assertEqual(sync_git.head(self.root), incoming)
+            self.assertEqual(sync_git.text(self.root, 'rev-parse', 'HEAD^{tree}').strip(), old_tree)
+            operation = sync._load(operations.Runtime(self.state, wiki.root), first['operation_id'])
+            self.assertEqual(operation['status'], 'applied')
+            self.assertEqual(operation['semantic_review']['coverage'], 'no-change')
+            second = sync.pull(wiki, self.state, review_backend=reviewer)
+            self.assertEqual(second['status'], 'no-change')
+            self.incoming('work/10-projects/alpha/note.md',
+                          document('note', 'work/alpha', body='A later document update.'))
+            third = sync.pull(wiki, self.state, review_backend=self._needs_decision)
+            self.assertEqual(third['status'], 'needs-decision')
+        reviewer.assert_not_called()
+
+    def test_history_only_auto_acceptance_still_enforces_technical_checks(self):
+        self.git(self.clone, 'commit', '--allow-empty', '-qm', 'Synthetic history-only update')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        candidate = Path(prepared['candidate_worktree'])
+        before = self._candidate_state_and_commits(candidate), self._candidate_state_and_commits(self.root)
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'])
+            self.assertEqual(reviewed['status'], 'no-change')
+            with mock.patch('pisar.sync_graph.verify_graph', return_value={'ok': False, 'errors': ['fixture failure']}):
+                with self.assertRaisesRegex(WikiError, 'hard gates'):
+                    sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        self.assertEqual((self._candidate_state_and_commits(candidate), self._candidate_state_and_commits(self.root)), before)
+
     def test_auto_no_change_pull_releases_reservation_before_next_incoming_update(self):
         wiki = Wiki(self.root)
         before = self._candidate_state_and_commits(self.root)

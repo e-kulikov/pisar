@@ -95,6 +95,34 @@ class SyncSubmoduleTests(unittest.TestCase):
                 sync.prepare(wiki, self.state, fetched['operation_id'], ruwana=selected)
         self.assertEqual(adapter.call_args.args[1], selected)
 
+    def test_auto_pull_integrates_child_history_only_pin_change(self):
+        from unittest import mock
+        from pisar import settings, sync_review
+        child = self.root / self.child_path
+        old_child_tree = self.git(child, 'rev-parse', 'HEAD^{tree}')
+        self.git(self.child_source, 'commit', '--allow-empty', '-qm', 'Synthetic child history update')
+        incoming_child = self.git(self.child_source, 'rev-parse', 'HEAD')
+        self.git(self.child_source, 'push', '-q', 'origin', 'main')
+        writer = self.base / 'history-writer'
+        subprocess.run(['git', 'clone', '-q', str(self.root_remote), str(writer)], env=self.env, check=True)
+        self.git(writer, 'config', 'user.name', 'Synthetic fixture')
+        self.git(writer, 'config', 'user.email', 'synthetic@example.invalid')
+        self.git(writer, 'update-index', '--cacheinfo', f'160000,{incoming_child},{self.child_path}')
+        self.git(writer, 'commit', '-qm', 'Advance child history pin')
+        incoming_root = self.git(writer, 'rev-parse', 'HEAD')
+        self.git(writer, 'push', '-q', 'origin', 'main')
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        reviewer = mock.Mock(side_effect=AssertionError('unchanged child content invoked reviewer'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            result = sync.pull(Wiki(self.root), self.state, review_backend=reviewer)
+            self.assertEqual(result['status'], 'applied-automatically')
+            self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), incoming_root)
+            self.assertEqual(self.git(child, 'rev-parse', 'HEAD'), incoming_child)
+            self.assertEqual(self.git(child, 'rev-parse', 'HEAD^{tree}'), old_child_tree)
+            self.assertEqual(sync.pull(Wiki(self.root), self.state, review_backend=reviewer)['status'], 'no-change')
+        reviewer.assert_not_called()
+
     def incoming_child_and_root_pin(self, *, child_metadata=None, child_task=False):
         writer = self.base / 'root-writer'
         subprocess.run(['git', 'clone', '--no-local', '-q', str(self.root_remote), str(writer)],

@@ -610,7 +610,8 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         operation = _load(runtime, ident)
-        current_policy = sync_review.policy().__dict__
+        current_policy_object = sync_review.policy()
+        current_policy = current_policy_object.__dict__
         if operation.get('status') == 'accepted' and operation.get('accepted', {}).get('revision') == revision:
             existing_decision = operation['accepted'].get('decision')
             if decision is None or decision == existing_decision:
@@ -649,7 +650,15 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
                       'resolver_commit_valid': resolver_commit_valid,
                       'fresh_review': bool(semantic and semantic.get('coverage') == 'all'
                                            and semantic.get('revision'))}
-            if acceptance_decision(bundle, current_policy) != 'accepted':
+            if semantic and semantic.get('coverage') == 'no-change' and operation['review'].get('kind') == 'no-change':
+                no_change_requests = sync_review.requests(wiki, operation, candidate)
+                if (no_change_requests or semantic.get('revision') != sync_review._candidate_revision(
+                        operation, no_change_requests, current_policy_object)):
+                    raise WikiError('no-change review is stale for the current candidate context')
+                authorized = technical_ok and bundle['candidate_current'] and resolver_commit_valid
+            else:
+                authorized = acceptance_decision(bundle, current_policy) == 'accepted'
+            if not authorized:
                 raise WikiError('automatic acceptance hard gates are not satisfied')
             decision = None
         elif operation['review'].get('kind') == 'semantic':
@@ -887,18 +896,25 @@ def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run
             with runtime.lock():
                 operation = _load(runtime, fetched['operation_id'])
                 if (operation.get('status') != 'reviewed'
-                        or operation.get('review', {}).get('kind') != 'no-change'
-                        or operation['ours'] != operation['theirs']
-                        or operation['candidate'] != operation['ours']
-                        or any(item['candidate'] != item['ours'] for item in operation.get('graph', []))):
+                        or operation.get('review', {}).get('kind') != 'no-change'):
                     raise WikiError('sync no-change result no longer matches the operation')
                 _assert_candidate(operation, _candidate(runtime, fetched['operation_id']))
-                sync_graph.discover(wiki.root, operation['ours'])
-                operation['status'] = 'closed'
-                operation['result'] = 'no-change'
-                operation['closed_at'] = datetime.now(timezone.utc).isoformat()
-                _save(runtime, operation)
-            return {**result, 'operation_id': fetched['operation_id'], 'status': 'no-change'}
+                exact_noop = (operation['ours'] == operation['theirs'] == operation['candidate']
+                              and all(item['candidate'] == item['ours'] for item in operation.get('graph', [])))
+                if exact_noop:
+                    sync_graph.discover(wiki.root, operation['ours'])
+                    operation['status'] = 'closed'
+                    operation['result'] = 'no-change'
+                    operation['closed_at'] = datetime.now(timezone.utc).isoformat()
+                    _save(runtime, operation)
+            if exact_noop:
+                return {**result, 'operation_id': fetched['operation_id'], 'status': 'no-change'}
+            # No document changes need a model report, but Git history and pins
+            # still advance only through the normal technical/accept/apply gates.
+            accept(wiki, state_dir, fetched['operation_id'], reviewed['revision'])
+            applied = apply(wiki, state_dir, fetched['operation_id'])
+            return {**result, **applied, 'operation_id': fetched['operation_id'],
+                    'status': 'applied-automatically', 'semantic_review': reviewed}
         return {**result, 'operation_id': fetched['operation_id'], 'status': 'needs-decision',
                 'semantic_review': reviewed}
     return {**result, 'operation_id': fetched['operation_id'],
