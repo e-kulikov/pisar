@@ -278,13 +278,53 @@ def _read_blob(repo, commit, path):
         raise WikiError(f'sync review cannot package non-UTF-8 changed file: {path}') from None
 
 
+def _graph_blob(operation, candidate, root_commit, path):
+    """Read a blob from the candidate repository that owns PATH."""
+    owners = [item for item in operation.get('graph', []) if item['path'] != '.'
+              and path.startswith(item['path'] + '/')]
+    if not owners:
+        return _read_blob(candidate, root_commit, path)
+    item = max(owners, key=lambda value: len(value['path']))
+    repo = Path(candidate) / item['path']
+    relative = path[len(item['path']) + 1:]
+    return _read_blob(repo, item['candidate'], relative)
+
+
 def requests(wiki, operation, candidate):
     repo = candidate
     ours, theirs, result = operation['ours'], operation['theirs'], operation['candidate']
     paths = set()
+    sources = {}
     for before in (ours, theirs):
         raw = sync_git.run(repo, 'diff', '--name-only', '-z', before, result)
         paths.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
+    # Gitlinks are opaque commit objects; review the changed files from each child candidate.
+    for item in operation.get('graph', []):
+        if item['path'] == '.':
+            continue
+        child_repo = Path(candidate) / item['path']
+        child_result = item['candidate']
+        child_ours, child_theirs = item['ours'], item.get('theirs', item['candidate'])
+        bases_child = sync_git.text(child_repo, 'merge-base', '--all', child_ours, child_theirs,
+                                    check=False).splitlines()
+        child_base = bases_child[0] if bases_child else child_theirs
+        child_paths = set()
+        for before in (child_ours, child_theirs):
+            raw = sync_git.run(child_repo, 'diff', '--name-only', '-z', before, child_result)
+            child_paths.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
+        for relative in child_paths:
+            combined = f'{item["path"]}/{relative}'
+            paths.add(combined)
+            sources[combined] = (child_repo, child_base, child_ours, child_theirs, child_result, relative)
+    # Exclude gitlink entries from root blob reads.
+    gitlinks = set()
+    for commit in (ours, theirs, result):
+        for record in sync_git.run(repo, 'ls-tree', '-r', '-z', commit).split(b'\0'):
+            if record.startswith(b'160000 '):
+                gitlinks.add(record.split(b'\t', 1)[1].decode('utf-8', 'surrogateescape'))
+    paths.difference_update(gitlinks)
+    for path in paths:
+        sources.setdefault(path, (repo, None, ours, theirs, result, path))
     if len(paths) > MAX_PATHS:
         raise WikiError('sync review has too many changed paths')
     if not paths:
@@ -307,8 +347,10 @@ def requests(wiki, operation, candidate):
         parts = PurePosixPath(path).parts
         domain = parts[0] if parts and parts[0] in known_domains else 'workspace'
         owner = candidate_wiki.owner(Path(candidate) / path)
-        versions = {side: _read_blob(repo, commit, path) for side, commit in
-                    (('base', base), ('ours', ours), ('theirs', theirs), ('candidate', result))}
+        source_repo, source_base, source_ours, source_theirs, source_result, source_path = sources[path]
+        versions = {side: _read_blob(source_repo, commit, source_path) for side, commit in
+                    (('base', source_base or base), ('ours', source_ours), ('theirs', source_theirs),
+                     ('candidate', source_result))}
         groups.setdefault(domain, {'files': {}, 'spaces': set()})['files'][path] = versions
         if owner is not None:
             groups[domain]['spaces'].add(owner)
@@ -345,7 +387,7 @@ def requests(wiki, operation, candidate):
                         if 'sources' in path.relative_to(space.path).parts:
                             omitted_context.append(relative)
                         continue
-                    data = _read_blob(repo, result, relative)
+                    data = _graph_blob(operation, candidate, result, relative)
                     if data is not None:
                         context[relative] = data
                         if sum(len(text.encode('utf-8')) for text in context.values()) > MAX_TEXT:
@@ -353,7 +395,7 @@ def requests(wiki, operation, candidate):
         for relative in sorted(dependency_paths):
             if relative in files or relative in context:
                 continue
-            data = _read_blob(repo, result, relative)
+            data = _graph_blob(operation, candidate, result, relative)
             if data is not None:
                 context[relative] = data
                 if sum(len(text.encode('utf-8')) for text in context.values()) > MAX_TEXT:

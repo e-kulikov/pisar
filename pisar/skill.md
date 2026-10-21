@@ -96,11 +96,15 @@ pisar read <root-relative-path>
 - Run `pisar check` after you edit any document by hand. Writes by pisar itself
   require a valid root.
 
-## Synchronize a standalone wiki
+## Synchronize a wiki
 
 Sync prepares a disposable candidate and checks the complete wiki before a live
-branch moves. Delivery I supports only a clean, attached, submodule-free wiki
-root; task-file changes are blocked until task validation is available.
+branch moves. Sync supports the complete existing initialized submodule graph,
+including nested repositories. Every live repository must be clean, attached to
+its owner-selected branch, and pinned by its parent at the checked-out commit.
+Topology changes and uninitialized children are refused. Incoming candidate
+documents in child repositories receive the same whole-wiki validation and
+semantic review. Task-file changes are blocked until task validation is available.
 
 ```sh
 pisar sync pull --repo .

@@ -7,7 +7,7 @@ import re
 import subprocess
 import uuid
 
-from . import commit_message, gitops, operations, settings, sync_git
+from . import commit_message, gitops, operations, settings, sync_git, sync_graph
 from .documents import check
 from .safety import WikiError, concrete_id, sha256
 from .spaces import Wiki
@@ -36,6 +36,12 @@ def _assert_candidate(operation, candidate):
         raise WikiError('candidate tree changed after preparation')
     if sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'):
         raise WikiError('candidate has uncommitted changes')
+    if operation.get('graph'):
+        graph = sync_graph.CandidateGraph(Path(candidate), tuple(
+            dict(path=item['path'], candidate=str(candidate) if item['path'] == '.' else str(Path(candidate) / item['path']),
+                 commit=item['candidate'], tree=item['tree'], branch=item['branch'], ours=item['ours'])
+            for item in operation['graph']))
+        sync_graph.verify_graph(graph)
 
 
 def _load(runtime, ident):
@@ -54,12 +60,9 @@ def _save(runtime, operation):
 
 def _repo(wiki, relative):
     if relative not in ('.', ''):
-        raise WikiError('delivery I supports only the complete, submodule-free wiki root')
+        raise WikiError('sync operates on the complete wiki root')
     if gitops.run(wiki.root, 'rev-parse', '--show-toplevel').strip() != str(wiki.root):
         raise WikiError('sync wiki must be the top of its Git repository')
-    links = gitops.run(wiki.root, 'ls-files', '--stage', '-z')
-    if any(record.startswith('160000 ') for record in links.split('\0') if record):
-        raise WikiError('delivery I does not support submodule-bearing wiki roots')
     return wiki.root
 
 
@@ -124,7 +127,7 @@ def _validate_originals(candidate, ours, theirs, result):
 
 def _revision(operation):
     data = {key: operation[key] for key in ('root', 'repo', 'branch', 'remote', 'target_branch',
-                                             'remote_fingerprint', 'kind', 'ours', 'theirs', 'candidate', 'tree')
+                                             'remote_fingerprint', 'kind', 'ours', 'theirs', 'candidate', 'tree', 'graph')
             if key in operation}
     return operations.fingerprint(data)
 
@@ -168,6 +171,7 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         snapshot = sync_git.observe(repo)
+        initial_graph = sync_graph.discover(repo, snapshot.head)
         tracking = _target_ref(repo, target)
         remote_fp = _remote_fingerprint(repo, target.remote)
         theirs = sync_git.fetch_tip(repo, target.remote, target.branch)
@@ -196,6 +200,8 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
                          remote_fingerprint=remote_fp, tracking_ref=tracking, status='fetched',
                          candidate=None, revision=None, review=None, accepted=None, applied=None,
                          created_at=datetime.now(timezone.utc).isoformat())
+        operation['live_graph'] = [dict(path=item['path'], branch=item['branch'], ours=item['ours'])
+                                   for item in initial_graph]
         _save(runtime, operation)
         return dict(operation_id=ident, status='fetched', ours=snapshot.head, theirs=theirs,
                     branch=snapshot.branch, remote=target.remote, target_branch=target.branch)
@@ -249,17 +255,25 @@ def prepare(wiki, state_dir, ident, *, merge=False):
         if not sync_git._ancestor(candidate, operation['ours'], result) or not sync_git._ancestor(
                 candidate, operation['theirs'], result):
             raise WikiError('candidate no longer preserves the recorded O/T histories')
-        if any(record.startswith(b'160000 ') for record in sync_git.run(candidate, 'ls-tree', '-r', '-z', result).split(b'\0') if record):
-            raise WikiError('delivery I does not support submodule-bearing candidate trees')
+        operation['candidate'] = result
+        if operation.get('live_graph') and len(operation['live_graph']) > 1:
+            sync_graph.prepare_graph(operation, candidate)
+        else:
+            operation['graph'] = [dict(path='.', candidate=result,
+                                       tree=sync_git.text(candidate, 'rev-parse', f'{result}^{{tree}}').strip(),
+                                       branch=operation['branch'], ours=operation['ours'])]
         _task_changes(candidate, operation['ours'], operation['theirs'], result)
         _validate_originals(candidate, operation['ours'], operation['theirs'], result)
         if sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'):
             raise WikiError('candidate is not clean')
-        report = check(Wiki(candidate))
+        report = sync_graph.verify_graph(sync_graph.CandidateGraph(Path(candidate), tuple(
+            dict(path=item['path'], candidate=str(candidate) if item['path'] == '.' else str(Path(candidate) / item['path']),
+                 commit=item['candidate'], tree=item['tree'], branch=item['branch'], ours=item['ours'])
+            for item in operation['graph'])))
         if not report['ok']:
             raise WikiError('candidate structural check failed: ' + '; '.join(report['errors']))
         operation['candidate'] = result
-        operation['tree'] = sync_git.text(candidate, 'rev-parse', f'{result}^{{tree}}').strip()
+        operation['tree'] = operation['graph'][0]['tree']
         operation['revision'] = _revision(operation)
         operation['status'] = 'prepared'
         operation['review'] = None
@@ -384,7 +398,12 @@ def apply(wiki, state_dir, ident):
             raise WikiError('operation has no valid owner acceptance')
         _validate_acceptance(runtime, operation)
         repo = _repo(wiki, operation['repo'])
-        live = sync_git.observe(repo)
+        graph_operation = operation.get('graph') and len(operation['graph']) > 1
+        if graph_operation:
+            live = sync_git.RepoSnapshot(Path(repo), sync_git.text(repo, 'symbolic-ref', '--quiet', 'HEAD').strip(),
+                                         sync_git.head(repo))
+        else:
+            live = sync_git.observe(repo)
         if operation.get('kind') == 'publish-only':
             _assert_candidate(operation, _candidate(runtime, ident))
             if live.branch != operation['branch'] or live.head != operation['ours'] or live.head != operation['candidate']:
@@ -397,13 +416,25 @@ def apply(wiki, state_dir, ident):
             operation['applied'] = live.head
             _save(runtime, operation)
             return dict(operation_id=ident, status='applied', head=live.head, resumed=True)
-        if live.branch != operation['branch'] or live.head != operation['ours']:
+        if (live.branch != operation['branch'] or
+                (live.head != operation['ours'] and not (graph_operation and live.head == operation['candidate']))):
             raise WikiError('live branch changed after candidate review')
         candidate = _candidate(runtime, ident)
         _assert_candidate(operation, candidate)
-        report = check(Wiki(candidate))
+        report = sync_graph.verify_graph(sync_graph.CandidateGraph(Path(candidate), tuple(
+            dict(path=item['path'], candidate=str(candidate) if item['path'] == '.' else str(Path(candidate) / item['path']),
+                 commit=item['candidate'], tree=item['tree'], branch=item['branch'], ours=item['ours'])
+            for item in operation.get('graph', [])))) if operation.get('graph') else check(Wiki(candidate))
         if not report['ok']:
             raise WikiError('candidate structural check failed: ' + '; '.join(report['errors']))
+        if operation.get('graph') and len(operation['graph']) > 1:
+            operation['_candidate_root'] = str(candidate)
+            result = sync_graph.apply_graph(operation, operation['revision'])
+            operation.pop('_candidate_root', None)
+            operation['status'] = 'applied'
+            operation['applied'] = operation['candidate']
+            _save(runtime, operation)
+            return {**result, 'operation_id': ident}
         sync_git.text(repo, 'fetch', '--no-tags', '--no-recurse-submodules', '--', str(candidate),
                       'refs/heads/pisar-candidate')
         imported = sync_git.text(repo, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}').strip()

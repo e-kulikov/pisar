@@ -627,12 +627,14 @@ Lesson acceptance writes a `note` into its target space, so that space must
 declare `note` too. Existing documents keep their content; only the declarations
 change.
 
-## Synchronize a standalone wiki
+## Synchronize a wiki
 
-Sync prepares a complete disposable candidate, checks the wiki before changing
-the live branch, and keeps publication separate. Delivery I supports only a
-clean, attached, submodule-free wiki root. It blocks task-file changes until
-task validation is available.
+Sync prepares a complete disposable candidate graph, checks the wiki before
+changing any live branch, and keeps publication separate. It supports the
+existing initialized submodule graph, including nested repositories, when each
+repository is clean, attached to its owner-selected branch, and pinned by its
+parent at its checked-out commit. Topology changes and uninitialized children
+are refused. Task-file changes are blocked until task validation is available.
 
 ```sh
 pisar sync pull --repo .
@@ -646,8 +648,10 @@ pisar sync apply --operation OPERATION_ID
 pisar sync publish --operation OPERATION_ID
 ```
 
-Inspect the reported candidate worktree and its full diff before recording
-semantic review. `manual-review` explicitly records a human-review alternative
+Inspect the reported candidate worktree and its full diff, including child
+repositories, before recording semantic review. Apply advances child branches
+before their parents and can resume the same exact candidate after an interruption.
+`manual-review` explicitly records a human-review alternative
 when no semantic reviewer is available. A conflicting merge stays in that worktree; resolve only the
 reported paths, stage those exact paths, then repeat `sync prepare` with the
 same operation ID. `close` releases an unfinished operation reservation while
