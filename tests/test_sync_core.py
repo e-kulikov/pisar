@@ -355,6 +355,27 @@ class SyncLifecycleTests(unittest.TestCase):
                                decision='Retain the incoming assertion with its recorded uncertainty.')
         self.assertEqual(accepted['status'], 'accepted')
 
+    def test_auto_no_change_pull_releases_reservation_before_next_incoming_update(self):
+        wiki = Wiki(self.root)
+        before = self._candidate_state_and_commits(self.root)
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            first = sync.pull(wiki, self.state)
+            self.assertEqual(first['status'], 'no-change')
+            self.assertEqual(self._candidate_state_and_commits(self.root), before)
+            incoming = self.incoming('work/10-projects/alpha/note.md',
+                                     document('note', 'work/alpha', body='A later incoming assertion.'))
+            second = sync.pull(wiki, self.state, review_backend=self._needs_decision)
+        self.assertNotEqual(second['operation_id'], first['operation_id'])
+        self.assertEqual(sync._load(operations.Runtime(self.state, wiki.root),
+                                    second['operation_id'])['theirs'], incoming)
+        self.assertEqual(second['status'], 'needs-decision')
+        operation = sync._load(operations.Runtime(self.state, wiki.root), first['operation_id'])
+        self.assertEqual(operation['status'], 'closed')
+        self.assertEqual(operation['result'], 'no-change')
+        self.assertIsNone(operation['accepted'])
+
     def test_auto_pull_applies_only_after_clear_review_meets_threshold(self):
         incoming = self.incoming('work/10-projects/alpha/note.md', document('note', 'work/alpha',
                                                                           body='A supported update.'))

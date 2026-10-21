@@ -873,6 +873,21 @@ def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run
             return {**result, **applied, 'operation_id': fetched['operation_id'],
                     'status': 'applied-automatically', 'semantic_review': reviewed}
         if reviewed.get('status') == 'no-change':
+            runtime = operations.Runtime(state_dir, wiki.root)
+            with runtime.lock():
+                operation = _load(runtime, fetched['operation_id'])
+                if (operation.get('status') != 'reviewed'
+                        or operation.get('review', {}).get('kind') != 'no-change'
+                        or operation['ours'] != operation['theirs']
+                        or operation['candidate'] != operation['ours']
+                        or any(item['candidate'] != item['ours'] for item in operation.get('graph', []))):
+                    raise WikiError('sync no-change result no longer matches the operation')
+                _assert_candidate(operation, _candidate(runtime, fetched['operation_id']))
+                sync_graph.discover(wiki.root, operation['ours'])
+                operation['status'] = 'closed'
+                operation['result'] = 'no-change'
+                operation['closed_at'] = datetime.now(timezone.utc).isoformat()
+                _save(runtime, operation)
             return {**result, 'operation_id': fetched['operation_id'], 'status': 'no-change'}
         return {**result, 'operation_id': fetched['operation_id'], 'status': 'needs-decision',
                 'semantic_review': reviewed}
