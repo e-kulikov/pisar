@@ -159,6 +159,20 @@ class McpTests(Fixture):
             result = server.tool('sync_semantic_review', {'operation': 'sync-fixture'})
         self.assertEqual(json.loads(result['content'][0]['text']), {'status': 'reviewed'})
 
+    def test_resolver_without_revision_requires_confirmation_before_auto_apply(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        with mock.patch('pisar.sync.resolve', return_value={'status': 'applied-automatically'}) as resolve:
+            result = server.tool('sync_resolve', {'operation': 'op-1'})
+        self.assertTrue(result.get('isError'))
+        self.assertIn('cannot ask for confirmation', result['content'][0]['text'])
+        resolve.assert_not_called()
+        with mock.patch.object(server, '_confirm_sync') as confirm, \
+                mock.patch('pisar.sync.resolve', return_value={'status': 'applied-automatically'}) as resolve:
+            server.tool('sync_resolve', {'operation': 'op-1'})
+        self.assertIn('apply', confirm.call_args.args[1])
+        self.assertIn('local branch', confirm.call_args.args[1])
+        resolve.assert_called_once()
+
     def test_resolver_commit_requires_confirmation_bound_to_current_proposal(self):
         server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
         details = {'resolver_proposal': {'revision': 'proposal-1', 'written': {'work/note.md': 'hash'},
@@ -169,6 +183,8 @@ class McpTests(Fixture):
                 mock.patch('pisar.sync.resolve', return_value={'status': 'prepared'}) as resolve:
             result = server.tool('sync_resolve', {'operation': 'op-1', 'revision': 'proposal-1',
                                                   'decision': 'Preserve both.'})
+        self.assertIn('apply', confirm.call_args.args[1])
+        self.assertIn('local branch', confirm.call_args.args[1])
         self.assertIn('candidate paths: work/note.md', confirm.call_args.args[1])
         self.assertIn('Keep both sourced statements.', confirm.call_args.args[1])
         resolve.assert_called_once()

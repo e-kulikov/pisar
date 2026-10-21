@@ -124,7 +124,7 @@ TOOLS = (
     _tool('sync_semantic_review', 'Run the configured read-only semantic reviewer on the exact candidate; it cannot accept or apply.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
            'additionalProperties': False}),
-    _tool('sync_resolve', 'Run the constrained resolver on a candidate. Without revision it creates a proposal; with an exact revision it asks the owner before committing the candidate. It never edits live branches or publishes.',
+    _tool('sync_resolve', 'Run the constrained resolver on a candidate. Always asks the owner first. Without revision it creates a proposal; with an exact revision it commits the candidate. Auto approval may also accept and apply to the recorded local branch. It never publishes.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'revision': {'type': 'string'},
                                             'decision': {'type': 'string'}},
            'required': ['operation'], 'additionalProperties': False}),
@@ -626,8 +626,12 @@ class Server:
                 if proposal.get('policy', {}).get('approval') == 'manual' and not decision:
                     raise Refused('sync_resolve: manual resolver commit needs a concrete owner decision')
                 self._confirm_sync(name, f'Commit resolver proposal {revision} for operation {operation}; '
-                                   f'candidate paths: {paths}; resolver summary: {summaries}?'
+                                   f'candidate paths: {paths}; resolver summary: {summaries}. '
+                                   'Auto approval may also accept and apply to the recorded local branch?'
                                    + (f' Owner decision: {decision}' if decision else ''))
+            else:
+                self._confirm_sync(name, f'Resolve sync operation {operation}? Auto approval may commit, '
+                                   'accept and apply to the recorded local branch.')
             result = sync.resolve(Wiki(self.root), self.state, operation, revision=revision, decision=decision,
                                   ruwana=self.ruwana)
         elif name == 'sync_feedback_summary':
