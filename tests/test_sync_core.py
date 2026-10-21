@@ -376,6 +376,24 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(operation['result'], 'no-change')
         self.assertIsNone(operation['accepted'])
 
+    def test_single_repo_publication_confirmation_names_recorded_destination(self):
+        import io
+        from pisar import mcp
+        incoming = self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.manual_review(wiki, self.state, fetched['operation_id'])
+        sync.accept(wiki, self.state, fetched['operation_id'], prepared['revision'])
+        sync.apply(wiki, self.state, fetched['operation_id'])
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        with mock.patch.object(server, '_confirm_sync') as confirm, \
+                mock.patch.object(sync, 'publish', return_value={'status': 'published'}):
+            result = server.tool('sync_publish', {'operation': fetched['operation_id']})
+        self.assertFalse(result.get('isError'), result)
+        message = confirm.call_args.args[1]
+        self.assertIn(f'. {incoming} to origin refs/heads/main', message)
+
     def test_auto_pull_applies_only_after_clear_review_meets_threshold(self):
         incoming = self.incoming('work/10-projects/alpha/note.md', document('note', 'work/alpha',
                                                                           body='A supported update.'))

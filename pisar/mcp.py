@@ -657,7 +657,10 @@ class Server:
                 raise Refused('sync_publish: bootstrap_map must be an object')
             details = sync.inspect(Wiki(self.root), self.state, operation)
             commit = details.get('applied') or details.get('candidate')
-            graph = details.get('publication_graph', [])
+            graph = list(details.get('publication_graph') or [])
+            if not any(item['path'] == '.' for item in graph):
+                graph.append(dict(path='.', candidate=commit, remote=details['remote'],
+                                  branch=details['target_branch']))
             destinations = '; '.join(f"{item['path']} {item['candidate']} to {item['remote']} refs/heads/{item['branch']}"
                                      for item in graph)
             bootstrap = bootstrap_map or {}
