@@ -2021,6 +2021,25 @@ class SyncLifecycleTests(unittest.TestCase):
             sync.prepare(wiki, self.state, fetched['operation_id'])
         self.assertNotEqual(self.git(self.root, 'rev-parse', 'HEAD'), fetched['theirs'])
 
+    def test_committed_pending_capture_allows_unrelated_pull(self):
+        source = self.base / 'capture.txt'
+        source.write_text('Pending inbox material.\n')
+        wiki = Wiki(self.root)
+        operations.capture(wiki, self.state, 'work/alpha', 'pending-capture', source)
+        self.incoming()
+        result = sync.pull(wiki, self.state, merge=True)
+        self.assertEqual(result['status'], 'needs-approval')
+        candidate = Path(result['candidate_worktree'])
+        self.assertEqual((candidate / 'work/10-projects/alpha/inbox/pending-capture.md').read_bytes(),
+                         (self.root / 'work/10-projects/alpha/inbox/pending-capture.md').read_bytes())
+        descriptor = candidate / 'work/10-projects/alpha/inbox/pending-capture.md'
+        descriptor.write_text(descriptor.read_text().replace('ingest_status = "pending"',
+            'ingest_status = "pending"\nmeeting_reference = "wiki:work/alpha:unfinished"'))
+        commit_all(candidate)
+        with self.assertRaisesRegex(WikiError, 'processing provenance incomplete'):
+            sync._validate_processing(candidate)
+
+
     def test_corrected_candidate_can_be_revalidated_and_requires_new_review(self):
         self.incoming()
         wiki = Wiki(self.root)

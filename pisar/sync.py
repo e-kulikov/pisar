@@ -291,7 +291,7 @@ def _validate_processing(candidate, revision=None):
                     raise WikiError('processing provenance submodule escapes wiki root')
                 revisions[str(child)] = oid
                 pending.append((child, oid))
-    inventory = committed_processing(Wiki(candidate), revision=revisions)
+    inventory = committed_processing(Wiki(candidate), revision=revisions, allow_pending_captures=True)
     if inventory.incomplete:
         reasons = sorted({reason for _, _, reason in inventory.incomplete})
         raise WikiError('processing provenance incomplete: ' + '; '.join(reasons))

@@ -62,7 +62,7 @@ def _digest(value):
     return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
 
 
-def committed_processing(wiki, *, revision=None):
+def committed_processing(wiki, *, revision=None, allow_pending_captures=False):
     """Inventory one committed revision's capture descriptors and meeting source links.
 
     The working tree supplies paths/space ownership only. Every document and
@@ -113,6 +113,9 @@ def committed_processing(wiki, *, revision=None):
             continue
         meeting_reference = meta.get('meeting_reference')
         capture_reference = f'wiki:{space.address}:{meta.get("id", "")}'
+        if (allow_pending_captures and meta.get('ingest_status') == 'pending'
+                and not meeting_reference):
+            continue
         if meta.get('ingest_status') != 'processed':
             incomplete.append((space.address, digest, 'committed capture processing is pending/incomplete'))
             continue
