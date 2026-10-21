@@ -1246,13 +1246,8 @@ class SyncSubmoduleTests(unittest.TestCase):
         sync.manual_review(wiki, self.state, ident)
         sync.accept(wiki, self.state, ident, result['revision'])
         shutil.rmtree(self.root / self.child_path)
-        try:
+        with self.assertRaisesRegex(WikiError, 'restore the checkout'):
             sync.close(wiki, self.state, ident)
-        except WikiError as error:
-            self.assertNotIn('Traceback', str(error))
-        else:
-            return
-        self.assertTrue(True)
 
 
 if __name__ == '__main__':

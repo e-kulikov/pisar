@@ -598,7 +598,11 @@ def _refuse_partial_application(operation, ident):
         if item['candidate'] == item['ours']:
             continue
         repo = root if item['path'] == '.' else root / item['path']
-        head = sync_git.head(repo)
+        try:
+            head = sync_git.head(repo)
+        except WikiError:
+            raise WikiError(f"partial-application: cannot observe {item['path']}; "
+                            'restore the checkout, then retry') from None
         if head == item['candidate']:
             applied.append(item['path'])
         elif head == item['ours']:
