@@ -7,7 +7,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from pisar import sync_review
+from pisar import sync_review, sync_git
+from pisar.spaces import Wiki
+from .support import init_repo, commit_all, domain, space, document
 from pisar.safety import WikiError
 
 
@@ -68,6 +70,54 @@ class ReviewSchemaTests(unittest.TestCase):
             sync_review.decode_report(b'{"verdict":"clear","verdict":"reject"}')
         with self.assertRaisesRegex(WikiError, 'non-finite'):
             sync_review.decode_report(b'{"confidence":NaN}')
+
+
+class DomainSubmoduleReviewTests(unittest.TestCase):
+    def test_whole_domain_submodules_never_share_review_requests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / 'wiki'
+            init_repo(root)
+            (root / 'README.md').write_text('Synthetic wiki.\n')
+            commit_all(root)
+            graph = []
+            for name in ('personal', 'work'):
+                source_root = base / f'{name}-source'
+                child = domain(source_root, name)
+                init_repo(child)
+                note = space(source_root, f'{name}/10-projects/alpha', 'alpha') / 'note.md'
+                note.write_text(document('note', f'{name}/alpha', body=f'{name} initial.'))
+                commit_all(child)
+                sync_git.text(root, '-c', 'protocol.file.allow=always', 'submodule', 'add',
+                              str(child), name)
+                old = sync_git.head(root / name)
+                graph.append(dict(path=name, ours=old, theirs=old, candidate=old))
+            commit_all(root)
+            ours = sync_git.head(root)
+            for item in graph:
+                child = root / item['path']
+                sync_git.text(child, 'config', 'user.name', 'Synthetic fixture')
+                sync_git.text(child, 'config', 'user.email', 'synthetic@example.invalid')
+                note = child / '10-projects/alpha/note.md'
+                note.write_text(document('note', f'{item["path"]}/alpha', body=f'{item["path"]} changed.'))
+                commit_all(child)
+                item['candidate'] = item['theirs'] = sync_git.head(child)
+            commit_all(root)
+            result = sync_git.head(root)
+            operation = dict(ours=ours, theirs=result, candidate=result, revision='synthetic', graph=graph)
+            requests = sync_review.requests(Wiki(root), operation, root)
+            self.assertEqual([request['domain'] for request in requests], ['personal', 'work'])
+            for request in requests:
+                name = request['domain']
+                self.assertEqual(request['changed_paths'], [f'{name}/10-projects/alpha/note.md'])
+                for versions in request['versions'].values():
+                    self.assertTrue(all(path.startswith(name + '/') for path in versions))
+                self.assertTrue(all(path.startswith(name + '/') for path in request['context']))
+            # A domain visible in the checkout but absent from the pinned graph
+            # must never be silently treated as shared workspace context.
+            with mock.patch.object(sync_review, '_graph_blob', return_value=None):
+                with self.assertRaisesRegex(WikiError, 'domain ownership'):
+                    sync_review.requests(Wiki(root), operation, root)
 
 
 class ReviewerBackendTests(unittest.TestCase):

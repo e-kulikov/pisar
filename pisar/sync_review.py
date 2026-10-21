@@ -387,12 +387,24 @@ def requests(wiki, operation, candidate):
     known_domains = set()
     for domain in path_domains:
         marker = f'{domain}/.domain.toml'
-        for commit in (base, ours, theirs, result):
-            exists = subprocess.run(sync_git.command(repo, 'cat-file', '-e', f'{commit}:{marker}'),
-                                    capture_output=True, env=gitops.environment())
-            if exists.returncode == 0:
-                known_domains.add(domain)
-                break
+        if _graph_blob(operation, candidate, result, marker) is not None:
+            known_domains.add(domain)
+            continue
+        if domain in candidate_wiki.domains:
+            raise WikiError(f'sync review cannot establish pinned domain ownership: {domain}')
+        # Retain the boundary for domains removed from the result, using the
+        # pinned history in whichever graph repository owns the marker.
+        owners = [item for item in operation.get('graph', []) if item['path'] != '.'
+                  and marker.startswith(item['path'] + '/')]
+        if owners:
+            item = max(owners, key=lambda value: len(value['path']))
+            marker_repo = Path(candidate) / item['path']
+            marker_path = marker[len(item['path']) + 1:]
+            commits = (item['ours'], item.get('theirs', item['candidate']))
+        else:
+            marker_repo, marker_path, commits = repo, marker, (base, ours, theirs)
+        if any(_read_blob(marker_repo, commit, marker_path) is not None for commit in commits):
+            known_domains.add(domain)
     groups = {}
     for path in sorted(paths):
         parts = PurePosixPath(path).parts
