@@ -330,6 +330,31 @@ class SyncLifecycleTests(unittest.TestCase):
             commit_message.BACKENDS['claude'].assert_not_called()
         self.assertEqual(self._candidate_state_and_commits(self.root), before)
 
+    def test_inconsistent_clear_review_cannot_bypass_concrete_owner_decision(self):
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Incoming conflicting assertion.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+
+        def inconsistent(request):
+            return {**self._needs_decision(request), 'verdict': 'clear'}
+
+        with self.assertRaisesRegex(WikiError, 'clear.*findings'):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=inconsistent)
+        reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        # The manual gate must derive unresolved work from the checked report,
+        # even if the aggregate verdict claims it is clear.
+        runtime = operations.Runtime(self.state, wiki.root)
+        operation = sync._load(runtime, fetched['operation_id'])
+        operation['semantic_review']['verdict'] = 'clear'
+        sync._save(runtime, operation)
+        with self.assertRaisesRegex(WikiError, 'concrete owner decision'):
+            sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        accepted = sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'],
+                               decision='Retain the incoming assertion with its recorded uncertainty.')
+        self.assertEqual(accepted['status'], 'accepted')
+
     def test_auto_pull_applies_only_after_clear_review_meets_threshold(self):
         incoming = self.incoming('work/10-projects/alpha/note.md', document('note', 'work/alpha',
                                                                           body='A supported update.'))

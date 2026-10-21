@@ -645,9 +645,16 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
             if acceptance_decision(bundle, current_policy) != 'accepted':
                 raise WikiError('automatic acceptance hard gates are not satisfied')
             decision = None
-        elif operation['review'].get('kind') == 'semantic' and semantic and semantic.get('verdict') != 'clear':
-            if not isinstance(decision, str) or not decision.strip():
+        elif operation['review'].get('kind') == 'semantic':
+            _, reports = sync_review.checked_stored_reports(
+                wiki, runtime, operation, _candidate(runtime, ident))
+            unresolved = any(report['findings'] or report['verdict'] != 'clear'
+                             or any(item['disposition'] in ('lost', 'uncertain', 'superseded')
+                                    for item in report['statements']) for report in reports)
+            if unresolved and (not isinstance(decision, str) or not decision.strip()):
                 raise WikiError('a concrete owner decision is required for unresolved semantic findings')
+            if decision is not None and (not isinstance(decision, str) or not decision.strip()):
+                raise WikiError('owner decision must be nonempty')
         elif decision is not None and (not isinstance(decision, str) or not decision.strip()):
             raise WikiError('owner decision must be nonempty')
         candidate = _candidate(runtime, ident)

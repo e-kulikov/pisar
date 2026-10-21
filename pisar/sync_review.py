@@ -278,8 +278,8 @@ def validate_review(request, response):
         matching = [item for item in findings if statement['path'] in item['paths']]
         if not matching:
             raise WikiError('sync review lost/uncertain/superseded statement needs an evidence finding')
-    if unresolved and response['verdict'] == 'clear':
-        raise WikiError('sync review cannot be clear with unresolved statement dispositions')
+    if (unresolved or findings) and response['verdict'] == 'clear':
+        raise WikiError('sync review cannot be clear with unresolved findings or statement dispositions')
     if changed - accounted:
         raise WikiError('sync review did not account for every changed path')
     return response
