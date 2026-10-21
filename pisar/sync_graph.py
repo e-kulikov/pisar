@@ -691,7 +691,66 @@ def _porcelain_paths(repo):
     return result
 
 
-def verify_graph(candidate_graph):
+def prospective_graph(operation, root_candidate, tree, *, ruwana=None):
+    """Check a resolver's staged root with its complete retained child graph.
+
+    This observes existing checkouts only: it never switches, stages or commits.
+    """
+    from . import sync
+    from .safety import safe_path
+    root = Path(root_candidate)
+    observed = operation.get('live_graph')
+    if not observed:
+        if any(_links(root, revision) for revision in (operation['ours'], operation['theirs'], tree)):
+            raise WikiError('resolver requires the complete observed submodule graph')
+        observed = [dict(path='.', branch=operation['branch'], ours=operation['ours'])]
+    by_path = {item['path']: item for item in observed}
+    if '.' not in by_path or len(by_path) != len(observed):
+        raise WikiError('resolver observed graph is incomplete or duplicated')
+    entries = {}
+    for path in sorted(by_path, key=lambda name: (name.count('/'), name)):
+        original = by_path[path]
+        repo = root if path == '.' else safe_path(root, path)
+        if Path(sync_git.text(repo, 'rev-parse', '--show-toplevel').strip()).resolve() != repo.resolve():
+            raise WikiError(f'resolver child checkout is not materialized: {path}')
+        if path == '.':
+            theirs, result = operation['theirs'], tree
+        else:
+            parent = _parent_path(path, by_path)
+            remainder = path if parent == '.' else path[len(parent) + 1:]
+            parent_repo = root if parent == '.' else root / parent
+            theirs = _pin_at(parent_repo, remainder, entries[parent]['theirs'])
+            result = sync_git.head(repo)
+            if not all(sync_git._ancestor(repo, before, result) for before in (original['ours'], theirs)):
+                raise WikiError(f'resolver child no longer preserves its recorded inputs: {path}')
+        urls = [{name: url for name, (url, _) in _links(repo, revision).items()}
+                for revision in (original['ours'], theirs, result)]
+        if urls[0] != urls[1] or urls[0] != urls[2]:
+            raise WikiError(f'resolver submodule topology or URL registration changed: {path}')
+        entries[path] = dict(path=path, candidate=str(repo), commit=sync_git.head(repo),
+                             tree=sync_git.text(repo, 'rev-parse', f'{result}^{{tree}}').strip()
+                                  if path != '.' else tree,
+                             ours=original['ours'], theirs=theirs, branch=original['branch'])
+    graph = CandidateGraph(root, tuple(entries.values()))
+    report = verify_graph(graph, root_tree=tree)
+    if not report['ok']:
+        raise WikiError('candidate graph check failed: ' + '; '.join(report['errors']))
+    for item in graph.repositories[1:]:
+        sync._task_changes(item['candidate'], item['ours'], item['theirs'], item['commit'],
+                           wiki_root=root, relative=item['path'], ruwana=ruwana)
+        sync._validate_originals(item['candidate'], item['ours'], item['theirs'], item['commit'])
+    projected = dict(operation)
+    publication = CandidateGraph(root, tuple(dict(item, commit=tree) if item['path'] == '.' else item
+                                              for item in graph.repositories))
+    freeze_publication(projected, publication)
+    operation['graph'] = [dict(path=item['path'], candidate=item['commit'], tree=item['tree'],
+                               ours=item['ours'], theirs=item['theirs'], branch=item['branch'])
+                          for item in graph.repositories]
+    operation['publication_graph'] = projected['publication_graph']
+    return graph
+
+
+def verify_graph(candidate_graph, *, root_tree=None):
     root = Path(candidate_graph.root)
     expected = {item['path'] for item in candidate_graph.repositories}
     by_path = {item['path']: item for item in candidate_graph.repositories}
@@ -700,17 +759,24 @@ def verify_graph(candidate_graph):
         repo = Path(item['candidate'])
         if sync_git.head(repo) != item['commit']:
             raise WikiError(f'candidate submodule HEAD changed: {item["path"]}')
-        if sync_git.text(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
-                         '--ignore-submodules=none'):
+        if item['path'] == '.' and root_tree is not None:
+            if (sync_git.index_tree(repo) != root_tree
+                    or sync_git.run(repo, 'diff-files', '--name-only')
+                    or sync_git.run(repo, 'ls-files', '--others', '--exclude-standard', '-z')):
+                raise WikiError('prospective root tree differs from its index or worktree')
+        elif sync_git.text(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
+                           '--ignore-submodules=none'):
             raise WikiError(f'candidate repository is dirty: {item["path"]}')
         if item['path'] != '.':
             parent = max((name for name in by_path if name == '.' or item['path'].startswith(name + '/')),
                          key=len)
             parent_repo = Path(by_path[parent]['candidate'])
             remainder = item['path'] if parent == '.' else item['path'][len(parent) + 1:]
-            if _pin_at(parent_repo, remainder) != item['commit']:
+            parent_revision = root_tree if parent == '.' and root_tree is not None else 'HEAD'
+            if _pin_at(parent_repo, remainder, parent_revision) != item['commit']:
                 raise WikiError(f'candidate parent pin mismatch: {item["path"]}')
-        for child_path in _links(repo, item['commit']):
+        revision = root_tree if item['path'] == '.' and root_tree is not None else item['commit']
+        for child_path in _links(repo, revision):
             full = child_path if item['path'] == '.' else f'{item["path"]}/{child_path}'
             actual.add(full)
     if actual != expected - {'.'}:

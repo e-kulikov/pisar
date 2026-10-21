@@ -69,6 +69,192 @@ class SyncSubmoduleTests(unittest.TestCase):
             raise AssertionError(result.stderr)
         return result.stdout.strip()
 
+    def _root_resolver_fixture(self):
+        from pisar import operations
+        for repo in (self.root / self.child_path, self.root / self.child_path / 'nested'):
+            self.git(repo, 'config', 'user.name', 'Synthetic fixture')
+            self.git(repo, 'config', 'user.email', 'synthetic@example.invalid')
+        relative = 'work/10-projects/index.md'
+        writer = self.base / 'root-conflict-writer'
+        subprocess.run(['git', 'clone', '-q', str(self.root_remote), str(writer)], env=self.env, check=True)
+        self.git(writer, 'config', 'user.name', 'Synthetic fixture')
+        self.git(writer, 'config', 'user.email', 'synthetic@example.invalid')
+        (writer / relative).write_text(document('work-index', 'work/index', body='Incoming root decision.'))
+        self.git(writer, 'add', '--', relative)
+        self.git(writer, 'commit', '-qm', 'incoming root conflict')
+        self.git(writer, 'push', '-q', 'origin', 'main')
+        (self.root / relative).write_text(document('work-index', 'work/index', body='Local root decision.'))
+        commit_all(self.root)
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state, merge=True)
+        self.assertEqual(result['status'], 'conflict')
+        ident = result['operation_id']
+        candidate = sync._candidate(operations.Runtime(self.state, self.root), ident)
+        return wiki, ident, candidate, relative
+
+    def _resolver_graph_state(self, candidate):
+        from pisar import sync_git
+        state = {}
+        for relative in ('.', self.child_path, self.child_path + '/nested'):
+            repo = candidate if relative == '.' else candidate / relative
+            index = Path(self.git(repo, 'rev-parse', '--absolute-git-dir')) / 'index'
+            files = tuple(sorted((path.relative_to(repo).as_posix(), path.read_bytes())
+                                 for path in repo.rglob('*')
+                                 if path.is_file() and '.git' not in path.relative_to(repo).parts))
+            commits = sync_git.run(repo, 'cat-file', '--batch-all-objects',
+                                   '--batch-check=%(objecttype)').splitlines().count(b'commit')
+            state[relative] = (sync_git.head(repo), index.read_bytes(), files, commits)
+        return state
+
+    def _root_resolution(self, context, tools):
+        from hashlib import sha256
+        relative = 'work/10-projects/index.md'
+        text = document('work-index', 'work/index', body='Resolved root decision with sources retained.')
+        written = tools.candidate_write(relative, sha256(context['files'][relative].encode()).hexdigest(), text)
+        tools.candidate_stage([relative])
+        return {'summary': 'Preserve the root decision', 'confidence': 0.99, 'context_complete': True,
+                'statements': [{'id': 's1', 'disposition': 'preserved'}], 'findings': [],
+                'mappings': [{'path': relative, 'sha256': written['sha256'], 'statement_ids': ['s1']}]}
+
+    def _root_clear_review(self, request):
+        from pisar import sync_review
+        return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                'domain': request['domain'], 'model': 'synthetic', 'prompt_version': sync_review.PROMPT_VERSION,
+                'confidence': 0.99, 'context_complete': True, 'verdict': 'clear',
+                'statements': [{'id': f's{i}', 'side': 'candidate', 'path': path,
+                                'quote': request['versions']['candidate'][path], 'disposition': 'preserved',
+                                'output_path': path, 'output_quote': request['versions']['candidate'][path],
+                                'reason': 'The resolved assertion remains.'}
+                               for i, path in enumerate(request['changed_paths'])],
+                'findings': [], 'summary': 'All resolved assertions remain.'}
+
+    def _root_resolver_success(self, mode, interrupt=False):
+        from unittest import mock
+        from pisar import operations, settings, sync_review
+        wiki, ident, candidate, _ = self._root_resolver_fixture()
+        policy = sync_review.SemanticPolicy(approval=mode)
+        expected = {'.', self.child_path, self.child_path + '/nested'}
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': mode}):
+            runtime = operations.Runtime(self.state, self.root)
+            save = sync._save
+            def save_result(journal_runtime, operation):
+                if operation.get('resolver_result'):
+                    raise OSError('injected resolver result journal interruption')
+                return save(journal_runtime, operation)
+            if interrupt and mode == 'auto':
+                with mock.patch.object(sync, '_save', side_effect=save_result), self.assertRaisesRegex(OSError, 'journal interruption'):
+                    sync.resolve(wiki, self.state, ident, backend=self._root_resolution,
+                                 review_backend=self._root_clear_review)
+                proposal = sync._load(runtime, ident)['resolver_proposal']
+            else:
+                proposal = sync.resolve(wiki, self.state, ident, backend=self._root_resolution,
+                                        review_backend=self._root_clear_review)
+            decision = 'Preserve both attributed root decisions.'
+            if interrupt and mode == 'manual':
+                with mock.patch.object(sync, '_save', side_effect=save_result), self.assertRaisesRegex(OSError, 'journal interruption'):
+                    sync.resolve(wiki, self.state, ident, revision=proposal['revision'], decision=decision)
+            if interrupt:
+                from pisar import sync_graph
+                saved = sync._load(runtime, ident)
+                self.assertEqual({item['path'] for item in saved['resolver_commit_intent']['graph']}, expected)
+                committed = self._resolver_graph_state(candidate)
+                with mock.patch('pisar.sync_resolver.CandidateTools.candidate_commit', side_effect=AssertionError('duplicate commit')), \
+                        mock.patch.object(sync_graph, 'prospective_graph', side_effect=AssertionError('graph re-prepared after commit')):
+                    result = sync.resolve(wiki, self.state, ident, revision=proposal['revision'],
+                                          decision=decision if mode == 'manual' else None,
+                                          review_backend=mock.Mock(side_effect=AssertionError('review reran')))
+                self.assertEqual(self._resolver_graph_state(candidate), committed)
+            elif mode == 'manual':
+                result = sync.resolve(wiki, self.state, ident, revision=proposal['revision'], decision=decision)
+            else:
+                result = proposal
+            if mode == 'manual':
+                self.assertEqual(result['status'], 'prepared')
+                reviewed = sync.manual_review(wiki, self.state, ident)
+                sync.accept(wiki, self.state, ident, reviewed['revision'])
+                sync.apply(wiki, self.state, ident)
+            else:
+                self.assertEqual(result['status'], 'applied-automatically')
+            operation = sync._load(operations.Runtime(self.state, self.root), ident)
+            self.assertEqual({item['path'] for item in operation['graph']}, expected)
+            self.assertEqual({item['path'] for item in operation['publication_graph']}, expected)
+            self.assertEqual(operation['publication_graph'][0]['candidate'], operation['candidate'])
+            self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), self.git(candidate, 'rev-parse', 'HEAD'))
+            self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
+
+    def test_manual_root_conflict_resolver_preserves_complete_nested_graph(self):
+        self._root_resolver_success('manual')
+
+    def test_auto_root_conflict_resolver_preserves_complete_nested_graph(self):
+        self._root_resolver_success('auto')
+
+    def test_manual_root_resolver_recovery_retains_checked_nested_graph(self):
+        self._root_resolver_success('manual', interrupt=True)
+
+    def test_auto_root_resolver_recovery_retains_checked_nested_graph(self):
+        self._root_resolver_success('auto', interrupt=True)
+
+    def _root_resolver_failure(self, mode, failure):
+        from unittest import mock
+        from pisar import operations, settings, sync_graph, sync_review
+        wiki, ident, candidate, _ = self._root_resolver_fixture()
+        if failure == 'observed':
+            runtime = operations.Runtime(self.state, self.root)
+            operation = sync._load(runtime, ident)
+            operation.pop('live_graph')
+            sync._save(runtime, operation)
+        policy = sync_review.SemanticPolicy(approval=mode)
+        snapshots = []
+        def resolver(context, tools):
+            report = self._root_resolution(context, tools)
+            snapshots.append(self._resolver_graph_state(candidate))
+            return report
+        task_check = sync._task_changes
+        def check_child(repo, *args, **kwargs):
+            if Path(repo) == candidate / self.child_path:
+                raise WikiError('injected child technical refusal')
+            return task_check(repo, *args, **kwargs)
+        check_patch = (mock.patch.object(sync_graph, 'verify_graph', return_value={'ok': False, 'errors': ['injected graph refusal']})
+                       if failure == 'graph' else mock.patch.object(sync, '_task_changes', side_effect=check_child))
+        expected_error = 'injected .* refusal'
+        if failure == 'observed':
+            from contextlib import nullcontext
+            check_patch = nullcontext()
+            expected_error = 'complete observed submodule graph'
+        reviewer = mock.Mock(side_effect=AssertionError('review called before graph checks'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': mode}):
+            if mode == 'manual':
+                proposal = sync.resolve(wiki, self.state, ident, backend=resolver)
+                with check_patch, self.assertRaisesRegex(WikiError, expected_error):
+                    sync.resolve(wiki, self.state, ident, revision=proposal['revision'], decision='Approve checked root.')
+            else:
+                with check_patch, self.assertRaisesRegex(WikiError, expected_error):
+                    sync.resolve(wiki, self.state, ident, backend=resolver, review_backend=reviewer)
+            self.assertEqual(self._resolver_graph_state(candidate), snapshots[0])
+            operation = sync._load(operations.Runtime(self.state, self.root), ident)
+            self.assertIsNone(operation.get('resolver_result'))
+            reviewer.assert_not_called()
+
+    def test_manual_root_resolver_graph_refusal_precedes_any_commit(self):
+        self._root_resolver_failure('manual', 'graph')
+
+    def test_auto_root_resolver_graph_refusal_precedes_any_commit(self):
+        self._root_resolver_failure('auto', 'graph')
+
+    def test_manual_root_resolver_child_refusal_precedes_any_commit(self):
+        self._root_resolver_failure('manual', 'child')
+
+    def test_auto_root_resolver_child_refusal_precedes_any_commit(self):
+        self._root_resolver_failure('auto', 'child')
+
+    def test_manual_root_resolver_missing_observed_graph_refuses_before_commit(self):
+        self._root_resolver_failure('manual', 'observed')
+
+    def test_auto_root_resolver_missing_observed_graph_refuses_before_commit(self):
+        self._root_resolver_failure('auto', 'observed')
+
     def test_candidate_refuses_repository_local_driver_in_child(self):
         child = self.root / self.child_path
         self.git(child, 'config', 'user.name', 'Synthetic fixture')

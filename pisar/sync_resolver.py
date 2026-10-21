@@ -495,6 +495,8 @@ def _commit_intent(candidate, operation, proposal, tree, report, decision, revie
                   message=(report['summary'] + '\n\nPisar-Operation: sync-' + operation['operation_id']
                            + '\nPisar-Resolver-Proposal: ' + proposal['revision']),
                   decision=decision.strip() if isinstance(decision, str) else None,
+                  graph=json.loads(_canonical(operation['graph'])),
+                  publication_graph=json.loads(_canonical(operation['publication_graph'])),
                   reviewed=json.loads(_canonical({key: value for key, value in reviewed.items()
                                                   if key != '_policy'})) if reviewed else None)
     intent['binding'] = operations.fingerprint(intent)
@@ -508,6 +510,8 @@ def _check_intent(intent, operation, proposal, decision):
             or intent.get('proposal_revision') != proposal['revision']
             or intent.get('parents') != [proposal['candidate_head']] +
                 ([proposal['merge_head']] if proposal.get('merge_head') else [])
+            or not intent.get('graph') or intent['graph'] != operation.get('graph')
+            or intent.get('publication_graph') != operation.get('publication_graph')
             or intent.get('branch') != 'refs/heads/pisar-candidate'
             or intent.get('decision') != (decision.strip() if isinstance(decision, str) else None)):
         raise WikiError('resolver commit intent no longer matches this operation/proposal/decision')
@@ -548,7 +552,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                       review_backend=None, ruwana=None):
     """Create a candidate resolution proposal, or approve and commit a stored proposal."""
     from datetime import datetime, timezone
-    from . import sync, sync_review
+    from . import sync, sync_graph, sync_review
     ruwana = sync._ruwana_binary(ruwana)
     runtime = operations.Runtime(state_dir, wiki.root)
     if revision is not None:
@@ -632,6 +636,9 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                     sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree, ruwana=ruwana)
                     sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
                     sync._validate_processing(candidate, staged_tree)
+                    checked_graph = sync_graph.prospective_graph(operation, candidate, staged_tree, ruwana=ruwana)
+                    operation['tree'] = staged_tree
+                    operation['revision'] = sync._revision(operation)
                     operation['candidate'] = proposal['candidate_head']
                     operation['status'] = 'resolving'
                     tool.authorize_commit(report)
@@ -655,6 +662,9 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                         if (sync_git.run(candidate, 'diff-files', '--name-only')
                                 or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
                             raise WikiError('candidate worktree changed during prospective semantic review')
+                        graph_check = sync_graph.verify_graph(checked_graph, root_tree=staged_tree)
+                        if not graph_check['ok']:
+                            raise WikiError('candidate graph check failed: ' + '; '.join(graph_check['errors']))
                         if sync_review.policy().__dict__ != policy:
                             raise WikiError('semantic policy changed before resolver commit; run resolution again')
                 except _SemanticGatePending as pending:
@@ -668,19 +678,18 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                     operation['resolver_commit_intent'] = intent
                     operation['status'] = 'resolution-pending'
                     sync._save(runtime, operation)
-                elif intent['tree'] != staged_tree:
-                    raise WikiError('resolver staged tree changed after commit intent')
+                elif (intent['tree'] != staged_tree or intent['graph'] != operation['graph']
+                      or intent['publication_graph'] != operation['publication_graph']):
+                    raise WikiError('resolver staged tree or checked graph changed after commit intent')
                 committed = tool.candidate_commit(report, checked_tree=staged_tree, intent=intent)
             # The graph and tree were checked against this exact index tree
             # above. Record those checked values directly; do not call
             # sync.prepare after advancing the candidate ref.
-            if operation.get('graph'):
-                operation['graph'][0]['candidate'] = committed['commit']
-                operation['graph'][0]['tree'] = committed['tree']
-            else:
-                operation['graph'] = [dict(path='.', candidate=committed['commit'],
-                                           tree=committed['tree'], branch=operation['branch'],
-                                           ours=operation['ours'])]
+            operation['graph'] = json.loads(_canonical(intent['graph']))
+            operation['publication_graph'] = json.loads(_canonical(intent['publication_graph']))
+            operation['graph'][0]['candidate'] = committed['commit']
+            operation['graph'][0]['tree'] = committed['tree']
+            operation['publication_graph'][0]['candidate'] = committed['commit']
             operation['candidate'] = committed['commit']
             operation['tree'] = committed['tree']
             operation['revision'] = sync._revision(operation)
