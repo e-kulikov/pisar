@@ -660,11 +660,31 @@ reported paths, stage those exact paths, then repeat `sync prepare` with the
 same operation ID. `close` releases an unfinished operation reservation while
 retaining its journal and candidate for inspection. `accept` records only the owner decision. `apply` advances
 the recorded local branch. `publish` is a separate explicit push to the frozen
-remote and branch. To review local-only commits for publication, use
+remote and branch. For an initialized graph, the reviewed operation also freezes
+each child repository's configured upstream. Publication checks every gitlink
+introduced by the commits being published at that exact destination, then pushes
+children from deepest to root. A successful child push remains published if a
+later parent push is rejected. An optional JSON bootstrap map may be supplied
+with `--bootstrap-map PATH`; it maps registered child paths to `{"url": "...",
+"branch": "..."}` and must not contain credentials. The map identity is bound
+into review, while Git and Pisar verify both destination and bootstrap-source
+reachability. To review local-only commits for publication, use
 `pisar sync publish --repo .`, then review and accept its returned operation ID
 before publishing it. `--dry-run` uses cached facts and never fetches.
 `feedback` stores only the outcome, reviewer/policy identity and optional category
 outside Git; it never stores document excerpts or prompts.
+
+To reconstruct a published snapshot on a fresh machine, clone the root with
+`--no-recurse-submodules`, select the published root commit if exact historical
+reconstruction is needed, and initialize each registered child one level at a
+time with `git submodule init -- PATH` followed by
+`git submodule update --init --checkout -- PATH`. Repeat inside each child for
+nested children, then verify every child HEAD matches its parent's gitlink and
+run `pisar check`. Git resolves relative `.gitmodules` URLs. If a default child
+URL is stale, supply the operator's nonsecret bootstrap map by setting the
+registered `submodule.NAME.url` in that fresh clone before updating it; do not
+rewrite `.gitmodules` or copy publisher runtime/configuration. Configure attached
+working branches and their upstreams explicitly before syncing or publishing.
 
 ## Known-space inbox capture
 

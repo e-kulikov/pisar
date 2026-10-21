@@ -1,6 +1,20 @@
 """CLI surface for delivery-I sync operations."""
+import json
+from pathlib import Path
 from . import sync
 from .sync import Target
+
+
+def _bootstrap_map(path):
+    if path is None:
+        return None
+    try:
+        value = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f'cannot read bootstrap map: {exc}') from exc
+    if not isinstance(value, dict):
+        raise ValueError('bootstrap map file must contain a JSON object')
+    return value
 
 
 def add_parser(commands):
@@ -10,10 +24,12 @@ def add_parser(commands):
     fetch.add_argument('--repo', required=True, help='Repository path relative to the wiki root (delivery I: .)')
     fetch.add_argument('--remote', default='origin')
     fetch.add_argument('--branch', default='main')
+    fetch.add_argument('--bootstrap-map', help='nonsecret JSON map of child paths to {url, branch}')
     pull = actions.add_parser('pull', help='Fetch and prepare a candidate; manual acceptance is always required')
     pull.add_argument('--repo', required=True)
     pull.add_argument('--remote', default='origin')
     pull.add_argument('--branch', default='main')
+    pull.add_argument('--bootstrap-map', help='nonsecret JSON map of child paths to {url, branch}')
     pull.add_argument('--merge', action='store_true')
     pull.add_argument('--dry-run', action='store_true')
     prepare = actions.add_parser('prepare', help='Prepare a disposable Git candidate')
@@ -40,6 +56,7 @@ def add_parser(commands):
     publish.add_argument('--dry-run', action='store_true')
     publish.add_argument('--remote', default='origin')
     publish.add_argument('--branch', default='main')
+    publish.add_argument('--bootstrap-map', help='same nonsecret JSON map supplied when preparing the operation')
     feedback = actions.add_parser('feedback', help='Record local outcome feedback without excerpts or prompts')
     feedback.add_argument('--operation', required=True)
     feedback.add_argument('--rating', required=True, choices=('correct', 'corrected', 'rejected'))
@@ -48,9 +65,11 @@ def add_parser(commands):
 
 def run(args, wiki, state_dir):
     if args.action == 'fetch':
-        return sync.fetch(wiki, state_dir, args.repo, Target(args.remote, args.branch))
+        return sync.fetch(wiki, state_dir, args.repo,
+                          Target(args.remote, args.branch, _bootstrap_map(args.bootstrap_map)))
     if args.action == 'pull':
-        return sync.pull(wiki, state_dir, args.repo, Target(args.remote, args.branch),
+        return sync.pull(wiki, state_dir, args.repo,
+                         Target(args.remote, args.branch, _bootstrap_map(args.bootstrap_map)),
                          merge=args.merge, dry_run=args.dry_run)
     if args.action == 'prepare':
         return sync.prepare(wiki, state_dir, args.operation, merge=args.merge)
@@ -68,11 +87,12 @@ def run(args, wiki, state_dir):
         return sync.apply(wiki, state_dir, args.operation)
     if args.action == 'publish':
         if args.repo is not None:
-            target = Target(args.remote, args.branch)
+            target = Target(args.remote, args.branch, _bootstrap_map(args.bootstrap_map))
             if args.dry_run:
                 return sync.pull(wiki, state_dir, args.repo, target, dry_run=True)
             return sync.publish_only(wiki, state_dir, args.repo, target)
-        return sync.publish(wiki, state_dir, args.operation, dry_run=args.dry_run)
+        return sync.publish(wiki, state_dir, args.operation, dry_run=args.dry_run,
+                            bootstrap_map=_bootstrap_map(args.bootstrap_map))
     if args.action == 'feedback':
         return sync.feedback(wiki, state_dir, args.operation, args.rating, args.category)
     raise ValueError('unknown sync action')

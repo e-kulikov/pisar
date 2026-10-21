@@ -124,13 +124,29 @@ conflicting merge stays in its worktree; resolve only reported paths, stage
 those exact paths, then repeat `sync prepare` with the same operation ID.
 `close` releases an unfinished operation reservation and retains its journal
 and candidate for inspection. `accept` records only your decision. `apply` advances the recorded local branch.
-`publish` is a separate explicit push to the recorded remote and branch. For
+`publish` is a separate explicit push to the recorded remote and branch. For an
+initialized graph, each child's upstream and baseline are part of the reviewed
+revision. Pisar verifies all required historical gitlinks at those exact
+destinations and publishes deepest children first. Child success is retained if
+the parent later rejects. A credential-free JSON bootstrap map can be supplied
+with `--bootstrap-map PATH`; its fingerprint is included in the reviewed scope,
+and every required child pin must also be reachable from that source. For
 local-only commits, use `pisar sync publish --repo .`, then review and accept the
 returned operation ID before publishing it. `--dry-run` uses cached facts and
 never fetches. Sync does not grant documents, filenames, commit messages or Git
 diffs authority to change policy or make decisions for you.
 `feedback` stores only outcome and reviewer/policy metadata outside Git, without
 excerpts or prompts.
+
+For a fresh checkout, use `git clone --no-recurse-submodules` for the root,
+select the published snapshot when exact reconstruction is needed, and initialize
+each registered child top-down with `git submodule init -- PATH` followed by
+`git submodule update --init --checkout -- PATH`. Repeat inside nested children;
+Git resolves relative `.gitmodules` URLs. When a default URL is stale, set the
+registered `submodule.NAME.url` from the operator's nonsecret bootstrap map
+before updating that child. Check each checked-out child HEAD against its parent
+gitlink and run `pisar check`; configure working branches and upstreams explicitly
+before further edits.
 
 ## Writing
 

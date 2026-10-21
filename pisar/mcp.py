@@ -104,13 +104,17 @@ TOOLS = (
           {'type': 'object', 'properties': {'batch': {'type': 'string'}, 'sha256': {'type': 'string'},
                                             'text': {'type': 'string'}},
            'required': ['batch', 'sha256', 'text'], 'additionalProperties': False}),
-    _tool('sync_fetch', 'Fetch the configured default sync target (origin/main) and freeze its exact tip.',
-          {'type': 'object', 'properties': {}, 'additionalProperties': False}),
+    _tool('sync_fetch', 'Fetch the configured default sync target (origin/main) and freeze its exact tip. An optional nonsecret bootstrap_map maps registered child paths to {url, branch}.',
+          {'type': 'object', 'properties': {'bootstrap_map': {'type': 'object', 'additionalProperties': {
+              'type': 'object', 'properties': {'url': {'type': 'string'}, 'branch': {'type': 'string'}},
+              'required': ['url', 'branch'], 'additionalProperties': False}}}, 'additionalProperties': False}),
     _tool('sync_prepare', 'Prepare a disposable sync candidate; this never changes a live branch.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'merge': {'type': 'boolean'}},
            'required': ['operation'], 'additionalProperties': False}),
-    _tool('sync_publish_prepare', 'Freeze local outgoing commits in a publish-only candidate; this does not push or move a live branch.',
-          {'type': 'object', 'properties': {}, 'additionalProperties': False}),
+    _tool('sync_publish_prepare', 'Freeze local outgoing commits in a publish-only candidate; this does not push or move a live branch. An optional nonsecret bootstrap_map maps registered child paths to {url, branch}.',
+          {'type': 'object', 'properties': {'bootstrap_map': {'type': 'object', 'additionalProperties': {
+              'type': 'object', 'properties': {'url': {'type': 'string'}, 'branch': {'type': 'string'}},
+              'required': ['url', 'branch'], 'additionalProperties': False}}}, 'additionalProperties': False}),
     _tool('sync_status', 'Read cached facts for a sync operation without fetching.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
            'additionalProperties': False}),
@@ -127,9 +131,11 @@ TOOLS = (
     _tool('sync_apply', 'Apply the exact accepted sync candidate after separate user confirmation.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
            'additionalProperties': False}),
-    _tool('sync_publish', 'Publish an exact applied or publish-only candidate after separate user confirmation.',
-          {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
-           'additionalProperties': False}),
+    _tool('sync_publish', 'Publish an exact applied or publish-only candidate after separate user confirmation. An optional nonsecret bootstrap_map maps registered child paths to {url, branch}.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'bootstrap_map': {'type': 'object',
+              'additionalProperties': {'type': 'object', 'properties': {'url': {'type': 'string'},
+              'branch': {'type': 'string'}}, 'required': ['url', 'branch'], 'additionalProperties': False}}},
+           'required': ['operation'], 'additionalProperties': False}),
 )
 TOOL_NAMES = tuple(tool['name'] for tool in TOOLS)
 DRAFT_LIMIT = 256 * 1024  # bytes of one draft
@@ -549,13 +555,21 @@ class Server:
         from .spaces import Wiki
         operation = arguments.get('operation')
         if name == 'sync_fetch':
-            if arguments:
-                raise Refused('sync_fetch takes no arguments')
-            result = sync.fetch(Wiki(self.root), self.state)
+            if set(arguments) - {'bootstrap_map'}:
+                raise Refused('sync_fetch accepts only optional bootstrap_map')
+            bootstrap_map = arguments.get('bootstrap_map')
+            if bootstrap_map is not None and not isinstance(bootstrap_map, dict):
+                raise Refused('sync_fetch: bootstrap_map must be an object')
+            result = sync.fetch(Wiki(self.root), self.state,
+                                target=sync.Target(bootstrap_map=bootstrap_map))
         elif name == 'sync_publish_prepare':
-            if arguments:
-                raise Refused('sync_publish_prepare takes no arguments')
-            result = sync.publish_only(Wiki(self.root), self.state)
+            if set(arguments) - {'bootstrap_map'}:
+                raise Refused('sync_publish_prepare accepts only optional bootstrap_map')
+            bootstrap_map = arguments.get('bootstrap_map')
+            if bootstrap_map is not None and not isinstance(bootstrap_map, dict):
+                raise Refused('sync_publish_prepare: bootstrap_map must be an object')
+            result = sync.publish_only(Wiki(self.root), self.state,
+                                       target=sync.Target(bootstrap_map=bootstrap_map))
         elif name == 'sync_prepare':
             if set(arguments) - {'operation', 'merge'} or type(arguments.get('merge', False)) is not bool:
                 raise Refused('sync_prepare accepts operation and an optional boolean merge')
@@ -603,14 +617,23 @@ class Server:
             self._confirm_sync(name, f'Apply sync operation {operation}, candidate {details.get("candidate")}, to its recorded local branch?')
             result = sync.apply(Wiki(self.root), self.state, operation)
         elif name == 'sync_publish':
-            if set(arguments) != {'operation'}:
-                raise Refused('sync_publish accepts only operation')
+            if set(arguments) - {'operation', 'bootstrap_map'} or 'operation' not in arguments:
+                raise Refused('sync_publish accepts operation and optional bootstrap_map')
             if not isinstance(operation, str):
                 raise Refused('sync_publish: operation is required')
+            bootstrap_map = arguments.get('bootstrap_map')
+            if bootstrap_map is not None and not isinstance(bootstrap_map, dict):
+                raise Refused('sync_publish: bootstrap_map must be an object')
             details = sync.inspect(Wiki(self.root), self.state, operation)
             commit = details.get('applied') or details.get('candidate')
-            self._confirm_sync(name, f'Publish sync operation {operation}, commit {commit}, to {details.get("remote")} refs/heads/{details.get("target_branch")}?')
-            result = sync.publish(Wiki(self.root), self.state, operation)
+            graph = details.get('publication_graph', [])
+            destinations = '; '.join(f"{item['path']} {item['candidate']} to {item['remote']} refs/heads/{item['branch']}"
+                                     for item in graph)
+            bootstrap = bootstrap_map or {}
+            sources = '; '.join(f"{path} from {entry['url']} refs/heads/{entry['branch']}"
+                                for path, entry in sorted(bootstrap.items()))
+            self._confirm_sync(name, f'Publish sync operation {operation}, root commit {commit}, child-first destinations: {destinations}; explicit bootstrap sources: {sources or "pinned .gitmodules URLs"}?')
+            result = sync.publish(Wiki(self.root), self.state, operation, bootstrap_map=bootstrap_map)
         else:
             raise Refused(f'unknown sync tool: {name}')
         return json.dumps(result, ensure_ascii=False, indent=2)

@@ -16,6 +16,237 @@ class CandidateGraph:
     repositories: tuple[dict, ...]
 
 
+@dataclass(frozen=True)
+class PublishTarget:
+    path: str
+    repo: Path
+    candidate: str
+    remote: str
+    branch: str
+    baseline: str
+    fingerprint: str
+
+
+def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, *, check_bootstrap=True):
+    """Freeze per-repository destinations and prove every new gitlink is available.
+
+    ``observed_remotes`` is a host-owned mapping from registered repo path to
+    ``(remote_name, branch)``. The function never substitutes another remote.
+    Results are ordered deepest child first, with the root last.
+    """
+    from . import sync
+    entries = {item['path']: item for item in candidate_graph.repositories}
+    if '.' not in entries or set(observed_remotes) != set(entries):
+        raise WikiError('publication destinations must name every repository in the candidate graph')
+    targets = {}
+    for path, item in entries.items():
+        remote_branch = observed_remotes[path]
+        if isinstance(remote_branch, dict):
+            if not {'remote', 'branch'} <= set(remote_branch):
+                raise WikiError(f'invalid publication destination: {path}')
+        elif not isinstance(remote_branch, (tuple, list)) or len(remote_branch) != 2:
+            raise WikiError(f'invalid publication destination: {path}')
+        if isinstance(remote_branch, dict):
+            remote, branch = remote_branch['remote'], remote_branch['branch']
+            expected_baseline = remote_branch.get('baseline')
+            expected_fingerprint = remote_branch.get('fingerprint')
+        else:
+            remote, branch = remote_branch
+            expected_baseline = expected_fingerprint = None
+        repo = Path(item.get('repo') or (candidate_graph.root if path == '.' else candidate_graph.root / path))
+        sync._target_ref(repo, sync.Target(remote, branch))
+        fingerprint = sync._remote_fingerprint(repo, remote)
+        if sync._remote_fingerprint(repo, remote, push=True) != fingerprint:
+            raise WikiError(f'publication push destination differs from fetch destination: {path}')
+        if expected_fingerprint is not None and expected_fingerprint != fingerprint:
+            raise WikiError(f'publication destination changed after review: {path}')
+        baseline = sync_git.fetch_tip(repo, remote, branch)
+        commit = item.get('commit', item['candidate'])
+        if expected_baseline is not None and baseline != expected_baseline:
+            if not sync_git._ancestor(repo, commit, baseline):
+                raise WikiError(f'remote-advanced after review: {path}')
+        commit = item.get('commit', item['candidate'])
+        targets[path] = PublishTarget(path, repo, commit, remote, branch, baseline, fingerprint)
+
+    bootstrap_map = bootstrap_map or {}
+    required_pins = set()
+    # Inspect every newly transported parent commit, not only the final tree.
+    for parent_path, target in targets.items():
+        parent_repo = target.repo
+        if sync_git._ancestor(parent_repo, target.candidate, target.baseline):
+            commits = []
+        else:
+            commits = sync_git.text(parent_repo, 'rev-list', '--reverse',
+                                    f'{target.baseline}..{target.candidate}').splitlines()
+        for commit in commits:
+            parent_links = _links(parent_repo, commit)
+            for subpath, (_, pin) in parent_links.items():
+                child_path = subpath if parent_path == '.' else f'{parent_path}/{subpath}'
+                child_target = targets.get(child_path)
+                if child_target is None:
+                    raise WikiError(f'publication graph is missing registered child: {child_path}')
+                if not sync_git._ancestor(child_target.repo, pin, child_target.baseline):
+                    child_commit = entries[child_path].get('commit', child_target.candidate)
+                    if not sync_git._ancestor(child_target.repo, pin, child_commit):
+                        raise WikiError(f'required child pin is unavailable from publication destination: {child_path}')
+                required_pins.add((parent_path, subpath, child_path, pin))
+        for subpath, (_, pin) in _links(parent_repo, target.candidate).items():
+            child_path = subpath if parent_path == '.' else f'{parent_path}/{subpath}'
+            if child_path not in targets:
+                raise WikiError(f'publication graph is missing registered child: {child_path}')
+            required_pins.add((parent_path, subpath, child_path, pin))
+    for parent_path, subpath, child_path, pin in (required_pins if check_bootstrap else ()):
+        parent_repo = entries[parent_path].get('candidate')
+        parent_repo = Path(parent_repo) if parent_repo else candidate_graph.root
+        if parent_path != '.' and parent_repo == candidate_graph.root:
+            parent_repo = candidate_graph.root / parent_path
+        url, branch = _bootstrap_source(parent_repo, subpath, child_path,
+                                        observed_remotes[child_path], bootstrap_map)
+        child_repo = targets[child_path].repo
+        fetched = subprocess.run(sync_git.command(child_repo, 'fetch', '--no-tags', '--no-recurse-submodules',
+                                 '--', url, f'refs/heads/{branch}'), capture_output=True,
+                                env=gitops.environment())
+        if fetched.returncode:
+            raise WikiError(f'bootstrap-source-unavailable: {child_path}')
+        source_tip = sync_git.text(child_repo, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}').strip()
+        if not sync_git._ancestor(child_repo, pin, source_tip):
+            raise WikiError(f'required child pin is unavailable from bootstrap source: {child_path}')
+    return sorted(targets.values(), key=lambda target: (target.path.count('/'), target.path != '.'), reverse=True)
+
+
+def _bootstrap_source(parent_repo, subpath, child_path, target, bootstrap_map):
+    from . import sync
+    override = bootstrap_map.get(child_path)
+    if override is not None:
+        if not isinstance(override, dict) or set(override) != {'url', 'branch'}:
+            raise WikiError(f'invalid bootstrap map entry: {child_path}')
+        return override['url'], override['branch']
+    manifest = sync_git.run(parent_repo, 'show', f"{sync_git.head(parent_repo)}:.gitmodules", check=False)
+    config = subprocess.run(sync_git.command(parent_repo, 'config', '--null', '--file', '-', '--list'),
+                            input=manifest, capture_output=True, env=gitops.environment())
+    if config.returncode:
+        raise WikiError('pinned .gitmodules manifest is invalid')
+    name = None
+    manifest_url = None
+    for record in config.stdout.split(b'\0'):
+        if not record:
+            continue
+        key, _, value = record.partition(b'\n')
+        key = key.decode('utf-8', 'surrogateescape')
+        if key.endswith('.path') and value.decode('utf-8', 'surrogateescape') == subpath:
+            name = key[:-5].removeprefix('submodule.')
+        elif key.endswith('.url'):
+            candidate_name = key[:-4].removeprefix('submodule.')
+            if candidate_name == name:
+                manifest_url = value.decode('utf-8', 'surrogateescape')
+    if name is None:
+        raise WikiError(f'bootstrap source path is not registered: {child_path}')
+    if manifest_url is None:
+        # The .url row may precede its .path row in Git's config output.
+        for record in config.stdout.split(b'\0'):
+            if record:
+                key, _, value = record.partition(b'\n')
+                key = key.decode('utf-8', 'surrogateescape')
+                if key == f'submodule.{name}.url':
+                    manifest_url = value.decode('utf-8', 'surrogateescape')
+                    break
+    if manifest_url is None or sync._has_embedded_credentials(manifest_url):
+        raise WikiError(f'credential-bearing or missing bootstrap URL: {child_path}')
+    key = f'submodule.{name}.url'
+    sync_git.run(parent_repo, 'config', '--unset-all', key, check=False)
+    initialized = subprocess.run(sync_git.command(parent_repo, 'submodule', 'init', '--', subpath),
+                                 capture_output=True, env=gitops.environment())
+    if initialized.returncode:
+        sync_git.run(parent_repo, 'config', '--unset-all', key, check=False)
+        raise WikiError(f'bootstrap-source-unavailable: {child_path}')
+    url = sync_git.text(parent_repo, 'config', '--get', key, check=False).strip()
+    sync_git.run(parent_repo, 'config', '--unset-all', key, check=False)
+    if not url:
+        raise WikiError(f'bootstrap-source-unavailable: {child_path}')
+    return url, target['branch'] if isinstance(target, dict) else target[1]
+
+
+def publish_children(operation, graph, save, bootstrap_map=None):
+    """Publish the frozen child graph in bottom-up order, retaining partial receipts."""
+    from . import sync
+    frozen = {item['path']: item for item in operation.get('publication_graph', [])}
+    entries = []
+    for item in operation.get('graph', []):
+        path = item['path']
+        source = graph.root if path == '.' else graph.root / path
+        repo = Path(operation['root']) if path == '.' else Path(operation['root']) / path
+        endpoint = sync_git.text(repo, 'remote', 'get-url', frozen[path]['remote']).strip()
+        if sync._has_embedded_credentials(endpoint):
+            raise WikiError(f'credential-bearing publication endpoint cannot be used as a bootstrap base: {path}')
+        sync_git.text(source, 'remote', 'set-url', 'origin', endpoint)
+        snapshot = sync_git.observe(repo)
+        if path != '.' and (snapshot.branch != item['branch'] or snapshot.head != item['candidate']):
+            raise WikiError(f'live child branch or commit changed after review: {path}')
+        entries.append(dict(path=path, candidate=source, commit=item['candidate'], repo=
+                            repo))
+    publication_graph = CandidateGraph(graph.root, tuple(entries))
+    targets = required_publication(publication_graph, frozen, bootstrap_map, check_bootstrap=False)
+    completed = operation.setdefault('published_graph', [])
+    for target in targets:
+        if target.path == '.':
+            continue
+        if target.path in completed or sync_git._ancestor(target.repo, target.candidate, target.baseline):
+            if target.path not in completed:
+                completed.append(target.path)
+                save(operation)
+            continue
+        command = sync_git.command(target.repo, 'push', '--porcelain', '--no-follow-tags',
+            '--recurse-submodules=check', target.remote,
+            f'{target.candidate}:refs/heads/{target.branch}')
+        result = subprocess.run(command, capture_output=True, env=gitops.environment())
+        advertised = sync_git.text(target.repo, 'ls-remote', '--refs', target.remote,
+                                   f'refs/heads/{target.branch}', check=False).split()
+        try:
+            observed = sync_git.fetch_tip(target.repo, target.remote, target.branch) if advertised else None
+        except WikiError:
+            observed = None
+        if not observed or not sync_git._ancestor(target.repo, target.candidate, observed):
+            if result.returncode:
+                raise WikiError('publication-unknown: child push result could not be observed')
+            raise WikiError(f'child publication was not reachable at destination: {target.path}')
+        completed.append(target.path)
+        save(operation)
+    required_publication(publication_graph, frozen, bootstrap_map, check_bootstrap=True)
+    return completed
+
+
+def freeze_publication(operation, graph):
+    """Bind the reviewed graph to each attached repository's configured upstream."""
+    from . import sync
+    registered = {item['path'] for item in graph.repositories if item['path'] != '.'}
+    bootstrap_map = operation.get('bootstrap_map', {})
+    if set(bootstrap_map) - registered:
+        raise WikiError('bootstrap map names a path outside the registered candidate graph')
+    frozen = []
+    for item in graph.repositories:
+        path = item['path']
+        repo = Path(operation['root']) if path == '.' else Path(operation['root']) / path
+        if path == '.':
+            remote, branch = operation['remote'], operation['target_branch']
+        else:
+            upstream = sync_git.text(repo, 'for-each-ref', '--format=%(upstream)',
+                f"refs/heads/{item['branch'].removeprefix('refs/heads/')}").strip()
+            if not upstream.startswith('refs/remotes/'):
+                raise WikiError(f'submodule has no configured publication upstream: {path}')
+            remote, _, branch = upstream.removeprefix('refs/remotes/').partition('/')
+            if not branch:
+                raise WikiError(f'submodule publication upstream is ambiguous: {path}')
+        sync._target_ref(repo, sync.Target(remote, branch))
+        fingerprint = sync._remote_fingerprint(repo, remote)
+        if sync._remote_fingerprint(repo, remote, push=True) != fingerprint:
+            raise WikiError(f'sync push destination differs from fetch destination: {path}')
+        baseline = sync_git.fetch_tip(repo, remote, branch)
+        frozen.append(dict(path=path, remote=remote, branch=branch, baseline=baseline,
+                           fingerprint=fingerprint, candidate=item['commit']))
+    operation['publication_graph'] = frozen
+    return frozen
+
+
 def _run(repo, *args, check=True):
     return sync_git.run(repo, *args, check=check)
 
@@ -322,9 +553,10 @@ def prepare_graph(operation, root_candidate, *, message=None):
     operation['graph'] = [dict(path=x['path'], candidate=x['commit'], tree=x['tree'],
                                branch=x['branch'], ours=x['ours'], theirs=x['theirs']) for x in candidates]
     operation['tree'] = candidates[0]['tree']
+    freeze_publication(operation, graph)
     operation['revision'] = operations.fingerprint({key: operation.get(key) for key in
         ('root', 'repo', 'branch', 'remote', 'target_branch', 'remote_fingerprint', 'kind', 'ours',
-         'theirs', 'candidate', 'tree', 'graph')})
+         'theirs', 'candidate', 'tree', 'graph', 'publication_graph')})
     return graph
 
 

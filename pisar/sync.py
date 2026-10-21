@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import uuid
+from urllib.parse import urlsplit
 
 from . import commit_message, gitops, operations, settings, sync_git, sync_graph
 from .documents import check
@@ -17,6 +18,7 @@ from .spaces import Wiki
 class Target:
     remote: str = 'origin'
     branch: str = 'main'
+    bootstrap_map: dict | None = None
 
 
 def _path(runtime, ident):
@@ -127,9 +129,38 @@ def _validate_originals(candidate, ours, theirs, result):
 
 def _revision(operation):
     data = {key: operation[key] for key in ('root', 'repo', 'branch', 'remote', 'target_branch',
-                                             'remote_fingerprint', 'kind', 'ours', 'theirs', 'candidate', 'tree', 'graph')
+                                             'remote_fingerprint', 'kind', 'ours', 'theirs', 'candidate', 'tree', 'graph',
+                                             'publication_graph', 'bootstrap_map_fingerprint')
             if key in operation}
     return operations.fingerprint(data)
+
+
+def _bootstrap_map_fingerprint(value):
+    if not isinstance(value, dict):
+        raise WikiError('bootstrap map must map registered paths to endpoint and branch')
+    for path, entry in value.items():
+        if not isinstance(path, str) or not path or not isinstance(entry, dict) or set(entry) != {'url', 'branch'}:
+            raise WikiError('bootstrap map entry must contain only url and branch')
+        url, branch = entry['url'], entry['branch']
+        if (not isinstance(url, str) or not url or not isinstance(branch, str)
+                or not re.fullmatch(r'[A-Za-z0-9._/-]+', branch)
+                or branch.startswith('-') or '..' in branch.split('/')):
+            raise WikiError('bootstrap map endpoint and branch must be non-empty strings')
+        parsed = urlsplit(url)
+        query_keys = [part.split('=', 1)[0].lower() for part in parsed.query.split('&') if part]
+        if (parsed.username or parsed.password
+                or any(any(token in key for token in ('token', 'password', 'secret', 'key'))
+                       for key in query_keys)):
+            raise WikiError('bootstrap map must not contain credentials or secret query parameters')
+    return operations.fingerprint(value)
+
+
+def _has_embedded_credentials(url):
+    parsed = urlsplit(url)
+    sensitive = ('token', 'password', 'secret', 'key')
+    query_keys = [part.split('=', 1)[0].lower() for part in parsed.query.split('&') if part]
+    return bool(parsed.username or parsed.password or any(any(word in key for word in sensitive)
+                                                          for key in query_keys))
 
 
 def _decision_binding(accepted):
@@ -199,7 +230,9 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
                          remote=target.remote, target_branch=target.branch, kind=kind,
                          remote_fingerprint=remote_fp, tracking_ref=tracking, status='fetched',
                          candidate=None, revision=None, review=None, accepted=None, applied=None,
-                         created_at=datetime.now(timezone.utc).isoformat())
+                         created_at=datetime.now(timezone.utc).isoformat(),
+                         bootstrap_map=target.bootstrap_map or {},
+                         bootstrap_map_fingerprint=_bootstrap_map_fingerprint(target.bootstrap_map or {}))
         operation['live_graph'] = [dict(path=item['path'], branch=item['branch'], ours=item['ours'])
                                    for item in initial_graph]
         _save(runtime, operation)
@@ -324,7 +357,8 @@ def inspect(wiki, state_dir, ident=None):
     if ident:
         operation = _load(base, ident)
         fields = ('operation_id', 'kind', 'status', 'branch', 'ours', 'theirs', 'candidate', 'tree',
-                  'revision', 'remote', 'target_branch', 'applied', 'published', 'semantic_review')
+                  'revision', 'remote', 'target_branch', 'applied', 'published', 'semantic_review',
+                  'publication_graph', 'published_graph', 'bootstrap_map_fingerprint')
         result = {key: operation[key] for key in fields if key in operation}
         if operation.get('candidate'):
             result['candidate_worktree'] = str(_candidate(base, ident))
@@ -481,13 +515,16 @@ def apply(wiki, state_dir, ident):
         return dict(operation_id=ident, status='applied', head=imported)
 
 
-def publish(wiki, state_dir, ident, *, dry_run=False):
+def publish(wiki, state_dir, ident, *, dry_run=False, bootstrap_map=None):
     if dry_run:
         item = inspect(wiki, state_dir, ident)
         if item.get('status') not in ('applied', 'accepted'):
             raise WikiError('only an applied or accepted publish-only operation can be published')
+        graph = sorted(item.get('publication_graph', []),
+                       key=lambda target: (target['path'].count('/'), target['path'] != '.'), reverse=True)
         return dict(operation_id=ident, status='ready', remote=item['remote'], branch=item['target_branch'],
-                    commit=item.get('applied') or item.get('candidate'), dry_run=True)
+                    commit=item.get('applied') or item.get('candidate'), graph=graph,
+                    bootstrap_map_fingerprint=item.get('bootstrap_map_fingerprint'), dry_run=True)
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         operation = _load(runtime, ident)
@@ -510,6 +547,18 @@ def publish(wiki, state_dir, ident, *, dry_run=False):
         if _remote_fingerprint(repo, operation['remote'], push=True) != operation['remote_fingerprint']:
             raise WikiError('sync push destination differs from the reviewed remote')
         commit_to_publish = operation['candidate'] if publish_only else operation['applied']
+        if operation.get('graph') and len(operation['graph']) > 1:
+            candidate_root = _candidate(runtime, ident)
+            graph = sync_graph.CandidateGraph(candidate_root, tuple(
+                dict(path=item['path'], candidate=str(candidate_root if item['path'] == '.' else candidate_root / item['path']),
+                     commit=item['candidate'], tree=item['tree'], branch=item['branch'], ours=item['ours'],
+                     repo=repo if item['path'] == '.' else repo / item['path'])
+                for item in operation['graph']))
+            supplied_map = operation.get('bootstrap_map', {}) if bootstrap_map is None else bootstrap_map
+            if _bootstrap_map_fingerprint(supplied_map) != operation.get('bootstrap_map_fingerprint',
+                                                                         _bootstrap_map_fingerprint({})):
+                raise WikiError('bootstrap map changed after review or must be supplied again')
+            sync_graph.publish_children(operation, graph, lambda value: _save(runtime, value), supplied_map)
         tracking = _target_ref(repo, Target(operation['remote'], operation['target_branch']))
         current = sync_git.fetch_tip(repo, operation['remote'], operation['target_branch'])
         if sync_git._ancestor(repo, commit_to_publish, current):
