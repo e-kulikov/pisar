@@ -1942,6 +1942,42 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(result['status'], 'no-change')
         sync.accept(wiki, self.state, fetched['operation_id'], result['revision'])
 
+    def test_conflicts_only_auto_pull_applies_clean_fast_forward_without_model(self):
+        incoming = self.incoming('work/10-projects/alpha/note.md',
+                                 document('note', 'work/alpha', body='Incoming assertion.'))
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            result = sync.pull(Wiki(self.root), self.state,
+                               review_backend=lambda request: self.fail('reduced coverage called model'))
+            self.assertEqual(result['status'], 'applied-automatically')
+            operation = sync._load(operations.Runtime(self.state, self.root), result['operation_id'])
+            self.assertEqual(operation['review']['kind'], 'reduced-coverage')
+            self.assertEqual(operation['semantic_review']['coverage'], 'uncovered')
+            self.assertEqual(result['semantic_review']['label'], 'not semantically reviewed')
+            self.assertNotIn('confidence', operation['semantic_review'])
+            self.assertIsNotNone(operation['accepted'])
+            self.assertEqual(sync.pull(Wiki(self.root), self.state)['status'], 'no-change')
+        self.assertEqual(sync_git.head(self.root), incoming)
+
+    def test_conflicts_only_auto_acceptance_requires_fresh_technical_validation(self):
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Incoming assertion.'))
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        sync.prepare(wiki, self.state, ident)
+        before = (sync_git.head(self.root), (self.root / '.git/index').read_bytes())
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            result = sync.semantic_review(wiki, self.state, ident,
+                                          backend=lambda request: self.fail('reduced coverage called model'))
+            self.assertIn('revision', result)
+            with mock.patch('pisar.sync_graph.verify_graph', return_value={'ok': False, 'errors': ['synthetic']}):
+                with self.assertRaisesRegex(WikiError, 'hard gates'):
+                    sync.accept(wiki, self.state, ident, result['revision'])
+        self.assertEqual((sync_git.head(self.root), (self.root / '.git/index').read_bytes()), before)
+        self.assertIsNone(sync._load(operations.Runtime(self.state, self.root), ident)['accepted'])
+
     def test_conflicts_only_marks_fast_forward_unreviewed(self):
         self.incoming()
         wiki = Wiki(self.root)

@@ -85,6 +85,8 @@ def validate_stored_report(runtime, operation):
     """Recompute a semantic acceptance token from the immutable candidate and report bytes."""
     review = operation.get('review') or {}
     semantic = operation.get('semantic_review') or {}
+    if review.get('kind') == 'reduced-coverage':
+        return validate_reduced_coverage(runtime, operation)
     if review.get('kind') != 'semantic':
         if review.get('kind') == 'no-change':
             digest = report_digest([])
@@ -107,6 +109,29 @@ def validate_stored_report(runtime, operation):
     token = acceptance_revision(candidate_revision, actual_digest)
     if token != review.get('acceptance_revision') or token != semantic.get('acceptance_revision'):
         raise WikiError('sync review report digest does not match its acceptance revision')
+    return token
+
+
+def validate_reduced_coverage(runtime, operation):
+    """Validate explicit weaker-policy authorization without inventing a model report."""
+    from . import sync
+    current = policy()
+    review = operation.get('review') or {}
+    semantic = operation.get('semantic_review') or {}
+    candidate = sync._candidate(runtime, operation['operation_id'])
+    if (current.review != 'conflicts' or current.approval != 'auto'
+            or review.get('kind') != 'reduced-coverage' or semantic.get('coverage') != 'uncovered'
+            or review.get('policy') != current.__dict__ or semantic.get('policy') != current.__dict__
+            or review.get('git_revision') != operation.get('revision')
+            or semantic.get('git_revision') != operation.get('revision')
+            or operation.get('resolver_result') or operation.get('resolver_proposal')
+            or len(sync_git.parents(candidate, operation['candidate'])) >= 2):
+        raise WikiError('reduced-coverage authorization is stale or ineligible')
+    revision = _candidate_revision(operation, requests(Wiki(runtime.root), operation, candidate), current)
+    token = operations.fingerprint({'authorization': 'conflicts-only-clean', 'candidate_revision': revision})
+    if (review.get('candidate_revision') != revision or semantic.get('revision') != revision
+            or review.get('acceptance_revision') != token or semantic.get('acceptance_revision') != token):
+        raise WikiError('reduced-coverage authorization no longer matches the candidate and policy')
     return token
 
 
@@ -597,7 +622,25 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
                     'candidate_revision': candidate_revision,
                     'reports': cached,
                     'policy': current_policy.__dict__, 'reused': True}
-        if current_policy.review == 'conflicts' and len(sync_git.parents(candidate, operation['candidate'])) < 2:
+        if (current_policy.review == 'conflicts'
+                and len(sync_git.parents(candidate, operation['candidate'])) < 2
+                and (review_requests or current_policy.approval != 'auto')):
+            if current_policy.approval == 'auto' and review_requests and not (
+                    operation.get('resolver_result') or operation.get('resolver_proposal')):
+                token = operations.fingerprint({'authorization': 'conflicts-only-clean',
+                                                'candidate_revision': candidate_revision})
+                operation['review'] = dict(kind='reduced-coverage', candidate_revision=candidate_revision,
+                                           git_revision=frozen_revision, acceptance_revision=token,
+                                           policy=current_policy.__dict__)
+                operation['semantic_review'] = dict(coverage='uncovered', revision=candidate_revision,
+                                                    git_revision=frozen_revision, acceptance_revision=token,
+                                                    policy=current_policy.__dict__,
+                                                    label='not semantically reviewed')
+                operation['accepted'] = None
+                operation['status'] = 'reviewed'
+                sync._save(runtime, operation)
+                return dict(operation_id=ident, status='uncovered', revision=token,
+                            label='not semantically reviewed', policy=current_policy.__dict__)
             operation['review'] = None
             operation['semantic_review'] = {'coverage': 'uncovered', 'revision': candidate_revision,
                                             'policy': current_policy.__dict__}

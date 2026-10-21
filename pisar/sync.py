@@ -649,7 +649,10 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
                       'resolver_commit_valid': resolver_commit_valid,
                       'fresh_review': bool(semantic and semantic.get('coverage') == 'all'
                                            and semantic.get('revision'))}
-            if semantic and semantic.get('coverage') == 'no-change' and operation['review'].get('kind') == 'no-change':
+            if operation['review'].get('kind') == 'reduced-coverage':
+                sync_review.validate_reduced_coverage(runtime, operation)
+                authorized = technical_ok and bundle['candidate_current'] and resolver_commit_valid
+            elif semantic and semantic.get('coverage') == 'no-change' and operation['review'].get('kind') == 'no-change':
                 no_change_requests = sync_review.requests(wiki, operation, candidate)
                 if (no_change_requests or semantic.get('revision') != sync_review._candidate_revision(
                         operation, no_change_requests, current_policy_object)):
@@ -886,6 +889,11 @@ def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run
                                    reviewed.get('policy', {})) != 'accepted':
                 return {**result, 'operation_id': fetched['operation_id'], 'status': 'needs-decision',
                         'semantic_review': reviewed}
+            accept(wiki, state_dir, fetched['operation_id'], reviewed['revision'])
+            applied = apply(wiki, state_dir, fetched['operation_id'])
+            return {**result, **applied, 'operation_id': fetched['operation_id'],
+                    'status': 'applied-automatically', 'semantic_review': reviewed}
+        if reviewed.get('status') == 'uncovered' and reviewed.get('revision'):
             accept(wiki, state_dir, fetched['operation_id'], reviewed['revision'])
             applied = apply(wiki, state_dir, fetched['operation_id'])
             return {**result, **applied, 'operation_id': fetched['operation_id'],
