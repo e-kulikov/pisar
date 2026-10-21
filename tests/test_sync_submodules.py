@@ -1159,6 +1159,23 @@ class SyncSubmoduleTests(unittest.TestCase):
         with self.assertRaisesRegex(WikiError, 'topology|URL|registration'):
             sync.pull(Wiki(self.root), self.state)
 
+    def test_hidden_untracked_file_blocks_before_any_graph_application(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        ready = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, ready['operation_id'])
+        sync.accept(wiki, self.state, ready['operation_id'], ready['revision'])
+        self.git(self.root, 'config', 'status.showUntrackedFiles', 'no')
+        untracked = self.root / 'hidden-directory/user.txt'
+        untracked.parent.mkdir()
+        untracked.write_text('Uncommitted user content.\n')
+        repos = (self.root, self.root / self.child_path, self.root / self.child_path / 'nested')
+        before = [self.git(repo, 'rev-parse', 'HEAD') for repo in repos]
+        with self.assertRaisesRegex(WikiError, 'unexpected edits'):
+            sync.apply(wiki, self.state, ready['operation_id'])
+        self.assertEqual([self.git(repo, 'rev-parse', 'HEAD') for repo in repos], before)
+        self.assertEqual(untracked.read_text(), 'Uncommitted user content.\n')
+
     def test_assume_unchanged_root_file_blocks_before_child_application(self):
         self.incoming_child_and_root_pin()
         wiki = Wiki(self.root)

@@ -681,7 +681,7 @@ def _parent_path(path, graph_paths):
 
 def _porcelain_paths(repo):
     """Return exact path/status pairs from Git's NUL-delimited porcelain output."""
-    records = sync_git.run(repo, 'status', '--porcelain=v1', '-z',
+    records = sync_git.run(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
                           '--ignore-submodules=none').split(b'\0')
     result = []
     index = 0
