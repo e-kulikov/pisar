@@ -136,7 +136,10 @@ class Runtime:
             return []
         pending = []
         for path in sorted(folder.glob('*.json')):
-            value = json.loads(safe_path(folder, path.name).read_text(encoding='utf-8'))
+            try:
+                value = json.loads(safe_path(folder, path.name).read_text(encoding='utf-8'))
+            except (json.JSONDecodeError, UnicodeError) as error:
+                raise WikiError(f'invalid sync state {path.name}: {error}') from None
             if value.get('status') not in ('published', 'closed', 'applied'):
                 pending.append(value)
         return pending

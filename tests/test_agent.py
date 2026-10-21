@@ -42,6 +42,25 @@ class AgentTests(Fixture):
                            *args, env=env or self.agent_env, ok=ok)
         return p, (json.loads(self.out.read_text()) if self.out.exists() else None)
 
+    def test_corrupt_sync_state_reports_wiki_error_without_traceback(self):
+        from pisar import operations
+        from pisar.safety import WikiError
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        (folder / 'broken.json').write_text('{broken')
+        with self.assertRaisesRegex(WikiError, 'invalid sync state.*broken.json'):
+            with runtime.writer():
+                self.fail('corrupt reservation allowed a writer')
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': 'Write'}),
+                                text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('invalid sync state', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
     def test_claude_hook_allows_tools_without_reservation_while_writer_busy(self):
         from pisar import operations
         runtime = operations.Runtime(self.state, self.root)
