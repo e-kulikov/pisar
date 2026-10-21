@@ -143,7 +143,8 @@ def main(argv=None):
         if args.command == 'sync':
             result = sync_command.run(args, wiki, args.state_dir)
             print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 2 if result.get('status') in ('conflict', 'diverged', 'pending', 'needs-approval') else 0
+            return 2 if result.get('status') in ('conflict', 'diverged', 'pending', 'needs-approval',
+                                                                'needs-decision', 'resolution-pending') else 0
         domains = None
         if getattr(args, 'include', None) or getattr(args, 'exclude', None):
             domains = wiki.select(args.include, args.exclude)

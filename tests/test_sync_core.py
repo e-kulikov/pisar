@@ -1942,6 +1942,41 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(result['status'], 'no-change')
         sync.accept(wiki, self.state, fetched['operation_id'], result['revision'])
 
+    def test_cli_auto_pull_semantic_decision_returns_pending_exit_code(self):
+        import io
+        from pisar import cli
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Incoming assertion.'))
+        before = sync_git.head(self.root)
+        policy = sync_review.SemanticPolicy(approval='auto')
+        output = io.StringIO()
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}), \
+                mock.patch.object(sync_review, '_configured_backend', return_value=self._needs_decision), \
+                mock.patch('sys.stdout', output):
+            code = cli.main(['--root', str(self.root), '--state-dir', str(self.state),
+                             'sync', 'pull', '--repo', '.'])
+        self.assertEqual(json.loads(output.getvalue())['status'], 'needs-decision')
+        self.assertEqual(sync_git.head(self.root), before)
+        self.assertEqual(code, 2)
+
+    def test_cli_resolver_proposal_returns_pending_exit_code(self):
+        import io
+        from pisar import cli, sync_resolver
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        before = sync_git.head(self.root)
+        output = io.StringIO()
+        with mock.patch.object(sync_resolver, '_configured_backend', return_value=self._scoped_resolution), \
+                mock.patch.object(settings, 'semantic_policy', return_value={
+                    'agent': 'claude', 'review': 'all', 'approval': 'manual', 'min_confidence': 0.95}), \
+                mock.patch('sys.stdout', output):
+            code = cli.main(['--root', str(self.root), '--state-dir', str(self.state),
+                             'sync', 'resolve', '--operation', fetched['operation_id']])
+        self.assertEqual(json.loads(output.getvalue())['status'], 'resolution-pending')
+        self.assertEqual(sync_git.head(self.root), before)
+        self.assertEqual(code, 2)
+
     def test_conflicts_only_auto_pull_applies_clean_fast_forward_without_model(self):
         incoming = self.incoming('work/10-projects/alpha/note.md',
                                  document('note', 'work/alpha', body='Incoming assertion.'))
