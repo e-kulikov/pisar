@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 
 from .support import clean_environ, commit_all, domain, document, init_repo
-from pisar import sync
+from pisar import sync, sync_graph
 from pisar.safety import WikiError
 from pisar.spaces import Wiki
 
@@ -1143,6 +1143,35 @@ class SyncSubmoduleTests(unittest.TestCase):
         with self.assertRaisesRegex(WikiError, 'unsupported|assume|skip-worktree|sparse|dirty|edits'):
             sync.apply(wiki, self.state, result['operation_id'])
         self.assertEqual(self.git(self.root / self.child_path, 'rev-parse', 'HEAD'), initial_child)
+
+
+    def test_close_refuses_partially_applied_graph_and_apply_can_finish(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        ident = result['operation_id']
+        sync.manual_review(wiki, self.state, ident)
+        sync.accept(wiki, self.state, ident, result['revision'])
+        original = sync_graph._apply_parent
+        sync_graph._apply_parent = lambda *args, **kwargs: (_ for _ in ()).throw(WikiError('interrupt'))
+        try:
+            with self.assertRaisesRegex(WikiError, 'interrupt'):
+                sync.apply(wiki, self.state, ident)
+        finally:
+            sync_graph._apply_parent = original
+        with self.assertRaisesRegex(WikiError, 'partial-application.*sync apply --operation'):
+            sync.close(wiki, self.state, ident)
+        self.assertEqual(sync.inspect(wiki, self.state, ident)['status'], 'accepted')
+        finished = sync.apply(wiki, self.state, ident)
+        self.assertEqual(finished['status'], 'applied')
+        self.assertEqual(self.git(self.root, 'status', '--porcelain'), '')
+
+    def test_close_allows_unapplied_graph_operation(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        ident = result['operation_id']
+        self.assertEqual(sync.close(wiki, self.state, ident)['status'], 'closed')
 
 
 if __name__ == '__main__':

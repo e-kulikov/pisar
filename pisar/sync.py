@@ -587,6 +587,27 @@ def inspect(wiki, state_dir, ident=None):
     return {'operations': values}
 
 
+def _refuse_partial_application(operation, ident):
+    """Refuse to release a graph operation whose repositories are only partly applied."""
+    graph = operation.get('graph') or []
+    if len(graph) < 2 or operation.get('status') != 'accepted':
+        return
+    root = Path(operation['root'])
+    applied, pending = [], []
+    for item in graph:
+        if item['candidate'] == item['ours']:
+            continue
+        repo = root if item['path'] == '.' else root / item['path']
+        head = sync_git.head(repo)
+        if head == item['candidate']:
+            applied.append(item['path'])
+        elif head == item['ours']:
+            pending.append(item['path'])
+    if applied and pending:
+        raise WikiError(f'partial-application: applied {applied}; pending {pending}; '
+                        f'finish with sync apply --operation {ident}')
+
+
 def close(wiki, state_dir, ident):
     """Release an unfinished local reservation while retaining its candidate and journal."""
     runtime = operations.Runtime(state_dir, wiki.root)
@@ -596,6 +617,7 @@ def close(wiki, state_dir, ident):
             raise WikiError('completed operations cannot be closed')
         if operation.get('status') == 'closed':
             return dict(operation_id=ident, status='closed', candidate_retained=bool(operation.get('candidate')))
+        _refuse_partial_application(operation, ident)
         operation['status'] = 'closed'
         operation['closed_at'] = datetime.now(timezone.utc).isoformat()
         _save(runtime, operation)
