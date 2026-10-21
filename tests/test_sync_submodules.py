@@ -517,6 +517,125 @@ class SyncSubmoduleTests(unittest.TestCase):
                          self.git(self.root / self.child_path, 'rev-parse', 'HEAD:nested'))
         self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
 
+    def test_retry_after_grandchild_fast_forward_resumes_parent_graph(self):
+        self.incoming_child_and_root_pin()
+        writer = self.base / 'root-writer'
+        child = writer / self.child_path
+        grandchild = child / 'nested'
+        self.git(grandchild, 'config', 'user.name', 'Synthetic fixture')
+        self.git(grandchild, 'config', 'user.email', 'synthetic@example.invalid')
+        (grandchild / 'grandchild.txt').write_text('Interrupted nested update.\n')
+        self.git(grandchild, 'add', '--', 'grandchild.txt')
+        self.git(grandchild, 'commit', '-qm', 'incoming grandchild update')
+        self.git(grandchild, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(child, 'add', '--', 'nested')
+        self.git(child, 'commit', '-qm', 'advance grandchild pin')
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'advance child pin')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, result['operation_id'])
+        sync.accept(wiki, self.state, result['operation_id'], result['revision'])
+        from pisar import sync_graph
+        original = sync_graph._apply_child
+        def interrupt_at_parent(item, repo, candidate):
+            if item['path'] == self.child_path:
+                raise WikiError('injected after grandchild FF')
+            return original(item, repo, candidate)
+        sync_graph._apply_child = interrupt_at_parent
+        try:
+            with self.assertRaisesRegex(WikiError, 'injected after grandchild FF'):
+                sync.apply(wiki, self.state, result['operation_id'])
+        finally:
+            sync_graph._apply_child = original
+        grandchild_candidate = self.git(Path(result['candidate_worktree']) / self.child_path / 'nested',
+                                        'rev-parse', 'HEAD')
+        self.assertEqual(self.git(self.root / self.child_path / 'nested', 'rev-parse', 'HEAD'),
+                         grandchild_candidate)
+        applied = sync.apply(wiki, self.state, result['operation_id'])
+        self.assertEqual(applied['status'], 'applied')
+        self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
+
+    def test_space_submodule_path_applies_and_retries_exactly(self):
+        old_path = self.child_path
+        self.child_path = 'work/10-projects/alpha space "quoted"'
+        self.git(self.root, 'mv', old_path, self.child_path)
+        self.git(self.root, 'add', '--', '.gitmodules', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'move submodule to path with space')
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, result['operation_id'])
+        sync.accept(wiki, self.state, result['operation_id'], result['revision'])
+        from pisar import sync_graph
+        original = sync_graph._apply_parent
+        sync_graph._apply_parent = lambda *args, **kwargs: (_ for _ in ()).throw(WikiError('interrupt before root FF'))
+        try:
+            with self.assertRaisesRegex(WikiError, 'interrupt before root FF'):
+                sync.apply(wiki, self.state, result['operation_id'])
+        finally:
+            sync_graph._apply_parent = original
+        applied = sync.apply(wiki, self.state, result['operation_id'])
+        self.assertEqual(applied['status'], 'applied')
+        self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
+
+    def test_nested_retained_pin_fixup_propagates_to_root_candidate(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        first = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, first['operation_id'])
+        sync.accept(wiki, self.state, first['operation_id'], first['revision'])
+        sync.apply(wiki, self.state, first['operation_id'])
+        writer = self.base / 'root-writer'
+        child = writer / self.child_path
+        grandchild = child / 'nested'
+        ancestor = self.git(grandchild, 'rev-parse', 'HEAD')
+        self.git(grandchild, 'config', 'user.name', 'Synthetic fixture')
+        self.git(grandchild, 'config', 'user.email', 'synthetic@example.invalid')
+        (grandchild / 'grandchild.txt').write_text('Retained nested descendant.\n')
+        self.git(grandchild, 'add', '--', 'grandchild.txt')
+        self.git(grandchild, 'commit', '-qm', 'nested descendant')
+        retained = self.git(grandchild, 'rev-parse', 'HEAD')
+        self.git(grandchild, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(child, 'add', '--', 'nested')
+        self.git(child, 'commit', '-qm', 'pin nested descendant')
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'pin child descendant')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        second = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, second['operation_id'])
+        sync.accept(wiki, self.state, second['operation_id'], second['revision'])
+        sync.apply(wiki, self.state, second['operation_id'])
+
+        self.git(grandchild, 'switch', '--detach', ancestor)
+        self.git(child, 'add', '--', 'nested')
+        self.git(child, 'commit', '-qm', 'incoming older nested pin')
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'incoming child with older nested pin')
+        incoming_root = self.git(writer, 'rev-parse', 'HEAD')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+        result = sync.pull(wiki, self.state)
+        self.assertEqual(result['status'], 'needs-approval')
+        candidate = Path(result['candidate_worktree'])
+        candidate_child = candidate / self.child_path
+        self.assertEqual(self.git(candidate_child / 'nested', 'rev-parse', 'HEAD'), retained)
+        candidate_child_head = self.git(candidate_child, 'rev-parse', 'HEAD')
+        self.assertEqual(self.git(candidate, 'rev-parse', f'HEAD:{self.child_path}'), candidate_child_head)
+        self.assertEqual(self.git(candidate_child, 'rev-parse', 'HEAD:nested'), retained)
+        self.assertEqual(self.git(candidate, 'rev-list', '--parents', '-n', '1', 'HEAD').split()[1],
+                         incoming_root)
+        Wiki(candidate).require_valid()
+        sync.manual_review(wiki, self.state, result['operation_id'])
+        sync.accept(wiki, self.state, result['operation_id'], result['revision'])
+        self.assertEqual(sync.apply(wiki, self.state, result['operation_id'])['status'], 'applied')
+
     def test_retry_after_root_ff_refuses_foreign_child_mismatch(self):
         _, incoming_root = self.incoming_child_and_root_pin()
         wiki = Wiki(self.root)

@@ -250,6 +250,10 @@ def prepare_graph(operation, root_candidate, *, message=None):
             candidates_by_path[parent_path]['commit'] = parent_commit
             if parent_path == '.':
                 operation['candidate'] = parent_commit
+                candidates_by_path['.']['commit'] = parent_commit
+            else:
+                _propagate_candidate_pin(operation, parent_path, parent_commit, candidates_by_path,
+                                         live_by_path, root_candidate, message)
         candidates_by_path[relative] = dict(path=relative, candidate=str(candidate_path), commit=commit,
             branch=item['branch'], ours=item['ours'], theirs=incoming_pin)
 
@@ -268,16 +272,24 @@ def prepare_graph(operation, root_candidate, *, message=None):
                 unmerged=conflicts.decode('utf-8', errors='surrogateescape').split('\0'))]
             return CandidateGraph(root_candidate, ())
         merge_head = sync_git.text(parent_candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
+        staged = subprocess.run(sync_git.command(parent_candidate, 'diff', '--cached', '--quiet'),
+                                capture_output=True, env=gitops.environment()).returncode != 0
         if merge_head:
             parent_commit = sync_git.commit_merge(parent_candidate, message=message)
-        else:
+        elif staged:
             sync_git.text(parent_candidate, 'diff', '--cached', '--check')
             sync_git.run(parent_candidate, 'commit', '--no-gpg-sign', '-F', '-',
                          input=(message(parent_candidate) if callable(message) else 'wiki: sync pin fixup').encode())
             parent_commit = sync_git.head(parent_candidate)
+        else:
+            parent_commit = sync_git.head(parent_candidate)
         candidates_by_path[parent_path]['commit'] = parent_commit
         if parent_path == '.':
             operation['candidate'] = parent_commit
+            candidates_by_path['.']['commit'] = parent_commit
+        else:
+            _propagate_candidate_pin(operation, parent_path, parent_commit, candidates_by_path,
+                                     live_by_path, root_candidate, message)
 
     if sync_git.run(root_candidate, 'ls-files', '--unmerged', '-z'):
         return CandidateGraph(root_candidate, ())
@@ -332,6 +344,40 @@ def _registered_gitlink_conflict(unmerged, relative, live_by_path):
     return bool(paths)
 
 
+def _propagate_candidate_pin(operation, child_path, child_commit, candidates_by_path,
+                             live_by_path, root_candidate, message):
+    """Carry a finalized descendant pin through every already-materialized ancestor."""
+    while child_path != '.':
+        parent_path = max((name for name in live_by_path
+                           if name == '.' or child_path.startswith(name + '/')), key=len)
+        parent_repo = root_candidate if parent_path == '.' else Path(candidates_by_path[parent_path]['candidate'])
+        remainder = child_path if parent_path == '.' else child_path[len(parent_path) + 1:]
+        if _pin_at(parent_repo, remainder) != child_commit:
+            sync_git.text(parent_repo, 'add', '--', remainder)
+        if sync_git.run(parent_repo, 'ls-files', '--unmerged', '-z'):
+            return
+        merge_head = sync_git.text(parent_repo, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}',
+                                   check=False).strip()
+        staged = subprocess.run(sync_git.command(parent_repo, 'diff', '--cached', '--quiet'),
+                                capture_output=True, env=gitops.environment()).returncode != 0
+        if merge_head:
+            parent_commit = sync_git.commit_merge(parent_repo, message=message)
+        elif staged:
+            sync_git.text(parent_repo, 'diff', '--cached', '--check')
+            sync_git.run(parent_repo, 'commit', '--no-gpg-sign', '-F', '-',
+                         input=(message(parent_repo) if callable(message) else
+                                'wiki: sync pin fixup').encode())
+            parent_commit = sync_git.head(parent_repo)
+        else:
+            parent_commit = sync_git.head(parent_repo)
+        if parent_path == '.':
+            operation['candidate'] = parent_commit
+            candidates_by_path['.']['commit'] = parent_commit
+        else:
+            candidates_by_path[parent_path]['commit'] = parent_commit
+        child_path, child_commit = parent_path, parent_commit
+
+
 def _pin_at(root, relative, commit='HEAD'):
     spec = f'{commit}:{relative}'
     value = sync_git.text(root, 'rev-parse', '--verify', spec, check=False).strip()
@@ -343,6 +389,27 @@ def _pin_at(root, relative, commit='HEAD'):
 def _parent_path(path, graph_paths):
     parents = [name for name in graph_paths if name == '.' or path.startswith(name + '/')]
     return max(parents, key=len)
+
+
+def _porcelain_paths(repo):
+    """Return exact path/status pairs from Git's NUL-delimited porcelain output."""
+    records = sync_git.run(repo, 'status', '--porcelain=v1', '-z',
+                          '--ignore-submodules=none').split(b'\0')
+    result = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if len(record) < 4 or record[2:3] != b' ':
+            raise WikiError('Git returned malformed porcelain status')
+        code = record[:2].decode('ascii', errors='strict')
+        path = record[3:].decode('utf-8', errors='surrogateescape')
+        result.append((code, path))
+        if 'R' in code or 'C' in code:
+            index += 1
+    return result
 
 
 def verify_graph(candidate_graph):
@@ -401,13 +468,18 @@ def apply_graph(operation, revision, graph=None):
                 continue
             child_relative = child_path if path == '.' else child_path[len(path) + 1:]
             pin = _pin_at(repo, child_relative)
-            if pin != heads[child_path]:
+            applied_descendant = any(
+                name in heads and heads[name] == by_path[name]['candidate']
+                and by_path[name]['candidate'] != by_path[name]['ours']
+                and name.startswith(child_path + '/')
+                for name in by_path if name != '.')
+            if pin != heads[child_path] or applied_descendant:
                 expected.add(child_relative)
-        status = sync_git.text(repo, 'status', '--porcelain=v1', '--ignore-submodules=none').splitlines()
-        actual = {line[3:] for line in status}
+        status = _porcelain_paths(repo)
+        actual = {path for _, path in status}
         staged = subprocess.run(sync_git.command(repo, 'diff', '--cached', '--quiet'),
                                 capture_output=True, env=gitops.environment()).returncode
-        if staged or actual != expected or any(line[:2] not in (' M', 'M ', 'MM') for line in status):
+        if staged or actual != expected or any(code not in (' M', 'M ', 'MM') for code, _ in status):
             raise WikiError(f'live repository has unexpected edits before application: {path}: expected={expected}; actual={actual}; staged={staged}')
     items = list(reversed(operation.get('graph', [])))
     changed_paths = {item['path'] for item in operation.get('graph', [])
@@ -421,13 +493,13 @@ def apply_graph(operation, revision, graph=None):
             current = sync_git.head(repo)
             if branch != item['branch']:
                 raise WikiError('live parent branch changed after review')
-            status = sync_git.text(repo, 'status', '--porcelain=v1', '--ignore-submodules=none')
+            status = _porcelain_paths(repo)
             direct = [name for name in by_path if name != '.' and _parent_path(name, by_path) == '.']
             expected_paths = {name for name in direct if current == item['ours'] and any(
                 done in changed_paths and (done == name or done.startswith(name + '/')) for done in applied)}
-            actual_paths = {line[3:] for line in status.splitlines()}
-            if actual_paths != expected_paths or any(line[:2] not in (' M', 'M ', 'MM') for line in status.splitlines()):
-                raise WikiError(f'unexpected parent edits during graph application: {status.strip()}')
+            actual_paths = {name for _, name in status}
+            if actual_paths != expected_paths or any(code not in (' M', 'M ', 'MM') for code, _ in status):
+                raise WikiError(f'unexpected parent edits during graph application: {status}')
             snapshot_head = current
             snapshot_branch = branch
         else:
@@ -436,9 +508,9 @@ def apply_graph(operation, revision, graph=None):
             if descendants and sync_git.head(repo) == item['ours']:
                 branch = sync_git.text(repo, 'symbolic-ref', '--quiet', 'HEAD').strip()
                 snapshot_head = sync_git.head(repo)
-                status = sync_git.text(repo, 'status', '--porcelain=v1', '--ignore-submodules=none').splitlines()
-                actual_paths = {line[3:] for line in status}
-                if actual_paths != descendants or any(line[:2] not in (' M', 'M ', 'MM') for line in status):
+                status = _porcelain_paths(repo)
+                actual_paths = {name for _, name in status}
+                if actual_paths != descendants or any(code not in (' M', 'M ', 'MM') for code, _ in status):
                     raise WikiError(f'unexpected submodule edits during graph application: {path}: {status}')
                 if branch != item['branch']:
                     raise WikiError(f'live branch changed after review: {path}')
@@ -459,13 +531,13 @@ def apply_graph(operation, revision, graph=None):
         if path != '.':
             parent_path = _parent_path(path, by_path)
             parent_repo = root if parent_path == '.' else root / parent_path
-            status = sync_git.text(parent_repo, 'status', '--porcelain=v1', '--ignore-submodules=none').splitlines()
+            status = _porcelain_paths(parent_repo)
             direct_children = [name for name in by_path if name != '.' and _parent_path(name, by_path) == parent_path]
             expected_paths = {name if parent_path == '.' else name[len(parent_path) + 1:]
                               for name in direct_children if any(done in changed_paths and
                                   (done == name or done.startswith(name + '/')) for done in applied)}
-            actual_paths = {line[3:] for line in status}
-            if actual_paths != expected_paths or any(line[:2] not in (' M', 'M ', 'MM') for line in status):
+            actual_paths = {name for _, name in status}
+            if actual_paths != expected_paths or any(code not in (' M', 'M ', 'MM') for code, _ in status):
                 raise WikiError(f'unexpected parent edits during graph application: {parent_path}')
         candidate = Path(operation['_candidate_root']) if path == '.' else Path(operation['_candidate_root']) / path
         try:
