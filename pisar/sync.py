@@ -234,10 +234,20 @@ def prepare(wiki, state_dir, ident, *, merge=False):
             merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
             if merge_head:
                 unmerged = sync_git.run(candidate, 'ls-files', '--unmerged', '-z')
+                if unmerged and operation.get('live_graph') and len(operation['live_graph']) > 1:
+                    sync_graph.prepare_graph(operation, candidate,
+                        message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
+                    if operation.get('_graph_conflicts'):
+                        return dict(operation_id=ident, status='conflict', candidate=str(candidate),
+                                    child_conflicts=operation['_graph_conflicts'])
+                    unmerged = sync_git.run(candidate, 'ls-files', '--unmerged', '-z')
                 if unmerged:
                     return dict(operation_id=ident, status='conflict', candidate=str(candidate),
                                 unmerged=unmerged.decode('utf-8', errors='surrogateescape').split('\0'))
-                result = sync_git.commit_merge(candidate, message=_candidate_message(wiki, runtime, candidate, ident))
+                if sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip():
+                    result = sync_git.commit_merge(candidate, message=_candidate_message(wiki, runtime, candidate, ident))
+                else:
+                    result = sync_git.head(candidate)
             else:
                 result = sync_git.head(candidate)
         else:
@@ -249,15 +259,35 @@ def prepare(wiki, state_dir, ident, *, merge=False):
                 return dict(operation_id=ident, status='diverged', ours=operation['ours'],
                             theirs=operation['theirs'], requires_merge=True)
             if outcome['state'] == 'conflict':
-                return dict(operation_id=ident, status='conflict', candidate=str(candidate),
-                            unmerged=outcome['unmerged'].split('\0'))
-            result = outcome['candidate']
+                if operation.get('live_graph') and len(operation['live_graph']) > 1:
+                    operation['candidate'] = operation['ours']
+                    sync_graph.prepare_graph(operation, candidate,
+                        message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
+                    if operation.get('_graph_conflicts'):
+                        return dict(operation_id=ident, status='conflict', candidate=str(candidate),
+                                    child_conflicts=operation['_graph_conflicts'])
+                    remaining = sync_git.run(candidate, 'ls-files', '--unmerged', '-z')
+                    if not remaining:
+                        result = sync_git.head(candidate)
+                    else:
+                        return dict(operation_id=ident, status='conflict', candidate=str(candidate),
+                                    unmerged=remaining.decode('utf-8', errors='surrogateescape').split('\0'))
+                else:
+                    return dict(operation_id=ident, status='conflict', candidate=str(candidate),
+                                unmerged=outcome['unmerged'].split('\0'))
+            else:
+                result = outcome['candidate']
         if not sync_git._ancestor(candidate, operation['ours'], result) or not sync_git._ancestor(
                 candidate, operation['theirs'], result):
             raise WikiError('candidate no longer preserves the recorded O/T histories')
         operation['candidate'] = result
         if operation.get('live_graph') and len(operation['live_graph']) > 1:
-            sync_graph.prepare_graph(operation, candidate)
+            sync_graph.prepare_graph(operation, candidate,
+                                     message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
+            if operation.get('_graph_conflicts'):
+                return dict(operation_id=ident, status='conflict', candidate=str(candidate),
+                            child_conflicts=operation['_graph_conflicts'])
+            result = operation['candidate']
         else:
             operation['graph'] = [dict(path='.', candidate=result,
                                        tree=sync_git.text(candidate, 'rev-parse', f'{result}^{{tree}}').strip(),
@@ -409,7 +439,7 @@ def apply(wiki, state_dir, ident):
             if live.branch != operation['branch'] or live.head != operation['ours'] or live.head != operation['candidate']:
                 raise WikiError('publish-only local tips changed after review')
             return dict(operation_id=ident, status='not-applicable', head=live.head)
-        if live.branch == operation['branch'] and live.head == operation['candidate']:
+        if live.branch == operation['branch'] and live.head == operation['candidate'] and not graph_operation:
             candidate = _candidate(runtime, ident)
             _assert_candidate(operation, candidate)
             operation['status'] = 'applied'

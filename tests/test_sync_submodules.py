@@ -250,6 +250,191 @@ class SyncSubmoduleTests(unittest.TestCase):
         resumed = sync.apply(wiki, self.state, result['operation_id'])
         self.assertEqual(resumed['status'], 'applied')
 
+    def test_retained_unpublished_child_history_is_pinned_by_candidate_root(self):
+        incoming_child, _ = self.incoming_child_and_root_pin()
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        self.git(child, 'fetch', 'origin', 'main')
+        self.git(child, 'merge', '--ff-only', 'FETCH_HEAD')
+        (child / 'offline.md').write_text('Local child history.\n')
+        self.git(child, 'add', '--', 'offline.md')
+        self.git(child, 'commit', '-qm', 'offline child history')
+        local_child = self.git(child, 'rev-parse', 'HEAD')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local child history')
+        root_writer = self.base / 'root-only-writer'
+        subprocess.run(['git', 'clone', '--no-local', '-q', str(self.root_remote), str(root_writer)],
+                       env=self.env, check=True)
+        self.git(root_writer, 'config', 'user.name', 'Synthetic fixture')
+        self.git(root_writer, 'config', 'user.email', 'synthetic@example.invalid')
+        (root_writer / 'incoming.md').write_text('Incoming root history.\n')
+        self.git(root_writer, 'add', '--', 'incoming.md')
+        self.git(root_writer, 'commit', '-qm', 'incoming root change')
+        self.git(root_writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+        result = sync.pull(Wiki(self.root), self.state, merge=True)
+        candidate = Path(result['candidate_worktree'])
+        self.assertEqual(self.git(candidate / self.child_path, 'rev-parse', 'HEAD'), local_child)
+        self.assertEqual(self.git(candidate, 'rev-parse', f'HEAD:{self.child_path}'), local_child)
+        self.assertNotEqual(local_child, incoming_child)
+        self.assertEqual(self.git(candidate / self.child_path, 'status', '--porcelain=v1'), '')
+
+    def test_divergent_child_histories_merge_and_parent_pin_names_merge(self):
+        incoming_child, _ = self.incoming_child_and_root_pin()
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'local.md').write_text('Local child assertion.\n')
+        self.git(child, 'add', '--', 'local.md')
+        self.git(child, 'commit', '-qm', 'local child assertion')
+        local_child = self.git(child, 'rev-parse', 'HEAD')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local child assertion')
+
+        result = sync.pull(Wiki(self.root), self.state, merge=True)
+        if result['status'] != 'needs-approval':
+            self.fail(f'candidate preparation failed: {result}')
+        candidate_root = Path(result['candidate_worktree'])
+        candidate_child = candidate_root / self.child_path
+        child_commit = self.git(candidate_child, 'rev-parse', 'HEAD')
+        parents = self.git(candidate_child, 'rev-list', '--parents', '-n', '1', child_commit).split()
+        self.assertEqual(parents[1:], [local_child, incoming_child])
+        self.assertEqual(self.git(candidate_root, 'rev-parse', f'HEAD:{self.child_path}'), child_commit)
+        Wiki(candidate_root).require_valid()
+
+    def test_child_content_conflict_is_handed_off_for_manual_candidate_resolution(self):
+        writer = self.base / 'child-conflict-writer'
+        subprocess.run(['git', 'clone', '--no-local', '-q', str(self.root_remote), str(writer)],
+                       env=self.env, check=True)
+        self.git(writer, 'config', 'user.name', 'Synthetic fixture')
+        self.git(writer, 'config', 'user.email', 'synthetic@example.invalid')
+        self.git(writer, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive')
+        incoming = writer / self.child_path
+        self.git(incoming, 'config', 'user.name', 'Synthetic fixture')
+        self.git(incoming, 'config', 'user.email', 'synthetic@example.invalid')
+        self.git(incoming, 'switch', 'main')
+        (incoming / 'note.md').write_text(document('alpha-note', 'work/alpha', body='Remote conflicting line.'))
+        self.git(incoming, 'add', '--', 'note.md')
+        self.git(incoming, 'commit', '-qm', 'remote child edit')
+        incoming_child = self.git(incoming, 'rev-parse', 'HEAD')
+        self.git(incoming, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'pin remote child edit')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        local = self.root / self.child_path
+        self.git(local, 'config', 'user.name', 'Synthetic fixture')
+        self.git(local, 'config', 'user.email', 'synthetic@example.invalid')
+        (local / 'note.md').write_text(document('alpha-note', 'work/alpha', body='Local conflicting line.'))
+        self.git(local, 'add', '--', 'note.md')
+        self.git(local, 'commit', '-qm', 'local child edit')
+        local_child = self.git(local, 'rev-parse', 'HEAD')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local child edit')
+
+        result = sync.pull(Wiki(self.root), self.state, merge=True)
+        self.assertEqual(result['status'], 'conflict')
+        conflict = result['child_conflicts'][0]
+        candidate_child = Path(conflict['candidate'])
+        self.assertEqual(conflict['path'], self.child_path)
+        self.assertTrue(self.git(candidate_child, 'rev-parse', '--verify', 'MERGE_HEAD'))
+        (candidate_child / 'note.md').write_text(
+            document('alpha-note', 'work/alpha', body='Reviewed child resolution.'))
+        self.git(candidate_child, 'add', '--', 'note.md')
+        self.git(candidate_child, 'commit', '-qm', 'resolve child conflict')
+        prepared = sync.prepare(Wiki(self.root), self.state, result['operation_id'], merge=True)
+        self.assertEqual(prepared['status'], 'prepared')
+        candidate_root = Path(prepared['candidate_worktree'])
+        candidate_commit = self.git(candidate_child, 'rev-parse', 'HEAD')
+        self.assertEqual(self.git(candidate_root, 'rev-parse', f'HEAD:{self.child_path}'), candidate_commit)
+        self.assertEqual(self.git(candidate_child, 'rev-list', '--parents', '-n', '1', candidate_commit).split()[1:],
+                         [local_child, incoming_child])
+
+    def test_changed_grandchild_applies_child_first_and_finishes_clean(self):
+        incoming_child, _ = self.incoming_child_and_root_pin()
+        writer = self.base / 'root-writer'
+        child = writer / self.child_path
+        grandchild = child / 'nested'
+        self.git(grandchild, 'config', 'user.name', 'Synthetic fixture')
+        self.git(grandchild, 'config', 'user.email', 'synthetic@example.invalid')
+        (grandchild / 'grandchild.txt').write_text('Updated nested fixture.\n')
+        self.git(grandchild, 'add', '--', 'grandchild.txt')
+        self.git(grandchild, 'commit', '-qm', 'incoming grandchild update')
+        self.git(grandchild, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(child, 'add', '--', 'nested')
+        self.git(child, 'commit', '-qm', 'advance grandchild pin')
+        incoming_child = self.git(child, 'rev-parse', 'HEAD')
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'advance child pin')
+        incoming_root = self.git(writer, 'rev-parse', 'HEAD')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, result['operation_id'])
+        sync.accept(wiki, self.state, result['operation_id'], result['revision'])
+        applied = sync.apply(wiki, self.state, result['operation_id'])
+        self.assertEqual(applied['status'], 'applied')
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), incoming_root)
+        self.assertEqual(self.git(self.root / self.child_path, 'rev-parse', 'HEAD'), incoming_child)
+        self.assertEqual(self.git(self.root / self.child_path / 'nested', 'rev-parse', 'HEAD'),
+                         self.git(self.root / self.child_path, 'rev-parse', 'HEAD:nested'))
+        self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
+
+    def test_retry_after_root_ff_refuses_foreign_child_mismatch(self):
+        _, incoming_root = self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, result['operation_id'])
+        sync.accept(wiki, self.state, result['operation_id'], result['revision'])
+        original_save = sync._save
+        def interrupt_save(runtime, operation):
+            if operation.get('status') == 'applied':
+                raise OSError('injected journal interruption')
+            return original_save(runtime, operation)
+        sync._save = interrupt_save
+        try:
+            with self.assertRaisesRegex(OSError, 'journal interruption'):
+                sync.apply(wiki, self.state, result['operation_id'])
+        finally:
+            sync._save = original_save
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'foreign.md').write_text('Foreign child commit.\n')
+        self.git(child, 'add', '--', 'foreign.md')
+        self.git(child, 'commit', '-qm', 'foreign child commit')
+        foreign = self.git(child, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(WikiError, 'live graph changed|unexpected edits'):
+            sync.apply(wiki, self.state, result['operation_id'])
+        self.assertEqual(self.git(child, 'rev-parse', 'HEAD'), foreign)
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), incoming_root)
+
+    def test_incoming_url_change_is_refused_as_setup_change(self):
+        self.incoming_child_and_root_pin()
+        writer = self.base / 'root-writer'
+        manifest = writer / '.gitmodules'
+        manifest.write_text(manifest.read_text().replace(str(self.child_remote), '/synthetic/changed.git'))
+        self.git(writer, 'add', '--', '.gitmodules')
+        self.git(writer, 'commit', '-qm', 'change child URL')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        with self.assertRaisesRegex(WikiError, 'topology|URL|registration'):
+            sync.pull(Wiki(self.root), self.state)
+
+    def test_assume_unchanged_root_file_blocks_before_child_application(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        sync.manual_review(wiki, self.state, result['operation_id'])
+        sync.accept(wiki, self.state, result['operation_id'], result['revision'])
+        initial_child = self.git(self.root / self.child_path, 'rev-parse', 'HEAD')
+        self.git(self.root, 'update-index', '--assume-unchanged', 'work/.domain.toml')
+        with (self.root / 'work/.domain.toml').open('a') as stream:
+            stream.write('\n# hidden local change\n')
+        with self.assertRaisesRegex(WikiError, 'unsupported|assume|skip-worktree|sparse|dirty|edits'):
+            sync.apply(wiki, self.state, result['operation_id'])
+        self.assertEqual(self.git(self.root / self.child_path, 'rev-parse', 'HEAD'), initial_child)
+
 
 if __name__ == '__main__':
     unittest.main()

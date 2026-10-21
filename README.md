@@ -633,8 +633,11 @@ Sync prepares a complete disposable candidate graph, checks the wiki before
 changing any live branch, and keeps publication separate. It supports the
 existing initialized submodule graph, including nested repositories, when each
 repository is clean, attached to its owner-selected branch, and pinned by its
-parent at its checked-out commit. Topology changes and uninitialized children
-are refused. Task-file changes are blocked until task validation is available.
+parent at its checked-out commit. Each incoming child pin is reconciled with
+the live child history; divergent histories merge in the child candidate before
+the parent candidate records that exact commit. Topology and URL changes, and
+uninitialized children, are refused. Task-file changes are blocked until task
+validation is available.
 
 ```sh
 pisar sync pull --repo .

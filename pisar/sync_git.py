@@ -50,7 +50,7 @@ def _git_path(repo, name):
     return value if value.is_absolute() else Path(repo) / value
 
 
-def observe(repo):
+def observe(repo, *, allow_dirty=False):
     repo = Path(repo).resolve()
     top = Path(text(repo, 'rev-parse', '--show-toplevel').strip()).resolve()
     if top != repo:
@@ -59,8 +59,8 @@ def observe(repo):
     if not branch.startswith('refs/heads/'):
         raise WikiError('sync requires an attached local branch')
     current = head(repo)
-    if text(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
-            '--ignore-submodules=none'):
+    if not allow_dirty and text(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
+                                 '--ignore-submodules=none'):
         raise WikiError('sync requires a clean repository')
     for record in filter(None, text(repo, 'ls-files', '-v', '-z').split('\0')):
         if record[:1].islower() or record.startswith('S '):
