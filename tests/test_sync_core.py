@@ -1977,6 +1977,84 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(sync_git.head(self.root), before)
         self.assertEqual(code, 2)
 
+    def test_conflicts_only_conflict_followup_requires_review_before_auto_apply(self):
+        relative = 'work/10-projects/alpha/note.md'
+        self.incoming(relative, document('note', 'work/alpha', body='Incoming conflicting assertion.'))
+        (self.root / relative).write_text(document('note', 'work/alpha', body='Local conflicting assertion.'))
+        commit_all(self.root)
+        wiki = Wiki(self.root)
+        first = sync.pull(wiki, self.state, merge=True)
+        self.assertEqual(first['status'], 'conflict')
+        ident = first['operation_id']
+        runtime = operations.Runtime(self.state, self.root)
+        candidate = sync._candidate(runtime, ident)
+        (candidate / relative).write_text(document('note', 'work/alpha', body='Owner resolution pending review.'))
+        commit_all(candidate)
+        with (candidate / relative).open('a') as stream:
+            stream.write('\nSingle-parent clarification.\n')
+        commit_all(candidate)
+        self.assertEqual(len(sync_git.parents(candidate, sync_git.head(candidate))), 1)
+        before = (sync_git.head(self.root), (self.root / '.git/index').read_bytes())
+        reviewer = mock.Mock(side_effect=WikiError('required conflict review'))
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            with self.assertRaisesRegex(WikiError, 'required conflict review'):
+                sync.pull(wiki, self.state, merge=True, review_backend=reviewer)
+        reviewer.assert_called_once()
+        self.assertEqual((sync_git.head(self.root), (self.root / '.git/index').read_bytes()), before)
+        self.assertEqual(sync._load(runtime, ident)['conflict_provenance'], 'conflicted')
+
+    def test_conflicts_only_clean_divergent_merge_uses_reduced_coverage(self):
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Clean incoming assertion.'))
+        (self.root / 'local.txt').write_text('Independent local change.\n')
+        commit_all(self.root)
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        reviewer = mock.Mock(side_effect=AssertionError('clean merge called reviewer'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            result = sync.pull(Wiki(self.root), self.state, merge=True, review_backend=reviewer)
+        self.assertEqual(result['status'], 'applied-automatically')
+        self.assertEqual(result['semantic_review']['label'], 'not semantically reviewed')
+        self.assertEqual(len(sync_git.parents(self.root, sync_git.head(self.root))), 2)
+        operation = sync._load(operations.Runtime(self.state, self.root), result['operation_id'])
+        self.assertEqual(operation['conflict_provenance'], 'clean')
+        self.assertEqual(operation['review']['kind'], 'reduced-coverage')
+        reviewer.assert_not_called()
+
+    def test_conflicts_only_unknown_provenance_requires_review(self):
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Incoming assertion.'))
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        sync.prepare(wiki, self.state, ident)
+        runtime = operations.Runtime(self.state, self.root)
+        operation = sync._load(runtime, ident)
+        operation.pop('conflict_provenance', None)
+        operation['revision'] = sync._revision(operation)
+        sync._save(runtime, operation)
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            with self.assertRaisesRegex(WikiError, 'unknown provenance review'):
+                sync.semantic_review(wiki, self.state, ident,
+                    backend=mock.Mock(side_effect=WikiError('unknown provenance review')))
+
+    def test_reduced_coverage_validation_refuses_conflict_provenance(self):
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Incoming assertion.'))
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        sync.prepare(wiki, self.state, ident)
+        runtime = operations.Runtime(self.state, self.root)
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            sync.semantic_review(wiki, self.state, ident)
+            operation = sync._load(runtime, ident)
+            operation['conflict_provenance'] = 'conflicted'
+            with self.assertRaisesRegex(WikiError, 'stale or ineligible'):
+                sync_review.validate_reduced_coverage(runtime, operation)
+
     def test_conflicts_only_auto_pull_applies_clean_fast_forward_without_model(self):
         incoming = self.incoming('work/10-projects/alpha/note.md',
                                  document('note', 'work/alpha', body='Incoming assertion.'))

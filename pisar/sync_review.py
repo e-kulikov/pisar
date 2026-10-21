@@ -125,7 +125,7 @@ def validate_reduced_coverage(runtime, operation):
             or review.get('git_revision') != operation.get('revision')
             or semantic.get('git_revision') != operation.get('revision')
             or operation.get('resolver_result') or operation.get('resolver_proposal')
-            or len(sync_git.parents(candidate, operation['candidate'])) >= 2):
+            or operation.get('conflict_provenance') != 'clean'):
         raise WikiError('reduced-coverage authorization is stale or ineligible')
     revision = _candidate_revision(operation, requests(Wiki(runtime.root), operation, candidate), current)
     token = operations.fingerprint({'authorization': 'conflicts-only-clean', 'candidate_revision': revision})
@@ -623,7 +623,7 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
                     'reports': cached,
                     'policy': current_policy.__dict__, 'reused': True}
         if (current_policy.review == 'conflicts'
-                and len(sync_git.parents(candidate, operation['candidate'])) < 2
+                and operation.get('conflict_provenance') == 'clean'
                 and (review_requests or current_policy.approval != 'auto')):
             if current_policy.approval == 'auto' and review_requests and not (
                     operation.get('resolver_result') or operation.get('resolver_proposal')):

@@ -339,10 +339,18 @@ def discover(root, commit='HEAD'):
     return tuple(result)
 
 
-def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
+def prepare_graph(operation, root_candidate, *, message=None, ruwana=None, on_conflict=None):
     """Reconcile every incoming pin with its live child, bottom-up."""
     from . import operations, sync
     operation.pop('_graph_conflicts', None)
+
+    def note_conflict():
+        operation['conflict_provenance'] = 'conflicted'
+        if on_conflict is not None:
+            on_conflict()
+
+    if sync_git.run(root_candidate, 'ls-files', '--unmerged', '-z'):
+        note_conflict()
     root = Path(operation['root']).resolve()
     live = discover(root, operation['ours'])
     original_urls = {path: url for path, (url, _) in _links(root, operation['ours']).items()}
@@ -455,6 +463,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
         elif commit is None and existing_merge == incoming_pin:
             unmerged = sync_git.run(candidate_path, 'ls-files', '--unmerged', '-z')
             if unmerged:
+                note_conflict()
                 if _registered_gitlink_conflict(unmerged, relative, live_by_path):
                     candidates_by_path[relative] = dict(path=relative, candidate=str(candidate_path),
                         commit=candidate_head, branch=item['branch'], ours=item['ours'], theirs=incoming_pin)
@@ -478,6 +487,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
                 raise WikiError(f'could not merge incoming submodule history: {relative}: {merge.stderr.decode(errors="replace").strip()}; status={status_before}')
             if sync_git.run(candidate_path, 'ls-files', '--unmerged', '-z'):
                 unmerged = sync_git.run(candidate_path, 'ls-files', '--unmerged', '-z')
+                note_conflict()
                 if _registered_gitlink_conflict(unmerged, relative, live_by_path):
                     candidates_by_path[relative] = dict(path=relative, candidate=str(candidate_path),
                         commit=candidate_head, branch=item['branch'], ours=item['ours'], theirs=incoming_pin)
@@ -492,6 +502,8 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
             sync_git.text(candidate_path, 'switch', '--detach', commit)
         sync_git.text(parent_candidate, 'add', '--', remainder)
         unresolved = sync_git.run(parent_candidate, 'ls-files', '--unmerged', '-z')
+        if unresolved:
+            note_conflict()
         if not unresolved:
             merge_head = sync_git.text(parent_candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
             staged = subprocess.run(sync_git.command(parent_candidate, 'diff', '--cached', '--quiet'),
@@ -525,6 +537,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
         remainder = relative if parent_path == '.' else relative[len(parent_path) + 1:]
         sync_git.text(parent_candidate, 'add', '--', remainder)
         if sync_git.run(parent_candidate, 'ls-files', '--unmerged', '-z'):
+            note_conflict()
             conflicts = sync_git.run(parent_candidate, 'ls-files', '--unmerged', '-z')
             operation['_graph_conflicts'] = [dict(path=parent_path, candidate=str(parent_candidate),
                 unmerged=conflicts.decode('utf-8', errors='surrogateescape').split('\0'))]
@@ -550,6 +563,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None):
                                      live_by_path, root_candidate, message)
 
     if sync_git.run(root_candidate, 'ls-files', '--unmerged', '-z'):
+        note_conflict()
         return CandidateGraph(root_candidate, ())
     candidates = []
     for item in live:

@@ -547,6 +547,44 @@ class SyncSubmoduleTests(unittest.TestCase):
         self.assertEqual(self.git(candidate_root, 'rev-parse', f'HEAD:{self.child_path}'), child_commit)
         Wiki(candidate_root).require_valid()
 
+    def test_child_conflict_under_root_fast_forward_keeps_required_review(self):
+        from unittest import mock
+        from pisar import operations, settings, sync_git, sync_review
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'note.md').write_text(document('alpha-note', 'work/alpha', body='Local child decision.'))
+        commit_all(child)
+        # Make the frozen local pin available without advancing the incoming child branch.
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/local-fixture')
+        commit_all(self.root)
+        ours = sync_git.head(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'main')
+        _, theirs = self.incoming_child_and_root_pin(
+            child_metadata=document('alpha-note', 'work/alpha', body='Remote child decision.'))
+        self.assertTrue(sync_git._ancestor(self.root_remote, ours, theirs))
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        self.assertEqual(result['status'], 'conflict')
+        runtime = operations.Runtime(self.state, self.root)
+        ident = result['operation_id']
+        self.assertEqual(sync._load(runtime, ident)['conflict_provenance'], 'conflicted')
+        candidate_child = Path(result['child_conflicts'][0]['candidate'])
+        (candidate_child / 'note.md').write_text(document('alpha-note', 'work/alpha', body='Child resolution.'))
+        commit_all(candidate_child)
+        (candidate_child / 'clarification.txt').write_text('Child corrective commit.\n')
+        commit_all(candidate_child)
+        before = sync_git.head(self.root)
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        reviewer = mock.Mock(side_effect=WikiError('child conflict requires review'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            with self.assertRaisesRegex(WikiError, 'child conflict requires review'):
+                sync.pull(wiki, self.state, review_backend=reviewer)
+        reviewer.assert_called_once()
+        self.assertEqual(sync_git.head(self.root), before)
+        self.assertEqual(sync._load(runtime, ident)['conflict_provenance'], 'conflicted')
+
     def test_child_content_conflict_is_handed_off_for_manual_candidate_resolution(self):
         writer = self.base / 'child-conflict-writer'
         subprocess.run(['git', 'clone', '--no-local', '-q', str(self.root_remote), str(writer)],
@@ -578,6 +616,9 @@ class SyncSubmoduleTests(unittest.TestCase):
 
         result = sync.pull(Wiki(self.root), self.state, merge=True)
         self.assertEqual(result['status'], 'conflict')
+        from pisar.operations import Runtime
+        self.assertEqual(sync._load(Runtime(self.state, self.root), result['operation_id'])
+                         .get('conflict_provenance'), 'conflicted')
         conflict = result['child_conflicts'][0]
         candidate_child = Path(conflict['candidate'])
         self.assertEqual(conflict['path'], self.child_path)
@@ -597,6 +638,14 @@ class SyncSubmoduleTests(unittest.TestCase):
         candidate_commit = self.git(candidate_child, 'rev-parse', 'HEAD')
         self.assertEqual(candidate_commit, followup)
         self.assertEqual((candidate_child / 'followup.txt').read_text(), 'Followup candidate correction.\n')
+        from unittest import mock
+        from pisar import sync_review
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            with self.assertRaisesRegex(WikiError, 'required child conflict review'):
+                sync.semantic_review(Wiki(self.root), self.state, result['operation_id'],
+                    backend=mock.Mock(side_effect=WikiError('required child conflict review')))
+
         self.assertEqual(self.git(candidate_root, 'rev-parse', f'HEAD:{self.child_path}'), candidate_commit)
         self.assertEqual(self.git(candidate_child, 'rev-list', '--parents', '-n', '1', candidate_commit).split()[1:],
                          [resolution])

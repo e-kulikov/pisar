@@ -63,6 +63,19 @@ def _save(runtime, operation):
     operations.write_json(_path(runtime, operation['operation_id']), operation)
 
 
+def _record_conflicts(runtime, operation):
+    """Persist conflict provenance before handing off or committing a resolution.
+
+    Save only this observation: the in-progress graph is not yet a sealed candidate.
+    Missing provenance after an interrupted clean preparation remains unknown.
+    """
+    operation['conflict_provenance'] = 'conflicted'
+    stored = _load(runtime, operation['operation_id'])
+    if stored.get('conflict_provenance') != 'conflicted':
+        stored['conflict_provenance'] = 'conflicted'
+        _save(runtime, stored)
+
+
 def _repo(wiki, relative):
     if relative not in ('.', ''):
         raise WikiError('sync operates on the complete wiki root')
@@ -295,7 +308,7 @@ def _validate_processing(candidate, revision=None):
 def _revision(operation):
     data = {key: operation[key] for key in ('root', 'repo', 'branch', 'remote', 'target_branch',
                                              'remote_fingerprint', 'kind', 'ours', 'theirs', 'candidate', 'tree', 'graph',
-                                             'publication_graph', 'bootstrap_map_fingerprint')
+                                             'publication_graph', 'bootstrap_map_fingerprint', 'conflict_provenance')
             if key in operation}
     return operations.fingerprint(data)
 
@@ -453,8 +466,11 @@ def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
             merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
             if merge_head:
                 unmerged = sync_git.run(candidate, 'ls-files', '--unmerged', '-z')
+                if unmerged:
+                    _record_conflicts(runtime, operation)
                 if unmerged and operation.get('live_graph') and len(operation['live_graph']) > 1:
                     sync_graph.prepare_graph(operation, candidate, ruwana=ruwana,
+                        on_conflict=lambda: _record_conflicts(runtime, operation),
                         message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
                     if operation.get('_graph_conflicts'):
                         return dict(operation_id=ident, status='conflict', candidate=str(candidate),
@@ -478,9 +494,11 @@ def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
                 return dict(operation_id=ident, status='diverged', ours=operation['ours'],
                             theirs=operation['theirs'], requires_merge=True)
             if outcome['state'] == 'conflict':
+                _record_conflicts(runtime, operation)
                 if operation.get('live_graph') and len(operation['live_graph']) > 1:
                     operation['candidate'] = operation['ours']
                     sync_graph.prepare_graph(operation, candidate, ruwana=ruwana,
+                        on_conflict=lambda: _record_conflicts(runtime, operation),
                         message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
                     if operation.get('_graph_conflicts'):
                         return dict(operation_id=ident, status='conflict', candidate=str(candidate),
@@ -495,6 +513,7 @@ def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
                     return dict(operation_id=ident, status='conflict', candidate=str(candidate),
                                 unmerged=outcome['unmerged'].split('\0'))
             else:
+                operation.setdefault('conflict_provenance', 'clean')
                 result = outcome['candidate']
         if not sync_git._ancestor(candidate, operation['ours'], result) or not sync_git._ancestor(
                 candidate, operation['theirs'], result):
@@ -502,7 +521,8 @@ def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
         operation['candidate'] = result
         if operation.get('live_graph') and len(operation['live_graph']) > 1:
             sync_graph.prepare_graph(operation, candidate, ruwana=ruwana,
-                                     message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
+                on_conflict=lambda: _record_conflicts(runtime, operation),
+                message=lambda path, *_: _candidate_message(wiki, runtime, path, ident))
             if operation.get('_graph_conflicts'):
                 return dict(operation_id=ident, status='conflict', candidate=str(candidate),
                             child_conflicts=operation['_graph_conflicts'])
