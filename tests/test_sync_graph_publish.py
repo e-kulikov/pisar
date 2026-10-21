@@ -108,24 +108,35 @@ class SyncGraphPublishTests(unittest.TestCase):
              'work/10-projects/alpha/nested': {'url': str(self.f.grandchild_remote), 'branch': 'main'}})
         self.assertEqual(targets[-1].path, '.')
 
+    def _destination_without_incoming_pin(self, child):
+        destination = self.f.base / 'without-pin.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.f.child_remote), str(destination)],
+                       env=self.f.env, check=True)
+        baseline = self.f.git(child['repo'], 'rev-parse', 'HEAD')
+        self.f.git(destination, 'update-ref', 'refs/heads/main', baseline)
+        self.f.git(child['repo'], 'remote', 'add', 'destination', str(destination))
+
     def test_missing_pin_at_destination_blocks_publication(self):
         graph, op = self._candidate_graph()
         child = next(entry for entry in graph.repositories if entry['path'] != '.')
+        self._destination_without_incoming_pin(child)
         self.f.git(child['repo'], 'remote', 'remove', 'origin')
-        with self.assertRaisesRegex(WikiError, 'missing|unreachable|publication'):
+        with self.assertRaisesRegex(WikiError, 'required child pin is unavailable|final child pin is unavailable'):
             sync_graph.required_publication(graph, {'.': (op['remote'], op['target_branch']),
-                                                     'work/10-projects/alpha': ('missing-destination', 'main'),
-                                                     'work/10-projects/alpha/nested': ('origin', 'main')})
+                                                     'work/10-projects/alpha': ('destination', 'main'),
+                                                     'work/10-projects/alpha/nested': ('origin', 'main')},
+                                            require_remote_pins=True)
 
     def test_pin_available_only_in_wrong_remote_is_not_accepted(self):
         graph, op = self._candidate_graph()
         child = next(entry for entry in graph.repositories if entry['path'] != '.')
+        self._destination_without_incoming_pin(child)
         self.f.git(child['repo'], 'remote', 'add', 'wrong', str(self.f.child_remote))
-        # The configured destination must be selected by the caller, not any remote with the object.
-        with self.assertRaisesRegex(WikiError, 'missing|unreachable|publication'):
+        with self.assertRaisesRegex(WikiError, 'required child pin is unavailable|final child pin is unavailable'):
             sync_graph.required_publication(graph, {'.': (op['remote'], op['target_branch']),
-                                                     'work/10-projects/alpha': ('missing-destination', 'main'),
-                                                     'work/10-projects/alpha/nested': ('origin', 'main')})
+                                                     'work/10-projects/alpha': ('destination', 'main'),
+                                                     'work/10-projects/alpha/nested': ('origin', 'main')},
+                                            require_remote_pins=True)
 
     def test_historical_intermediate_pin_is_required_even_when_final_pin_is_available(self):
         base = self.f.base / 'history-check'
