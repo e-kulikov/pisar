@@ -517,6 +517,11 @@ def _check_intent(intent, operation, proposal, decision):
         raise WikiError('resolver commit intent no longer matches this operation/proposal/decision')
 
 
+def _iso_zone(stamp):
+    """Git prints UTC as 'Z' in strict ISO dates and ±hh:mm otherwise; the intent records ±hhmm."""
+    return '+0000' if stamp.endswith('Z') else stamp[-6:].replace(':', '')
+
+
 def _recover_commit(candidate, intent):
     """Recognize only the exact checked result; perform no new semantic/structural review."""
     commit = sync_git.head(candidate)
@@ -531,8 +536,8 @@ def _recover_commit(candidate, intent):
         expected.extend((environment[f'GIT_{role}_NAME'], environment[f'GIT_{role}_EMAIL'],
                          timestamp.removeprefix('@'), zone))
     if len(metadata) == 8:
-        metadata[3] = metadata[3][-6:].replace(':', '')
-        metadata[7] = metadata[7][-6:].replace(':', '')
+        metadata[3] = _iso_zone(metadata[3])
+        metadata[7] = _iso_zone(metadata[7])
     merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None
     expected_merge = intent['parents'][1] if len(intent['parents']) == 2 else None
     if (branch != intent['branch'] or tree != intent['tree']

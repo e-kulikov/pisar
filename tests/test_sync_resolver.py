@@ -266,6 +266,21 @@ class CandidateResolverToolTests(unittest.TestCase):
         self.assertEqual((self.repo / 'work/note.md').read_text(), 'combined resolution\n')
         self.assertEqual((self.repo / 'work/private.md').read_text(), 'private\n')
 
+    def test_recovery_accepts_a_utc_commit_whose_offset_git_prints_as_z(self):
+        # Git prints UTC dates as ...Z rather than ...+00:00; the recorded +0000 zone must still match.
+        identity = {'GIT_AUTHOR_NAME': 'Synthetic User', 'GIT_AUTHOR_EMAIL': 'synthetic@example.invalid',
+                    'GIT_COMMITTER_NAME': 'Synthetic User', 'GIT_COMMITTER_EMAIL': 'synthetic@example.invalid',
+                    'GIT_AUTHOR_DATE': '@1700000000 +0000', 'GIT_COMMITTER_DATE': '@1700000000 +0000'}
+        (self.repo / 'work' / 'note.md').write_text('utc resolution\n', encoding='utf-8')
+        sync_git.text(self.repo, 'add', '--', 'work/note.md')
+        sync_git.run(self.repo, 'commit', '-m', 'utc resolution', extra_env={**identity, 'TZ': 'UTC'})
+        commit = sync_git.head(self.repo)
+        intent = {'branch': 'refs/heads/candidate', 'message': 'utc resolution', 'environment': identity,
+                  'tree': sync_git.text(self.repo, 'rev-parse', f'{commit}^{{tree}}').strip(),
+                  'parents': [self.base]}
+        self.assertEqual(sync_resolver._recover_commit(self.repo, intent), {
+            'commit': commit, 'tree': intent['tree']})
+
 
 class AcceptanceDecisionTests(unittest.TestCase):
     def bundle(self, **overrides):

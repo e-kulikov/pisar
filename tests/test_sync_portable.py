@@ -1,6 +1,7 @@
 """Portable provenance gates apply to committed candidate state."""
 import hashlib
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -65,7 +66,8 @@ class SyncPortableTests(Fixture):
         repo, task_path, base = self._task_repo()
         theirs = self._commit_task_edit(repo, task_path, 'done task\n')
         records = {base: 'open', theirs: 'done'}
-        with patch.object(Ruwana, 'snapshot', self._snapshot_stub(records)):
+        with patch('pisar.sync.settings.ruwana', return_value=sys.executable), \
+                patch.object(Ruwana, 'snapshot', self._snapshot_stub(records)):
             sync._task_changes(repo, base, theirs, theirs)
 
     def test_sync_accepts_staged_tree_for_one_sided_task_status_change(self):
@@ -97,7 +99,8 @@ class SyncPortableTests(Fixture):
                        check=True, capture_output=True)
         theirs = self._commit_task_edit(repo, task_path, 'closed task\n')
         records = {base: 'open', ours: 'done', theirs: 'closed'}
-        with patch.object(Ruwana, 'snapshot', self._snapshot_stub(records)):
+        with patch('pisar.sync.settings.ruwana', return_value=sys.executable), \
+                patch.object(Ruwana, 'snapshot', self._snapshot_stub(records)):
             with self.assertRaisesRegex(WikiError, 'status'):
                 sync._task_changes(repo, ours, theirs, theirs)
 
