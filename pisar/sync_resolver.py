@@ -62,6 +62,20 @@ def _candidate_transaction(candidate, paths):
         raise
 
 
+@contextmanager
+def _preserve_index_on_failure(candidate):
+    """Git may refresh index stat data during read-only checks; preserve exact bytes on failure."""
+    index = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
+    if not index.is_absolute():
+        index = Path(candidate) / index
+    original = index.read_bytes()
+    try:
+        yield
+    except BaseException:
+        index.write_bytes(original)
+        raise
+
+
 def resolver_identity():
     agent = settings.semantic_policy().get('agent', 'claude')
     model = settings.agent_option(agent, 'model', 'resolver')[0]
@@ -218,7 +232,7 @@ class CandidateTools:
         self._staged.discard(path)
         self._authorized_report = None
         if self._transaction_checkpoint:
-            self._transaction_checkpoint(self, (path,))
+            self._transaction_checkpoint(self, (path,), 'write')
         return {'path': path, 'sha256': self._written[path]}
 
     def candidate_stage(self, paths):
@@ -232,6 +246,8 @@ class CandidateTools:
             actual = target.read_bytes() if target.is_file() else b''
             if _digest(actual) != self._written[name]:
                 raise WikiError(f'candidate bytes changed before staging: {name}')
+        if self._transaction_checkpoint:
+            self._transaction_checkpoint(self, paths, 'before_stage')
         sync_git.text(self.repo, 'add', '--', *paths)
         staged = set(p.decode('utf-8', errors='surrogateescape') for p in
                      sync_git.run(self.repo, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p)
@@ -240,7 +256,7 @@ class CandidateTools:
         self._staged = set(paths)
         self._verify_index()
         if self._transaction_checkpoint:
-            self._transaction_checkpoint(self, paths)
+            self._transaction_checkpoint(self, paths, 'stage')
         self._authorized_report = None
         return {'staged': sorted(self._staged)}
 
@@ -266,24 +282,42 @@ class CandidateTools:
                 raise WikiError(f'candidate staged bytes changed after resolver write: {name}')
         self._authorized_report = _digest(_canonical(report).encode())
 
-    def candidate_commit(self, report):
+    def candidate_commit(self, report, *, checked_tree=None):
         self._fresh()
         if not self._written or self._staged != set(self._written):
             raise WikiError('candidate write set must be fully staged before commit')
         if not self._authorized_report or _digest(_canonical(report).encode()) != self._authorized_report:
             raise WikiError('no accepted resolution is authorized for candidate commit')
-        self.authorize_commit(report)
-        if sync_git.text(self.repo, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip():
-            commit = sync_git.commit_merge(self.repo, message=report.get('summary', 'Resolve candidate conflict'))
-        else:
+        # Bind the commit to the already validated index tree. No commit exists
+        # until the caller has completed every resolver gate.
+        if checked_tree is None:
+            # Standalone CandidateTools callers retain their bounded tool
+            # contract. The operation approval path always supplies its tree
+            # after the full host validation sequence.
+            if sync_git.run(self.repo, 'diff-files', '--name-only'):
+                raise WikiError('candidate has unstaged changes before resolver commit')
+            if sync_git.run(self.repo, 'ls-files', '--others', '--exclude-standard', '-z'):
+                raise WikiError('candidate has untracked files before resolver commit')
             sync_git.text(self.repo, 'diff', '--cached', '--check')
-            sync_git.text(self.repo, 'commit', '--no-gpg-sign', '-m', report.get('summary', 'Resolve candidate'))
-            commit = sync_git.head(self.repo)
+            tree = sync_git.text(self.repo, 'write-tree').strip()
+        else:
+            tree = checked_tree
+        parents = [self.expected_head]
+        if self.expected_merge_head:
+            parents.append(self.expected_merge_head)
+        args = ['commit-tree', tree]
+        for parent in parents:
+            args.extend(('-p', parent))
+        commit = sync_git.text(self.repo, *args, '-m', report.get('summary', 'Resolve candidate')).strip()
+        branch = sync_git.text(self.repo, 'symbolic-ref', '--quiet', 'HEAD').strip()
+        sync_git.text(self.repo, 'update-ref', branch, commit, self.expected_head)
+        if self.expected_merge_head:
+            sync_git.text(self.repo, 'merge', '--quit')
         self.expected_head = commit
         self._written.clear()
         self._staged.clear()
         self._authorized_report = None
-        return {'commit': commit, 'tree': sync_git.text(self.repo, 'rev-parse', f'{commit}^{{tree}}').strip()}
+        return {'commit': commit, 'tree': tree}
 
 
 def acceptance_decision(review_bundle, policy, human_decision=None):
@@ -502,18 +536,37 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 if (report['confidence'] < policy['min_confidence'] or report['findings']
                         or any(item.get('disposition') in HARD_DISPOSITIONS for item in report['statements'])):
                     raise WikiError('resolver report does not satisfy automatic-resolution gates')
-            from .documents import check as check_documents
-            structural = check_documents(Wiki(candidate))
-            if not structural['ok']:
-                raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
-            staged_tree = sync_git.text(candidate, 'write-tree').strip()
-            sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
-            sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
-            sync._validate_processing(candidate, staged_tree)
-            operation['candidate'] = proposal['candidate_head']
-            operation['status'] = 'resolving'
-            tool.authorize_commit(report)
-            committed = tool.candidate_commit(report)
+            with _preserve_index_on_failure(candidate):
+                from .documents import check as check_documents
+                structural = check_documents(Wiki(candidate))
+                if not structural['ok']:
+                    raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
+                staged_tree = sync_git.text(candidate, 'write-tree').strip()
+                if sync_git.run(candidate, 'diff-files', '--name-only'):
+                    raise WikiError('candidate has unstaged changes before resolver commit')
+                if sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z'):
+                    raise WikiError('candidate has untracked files before resolver commit')
+                sync_git.text(candidate, 'diff', '--cached', '--check')
+                sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
+                sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
+                sync._validate_processing(candidate, staged_tree)
+                operation['candidate'] = proposal['candidate_head']
+                operation['status'] = 'resolving'
+                tool.authorize_commit(report)
+            committed = tool.candidate_commit(report, checked_tree=staged_tree)
+            # The graph and tree were checked against this exact index tree
+            # above. Record those checked values directly; do not call
+            # sync.prepare after advancing the candidate ref.
+            if operation.get('graph'):
+                operation['graph'][0]['candidate'] = committed['commit']
+                operation['graph'][0]['tree'] = committed['tree']
+            else:
+                operation['graph'] = [dict(path='.', candidate=committed['commit'],
+                                           tree=committed['tree'], branch=operation['branch'],
+                                           ours=operation['ours'])]
+            operation['candidate'] = committed['commit']
+            operation['tree'] = committed['tree']
+            operation['revision'] = sync._revision(operation)
             operation['resolver_result'] = {'commit': committed['commit'], 'tree': committed['tree'],
                                             'proposal_revision': revision,
                                             'resolver_identity': proposal['resolver_identity'],
@@ -524,8 +577,10 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             operation['accepted'] = None
             operation['semantic_review'] = None
             sync._save(runtime, operation)
-        # Re-run all Git, task, provenance and complete-wiki checks on the committed result.
-        prepared = sync.prepare(wiki, state_dir, ident, merge=True)
+        prepared = {'operation_id': ident, 'status': 'prepared',
+                    'candidate': committed['commit'], 'candidate_worktree': str(candidate),
+                    'revision': operation['revision'],
+                    'check': {'ok': True, 'errors': []}}
         if policy['approval'] == 'auto':
             reviewed = sync.semantic_review(wiki, state_dir, ident, backend=review_backend)
             from . import sync_resolver as resolver_module
@@ -602,14 +657,18 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             session_staged = set(initial_staged)
             session_index = initial_index
 
-            def checkpoint(tools, paths):
-                transaction['expected_files'].update({name: tools._written.get(name)
-                                                      for name in paths})
-                if not tools._staged:
-                    return
+            def checkpoint(tools, paths, phase):
                 index_path = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
                 if not index_path.is_absolute():
                     index_path = candidate / index_path
+                if phase == 'before_stage':
+                    if index_path.read_bytes() != transaction['expected_index']:
+                        raise WikiError('resolver candidate index changed outside its staging tool')
+                    return
+                transaction['expected_files'].update({name: tools._written.get(name)
+                                                      for name in paths})
+                if phase != 'stage':
+                    return
                 transaction['expected_index'] = index_path.read_bytes()
 
             for domain, paths in sorted(groups.items()):

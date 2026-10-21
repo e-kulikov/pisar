@@ -851,6 +851,29 @@ class SyncLifecycleTests(unittest.TestCase):
                          unrelated_index_content)
         sync_git.text(candidate, 'reset', '--quiet', 'HEAD', '--', work_rel)
 
+        staged_after_write_content = b'Concurrent staged-only edit after resolver write.\n'
+        staged_after_write_oid = sync_git.run(candidate, 'hash-object', '-w', '--stdin',
+                                              input=staged_after_write_content).decode().strip()
+
+        def index_edit_between_write_and_stage(context, tools):
+            if context['domain'] == 'personal':
+                current = context['files'][personal_rel]
+                tools.candidate_write(personal_rel, sha256(current.encode()).hexdigest(),
+                                      current + '\nResolver output before external staging.\n')
+                sync_git.text(candidate, 'update-index', '--cacheinfo',
+                              f'100644,{staged_after_write_oid},{personal_rel}')
+                tools.candidate_stage([personal_rel])
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'index changed outside its staging tool'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=index_edit_between_write_and_stage)
+        self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
+        self.assertEqual(sync_git.text(candidate, 'ls-files', '-s', '--', personal_rel).split()[1],
+                         staged_after_write_oid)
+        self.assertEqual(sync_git.run(candidate, 'cat-file', 'blob', staged_after_write_oid),
+                         staged_after_write_content)
+        sync_git.text(candidate, 'reset', '--quiet', 'HEAD', '--', personal_rel)
+
         def interrupted_after_stage(context, tools):
             if context['domain'] == 'personal':
                 current = context['files'][personal_rel]
@@ -905,6 +928,80 @@ class SyncLifecycleTests(unittest.TestCase):
         candidate = Path(approved['candidate_worktree'])
         self.assertIn('Resolver correction.', (candidate / personal_rel).read_text())
         self.assertIn('Resolver correction.', (candidate / work_rel).read_text())
+
+    def test_resolver_commit_uses_checked_tree_without_post_commit_prepare(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        candidate = Path(prepared['candidate_worktree'])
+        checked_tree = sync_git.text(candidate, 'write-tree').strip()
+        start_head = sync_git.head(candidate)
+
+        with mock.patch.object(sync, 'prepare', side_effect=AssertionError('post-commit check invoked')) as check:
+            result = sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                                  decision='Approve the candidate after all checks passed.')
+        check.assert_not_called()
+        self.assertEqual(result['status'], 'prepared')
+        self.assertEqual(sync_git.text(candidate, 'rev-parse', f'{result["candidate"]}^{{tree}}').strip(),
+                         checked_tree)
+        self.assertEqual(sync_git.text(candidate, 'rev-list', '--count', f'{start_head}..{result["candidate"]}').strip(),
+                         '1')
+
+    def test_every_resolver_commit_gate_failure_preserves_candidate_state(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        candidate = Path(prepared['candidate_worktree'])
+        index = candidate / sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip()
+        if not index.is_absolute():
+            index = candidate / index
+
+        def state():
+            files = []
+            for path in candidate.rglob('*'):
+                relative = path.relative_to(candidate)
+                if '.git' in relative.parts or path.is_dir():
+                    continue
+                if path.is_symlink():
+                    value = ('symlink', path.readlink().as_posix())
+                else:
+                    value = ('file', path.read_bytes(), path.stat().st_mode)
+                files.append((relative.as_posix(), value))
+            return sync_git.head(candidate), index.read_bytes(), tuple(sorted(files))
+
+        checks = [
+            ('structural', mock.patch('pisar.documents.check', return_value={'ok': False,
+                                                                              'errors': ['synthetic failure']})),
+            ('semantic', mock.patch('pisar.sync_review.policy', return_value=type(
+                'Policy', (), {'__dict__': {'approval': 'auto', 'min_confidence': 1.1}})())),
+            ('task', mock.patch.object(sync, '_task_changes', side_effect=WikiError('synthetic task failure'))),
+            ('originals', mock.patch.object(sync, '_validate_originals',
+                                            side_effect=WikiError('synthetic originals failure'))),
+            ('provenance', mock.patch.object(sync, '_validate_processing',
+                                             side_effect=WikiError('synthetic provenance failure'))),
+            ('authorization', mock.patch('pisar.sync_resolver.CandidateTools.authorize_commit',
+                                         side_effect=WikiError('synthetic authorization failure'))),
+        ]
+        for name, patcher in checks:
+            with self.subTest(check=name):
+                before = state()
+                with patcher, self.assertRaises(WikiError):
+                    sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                                 decision='Approve only after every gate passes.')
+                self.assertEqual(state(), before)
+
+        before = state()
+        with self.assertRaisesRegex(WikiError, 'owner decision'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'])
+        self.assertEqual(state(), before)
 
     def test_two_domain_native_conflict_resolution_preserves_merge_parents(self):
         domain(self.root, 'personal')
