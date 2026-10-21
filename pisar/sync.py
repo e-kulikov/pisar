@@ -93,12 +93,14 @@ def _target_ref(repo, target):
 
 def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=None):
     changed = set()
+    history_commits = set()
     for before, after in ((ours, result), (theirs, result)):
         raw = sync_git.run(candidate, 'diff', '--name-only', '-z', before, after)
         changed.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
     for base in (ours, theirs):
         commits = sync_git.text(candidate, 'rev-list', '--reverse', f'{base}..{result}').splitlines()
         for commit in commits:
+            history_commits.add(commit)
             raw = sync_git.run(candidate, 'diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z',
                                '-m', commit)
             changed.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
@@ -151,7 +153,8 @@ def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=N
             base_commits = sync_git.text(candidate, 'merge-base', '--all', ours, theirs).splitlines()
             if not base_commits:
                 raise WikiError('task-validation-unavailable: no common task history')
-            versions = {commit: snapshot(commit) for commit in set([*base_commits, ours, theirs, result])}
+            versions = {commit: snapshot(commit)
+                        for commit in set([*base_commits, ours, theirs, result, *history_commits])}
             known_paths = {task['path'] for tasks in versions.values() for task in tasks.values()}
             changed_task_paths = {name for name in changed if '.ruwana' in Path(name).parts}
             if not changed_task_paths <= known_paths:

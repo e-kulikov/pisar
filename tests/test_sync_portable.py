@@ -165,6 +165,41 @@ class SyncPortableTests(Fixture):
             sync._task_changes(self.root, base, base, result)
 
     @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
+    def test_invalid_intermediate_task_file_is_refused_even_when_restored(self):
+        from pisar.ruwana import Ruwana
+        from pisar.spaces import Wiki
+        adapter = Ruwana(Wiki(self.root), str(RUWANA))
+        task = adapter.ensure(Wiki(self.root).space('work/alpha'),
+                              dict(id='one', title='Agreed task', agreed=True),
+                              'wiki:work/alpha:call-one')
+        commit_all(self.root)
+        base = git(self.root, 'rev-parse', 'HEAD')
+        task_file = self.root / task['path']
+        original = task_file.read_bytes()
+        task_file.write_bytes(b'not = [valid TOML\n')
+        commit_all(self.root)
+        task_file.write_bytes(original)
+        commit_all(self.root)
+        tip = git(self.root, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(WikiError, 'task-validation-unavailable'):
+            sync._task_changes(self.root, base, tip, tip)
+
+    @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
+    def test_valid_intermediate_task_transition_remains_acceptable(self):
+        from pisar.ruwana import Ruwana
+        from pisar.spaces import Wiki
+        adapter = Ruwana(Wiki(self.root), str(RUWANA))
+        task = adapter.ensure(Wiki(self.root).space('work/alpha'),
+                              dict(id='one', title='Agreed task', agreed=True),
+                              'wiki:work/alpha:call-one')
+        commit_all(self.root)
+        base = git(self.root, 'rev-parse', 'HEAD')
+        adapter.run('done', task['id'], '--project', task['project'])
+        commit_all(self.root)
+        tip = git(self.root, 'rev-parse', 'HEAD')
+        sync._task_changes(self.root, base, tip, tip)
+
+    @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
     def test_space_root_submodule_task_update_uses_full_wiki_context(self):
         from pisar.ruwana import Ruwana
         from pisar.spaces import Wiki

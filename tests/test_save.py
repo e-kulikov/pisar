@@ -209,6 +209,31 @@ class SaveTests(Fixture):
                  self.base / 'missing-ruwana')
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
 
+    def test_interrupted_save_stays_incomplete_after_trailing_blank_line(self):
+        from pisar.operations import save
+        from pisar.provenance import committed_processing, find_processed
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source = self.external('unfinished save with harmless formatting\n')
+        path, plan = self.plan('pending-newline', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        binary = self.base / 'missing-ruwana'
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, binary)
+        meeting_path = self.alpha / 'meetings/launch-meeting.md'
+        meeting_path.write_bytes(meeting_path.read_bytes() + b'\n')
+        commit_all(self.root)
+        inventory = committed_processing(Wiki(self.root))
+        self.assertFalse(inventory.processed)
+        with self.assertRaisesRegex(WikiError, 'incomplete'):
+            find_processed(inventory, 'work/alpha', plan['source']['sha256'])
+        with self.assertRaisesRegex(WikiError, 'committed processing is incomplete'):
+            save(Wiki(self.root), self.base / 'fresh-pending-newline', path, binary)
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, binary)
+
     def test_completed_result_with_quoted_pending_footer_replays(self):
         from pisar.operations import save
         from pisar.spaces import Wiki

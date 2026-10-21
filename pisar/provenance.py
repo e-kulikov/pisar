@@ -9,7 +9,8 @@ from .safety import WikiError, sha256
 
 _PENDING_MEETING = re.compile(
     rb'\n## Ruwana references\n\nPending: operation `[a-z0-9][a-z0-9-]*` is incomplete\.'
-    rb' No task IDs claimed\.\n\nCurrent task status is authoritative only in ruwana\.\n\Z')
+    rb' No task IDs claimed\.\n\nCurrent task status is authoritative only in ruwana\.'
+    rb'(?:\r?\n)*\Z')
 
 
 @dataclass(frozen=True)

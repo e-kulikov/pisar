@@ -79,7 +79,7 @@ class ProvenanceTests(Fixture):
             'Synthetic meeting record.',
             '## Ruwana references\n\nPending: operation `save-interrupted` is incomplete. No task IDs claimed.\n\n'
             'Current task status is authoritative only in ruwana.')
-        (self.alpha / 'meetings/interrupted.md').write_text(pending)
+        (self.alpha / 'meetings/interrupted.md').write_text(pending + '\n')
         commit_all(self.root)
 
         inventory = committed_processing(Wiki(self.root))
