@@ -234,6 +234,33 @@ class SaveTests(Fixture):
         with self.assertRaisesRegex(WikiError, 'unavailable'):
             save(Wiki(self.root), self.state, path, binary)
 
+    def test_pending_status_survives_notes_whitespace_and_crlf(self):
+        from pisar.operations import save
+        from pisar.provenance import committed_processing, find_processed
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        binary = self.base / 'missing-ruwana'
+        source = self.external('unfinished source with status formatting variants\n')
+        path, plan = self.plan('pending-format-variants', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['meeting']['id'] = 'pending-format-variants'
+        plan['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, binary)
+        meeting_path = self.alpha / 'meetings/pending-format-variants.md'
+        for index, transform in enumerate((lambda content: content + b'\nRecovery note: retry after reboot.\n',
+                                           lambda content: content + b'  \n',
+                                           lambda content: content.replace(b'\n', b'\r\n'))):
+            with self.subTest(format=index):
+                meeting_path.write_bytes(transform(meeting_path.read_bytes()))
+                commit_all(self.root)
+                inventory = committed_processing(Wiki(self.root))
+                with self.assertRaisesRegex(WikiError, 'incomplete'):
+                    find_processed(inventory, 'work/alpha', plan['source']['sha256'])
+                with self.assertRaisesRegex(WikiError, 'committed processing is incomplete'):
+                    save(Wiki(self.root), self.base / f'fresh-format-{index}', path, binary)
+
     def test_completed_result_with_quoted_pending_footer_replays(self):
         from pisar.operations import save
         from pisar.spaces import Wiki

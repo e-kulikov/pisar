@@ -8,9 +8,18 @@ from .safety import WikiError, sha256
 
 
 _PENDING_MEETING = re.compile(
-    rb'\n## Ruwana references\n\nPending: operation `[a-z0-9][a-z0-9-]*` is incomplete\.'
-    rb' No task IDs claimed\.\n\nCurrent task status is authoritative only in ruwana\.'
-    rb'(?:\r?\n)*\Z')
+    rb'Pending: operation `[a-z0-9][a-z0-9-]*` is incomplete\. No task IDs claimed\.')
+
+
+def _has_pending_meeting_status(blob):
+    """Read the active generated status line, allowing harmless Markdown formatting edits."""
+    lines = blob.replace(b'\r\n', b'\n').replace(b'\r', b'\n').split(b'\n')
+    headings = [index for index, line in enumerate(lines) if line.strip() == b'## Ruwana references']
+    if not headings:
+        return False
+    section = lines[headings[-1] + 1:]
+    status = next((line.strip() for line in section if line.strip()), b'')
+    return _PENDING_MEETING.fullmatch(status) is not None
 
 
 @dataclass(frozen=True)
@@ -79,7 +88,7 @@ def committed_processing(wiki):
             continue
         meeting_ref = f'wiki:{meeting_space.address}:{meeting_meta.get("id", "")}'
         meeting_blob = _committed_blob(wiki, meeting_path)
-        if meeting_blob is not None and _PENDING_MEETING.search(meeting_blob):
+        if meeting_blob is not None and _has_pending_meeting_status(meeting_blob):
             pending_meetings.add((meeting_space.address, meeting_ref))
         sources = meeting_meta.get('sources', [])
         for source in sources if isinstance(sources, list) else ():
