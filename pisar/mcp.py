@@ -17,7 +17,7 @@ import sys
 from . import __version__
 from . import codex_reviewer, lesson
 from .codex_agent import pisar_command, server_environment
-from .operations import atomic_bytes
+from .operations import Runtime, atomic_bytes
 from .safety import WikiError, concrete_id, sha256
 from .spaces import Wiki
 
@@ -428,7 +428,11 @@ class Server:
             if name == 'pisar':
                 return self.text(self.capture([*self.pisar(), *check_pisar(args)]))
             if name == 'git':
-                return self.text(self.capture(git_command(self.root, check_git(args, self.root))))
+                checked = check_git(args, self.root)
+                if checked[0] in ('add', 'commit', 'mv'):
+                    with Runtime(self.state, self.root).writer():
+                        return self.text(self.capture(git_command(self.root, checked)))
+                return self.text(self.capture(git_command(self.root, checked)))
             if name == 'lesson_accept':
                 return self.text(self.accept(args))
             if name == 'lesson_review':

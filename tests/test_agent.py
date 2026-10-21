@@ -42,6 +42,35 @@ class AgentTests(Fixture):
                            *args, env=env or self.agent_env, ok=ok)
         return p, (json.loads(self.out.read_text()) if self.out.exists() else None)
 
+    def test_claude_mutation_hook_blocks_pending_sync_and_preserves_reads(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        operations.write_json(folder / 'sync-test.json',
+                              {'operation_id': 'sync-test', 'root': str(self.root.resolve()), 'status': 'prepared'})
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        target = self.root / 'untouched.md'
+        target.write_text('original')
+        for name, payload in [('Write', {'file_path': str(target), 'content': 'changed'}),
+                              ('Edit', {'file_path': str(target)}),
+                              ('Bash', {'command': 'git add untouched.md'})]:
+            result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': name, 'tool_input': payload}),
+                                    text=True, capture_output=True, env=call['env'], cwd=self.root)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('sync-test', result.stderr)
+        for command in ('git status --short', 'pisar sync close --operation sync-test',
+                        'pisar sync apply --operation sync-test'):
+            result = subprocess.run(hook, shell=True,
+                                    input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': command}}),
+                                    text=True, capture_output=True, env=call['env'], cwd=self.root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(), 'original')
+        self.assertEqual(subprocess.run(['git', '-C', str(self.root), 'diff', '--cached', '--name-only'],
+                                       env=self.env, text=True, capture_output=True).stdout, '')
+
     def test_starts_claude_in_the_root_with_an_isolated_config_in_the_state_dir(self):
         _, call = self.launch()
         self.assertEqual(Path(call['cwd']).resolve(), self.root.resolve())
@@ -129,12 +158,12 @@ class AgentTests(Fixture):
         _, call = self.launch()
         argv = call['argv']
         settings = json.loads(argv[argv.index('--settings') + 1])
-        self.assertEqual(settings, {'permissions': {'ask': [
+        self.assertEqual(settings['permissions'], {'ask': [
             'Bash(pisar lesson accept *)', 'Bash(pisar sync accept *)',
             'Bash(pisar sync apply *)', 'Bash(pisar sync manual-review *)',
             'Bash(pisar sync resolve-accept *)',
             'Bash(pisar sync publish --operation *)',
-        ]}})
+        ]})
 
     def test_sync_cli_actions_are_narrow_and_owner_decisions_ask(self):
         _, call = self.launch()

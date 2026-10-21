@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import json
+import shlex
 from . import claude_plugin, settings
 from .config import AGENTS, path as config_path
 from .operations import Runtime, outside_git
@@ -87,7 +88,7 @@ def session_options(agent, extra=()):
     return options
 
 
-def claude_command(executable, prompt, extra=(), mcp=None, options=(), plugin=None, workspace=None):
+def claude_command(executable, prompt, extra=(), mcp=None, options=(), plugin=None, workspace=None, mutation_guard=None):
     """Caller's own arguments come first, so variadic options cannot swallow them.
 
     MCP is strict: only servers from `mcp` (the root's .mcp.json) are loaded.
@@ -95,7 +96,10 @@ def claude_command(executable, prompt, extra=(), mcp=None, options=(), plugin=No
     """
     return [executable, *extra, *options,
             *(['--plugin-dir', str(plugin)] if plugin else []),
-            '--settings', json.dumps({'permissions': {'ask': list(CLAUDE_ASK)}}),
+            '--settings', json.dumps({'permissions': {'ask': list(CLAUDE_ASK)},
+                                     **({'hooks': {'PreToolUse': [{'matcher': 'Write|Edit|Bash',
+                                         'hooks': [{'type': 'command', 'command': mutation_guard}]}]}}
+                                        if mutation_guard else {})}),
             '--system-prompt', prompt,
             f'--tools={CLAUDE_TOOLS}',
             '--allowedTools', *CLAUDE_ALLOWED, *([workspace] if workspace else []),
@@ -138,7 +142,12 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     lessons = outside_git(runtime.base / 'lessons')
     plugin = claude_plugin.extract(config, settings.agent_options(agent, 'reviewer'))
     lessons.mkdir(parents=True, exist_ok=True, mode=0o700)
+    from .codex_agent import pisar_command
+    guard_command, guard_environment = pisar_command()
+    mutation_guard = shlex.join(['env', *(f'{key}={value}' for key, value in guard_environment.items()),
+                                *guard_command, '--root', str(root), '--state-dir', str(runtime.base),
+                                '--_agent-guard'])
     os.chdir(root)
     command = claude_command(executable, prompt_text(), extra, mcp_config(root),
-                             session_options(agent, extra), plugin, lesson_workspace_rule(runtime.base))
+                             session_options(agent, extra), plugin, lesson_workspace_rule(runtime.base), mutation_guard)
     os.execve(executable, command, env)

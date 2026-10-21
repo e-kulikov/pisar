@@ -131,7 +131,7 @@ def _blocking(runtime, relative, own):
 def _locked(wiki, state_dir, op, intent, body):
     """Run BODY(runtime, resumed_journal) under the writer lock; resumed is None for a fresh run."""
     runtime = Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer():
         journal = runtime.load(op)
         if journal and journal['status'] == 'incomplete':
             if journal['fingerprint'] != fingerprint(intent):

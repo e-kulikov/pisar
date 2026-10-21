@@ -275,7 +275,7 @@ def reject(wiki, directory, batch, ident, reason=None):
 
 def accept(wiki, directory, batch, ident, binary='ruwana'):
     runtime = Runtime(directory, wiki.root)
-    with runtime.lock():
+    with runtime.writer():
         dest, manifest = load(runtime, batch)
         if manifest['status'] != 'prepared':
             raise WikiError('batch preparation incomplete; rerun prepare')

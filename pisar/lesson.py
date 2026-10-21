@@ -403,7 +403,7 @@ def accept(wiki, state, ident, keep=(), mention_origin=False, skip_review=False)
     are never read again."""
     batch = Batch(wiki, state, ident)
     keeps = sorted({part.strip() for value in keep for part in value.split(',') if part.strip()})
-    with batch.runtime.lock():
+    with batch.runtime.writer():
         meta = batch.load()
         target = wiki.space(meta['to'], {meta['to'].split('/')[0]})
         if target.status != 'active':

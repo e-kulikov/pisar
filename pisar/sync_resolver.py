@@ -552,7 +552,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
     ruwana = sync._ruwana_binary(ruwana)
     runtime = operations.Runtime(state_dir, wiki.root)
     if revision is not None:
-        with runtime.lock():
+        with runtime.writer(ident):
             operation = sync._load(runtime, ident)
             proposal = operation.get('resolver_proposal')
             if operation.get('status') != 'resolution-pending' or not proposal:
@@ -707,7 +707,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                     'semantic_review': reviewed}
         return prepared
 
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = sync._load(runtime, ident)
         if operation.get('status') == 'resolution-pending':
             raise WikiError('operation already has a pending resolver proposal; inspect and approve its exact revision')

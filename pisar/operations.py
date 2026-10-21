@@ -129,6 +129,30 @@ class Runtime:
                 _HELD_LOCKS.reset(token)
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
+    def pending_sync(self):
+        """Return unfinished reservations; callers hold the shared writer lock."""
+        folder = safe_path(self.path, 'sync')
+        if not folder.is_dir():
+            return []
+        pending = []
+        for path in sorted(folder.glob('*.json')):
+            value = json.loads(safe_path(folder, path.name).read_text(encoding='utf-8'))
+            if value.get('status') not in ('published', 'closed', 'applied'):
+                pending.append(value)
+        return pending
+
+    def require_unreserved(self, operation_id=None):
+        for operation in self.pending_sync():
+            if operation.get('operation_id') != operation_id:
+                raise WikiError(f"unfinished sync operation {operation['operation_id']} reserves this wiki; "
+                                'finish or explicitly close it first')
+
+    @contextmanager
+    def writer(self, operation_id=None):
+        with self.lock():
+            self.require_unreserved(operation_id)
+            yield
+
     def journal_path(self, ident):
         concrete_id(ident, 'operation_id')
         return safe_path(self.path, f'operations/{ident}.json')
@@ -499,7 +523,7 @@ def capture(wiki, directory, space_address, ident, source, expected=None):
     operation = capture_operation(space, ident)
     payload = dict(space=space.address, id=ident, source=str(source), sha256=digest)
     runtime = Runtime(directory, wiki.root)
-    with runtime.lock():
+    with runtime.writer():
         # 0.3 named captures capture-<space id>-<id>; a retry must not be reported as a duplicate document.
         reject_legacy(runtime, f'capture-{space.id}-{ident}', space.path.relative_to(wiki.root).as_posix())
         journal = existing(runtime, operation, payload)
@@ -700,7 +724,7 @@ def save(wiki, directory, plan_path, binary='ruwana'):
     runtime = Runtime(directory, wiki.root)
     operation = plan['operation_id']
     reference = f'wiki:{owner.address}:{plan["meeting"]["id"]}'
-    with runtime.lock():
+    with runtime.writer():
         journal = existing(runtime, operation, plan)
         if journal is not None and journal['status'] == 'complete':
             try:

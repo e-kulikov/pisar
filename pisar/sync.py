@@ -392,8 +392,7 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
         theirs = sync_git.fetch_tip(repo, target.remote, target.branch)
         folder = runtime.path / 'sync'
         if folder.is_dir():
-            pending = [json.loads(path.read_text(encoding='utf-8')) for path in folder.glob('*.json')]
-            pending = [item for item in pending if item.get('status') not in ('published', 'closed', 'applied')]
+            pending = runtime.pending_sync()
             exact = next((item for item in pending if item.get('root') == str(wiki.root)
                           and item.get('kind') == kind and item.get('branch') == snapshot.branch
                           and item.get('ours') == snapshot.head and item.get('remote') == target.remote
@@ -406,7 +405,7 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
                             theirs=exact['theirs'], branch=exact['branch'], remote=target.remote,
                             target_branch=target.branch, reused=True)
             if pending:
-                raise WikiError('another unfinished sync operation reserves this wiki; finish it first')
+                runtime.require_unreserved()
         # The remote endpoint is re-read after fetch to catch a concurrent target change.
         if remote_fp != _remote_fingerprint(repo, target.remote):
             raise WikiError('sync remote changed during fetch')
@@ -436,7 +435,7 @@ def _operation(runtime, ident):
 def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
     ruwana = _ruwana_binary(ruwana)
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = _operation(runtime, ident)
         candidate = operation['_candidate_path']
         if operation.get('candidate') and operation.get('status') in ('applied', 'published'):
@@ -571,7 +570,7 @@ def inspect(wiki, state_dir, ident=None):
 def close(wiki, state_dir, ident):
     """Release an unfinished local reservation while retaining its candidate and journal."""
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = _load(runtime, ident)
         if operation.get('status') in ('applied', 'published'):
             raise WikiError('completed operations cannot be closed')
@@ -586,7 +585,7 @@ def close(wiki, state_dir, ident):
 def manual_review(wiki, state_dir, ident):
     from . import sync_review
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = _load(runtime, ident)
         if operation.get('status') != 'prepared' or not operation.get('candidate'):
             raise WikiError('only a sealed, structurally valid candidate can be manually reviewed')
@@ -608,7 +607,7 @@ def manual_review(wiki, state_dir, ident):
 def accept(wiki, state_dir, ident, revision, *, decision=None):
     from . import sync_review
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = _load(runtime, ident)
         current_policy_object = sync_review.policy()
         current_policy = current_policy_object.__dict__
@@ -687,7 +686,7 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
 
 def apply(wiki, state_dir, ident):
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = _load(runtime, ident)
         if operation.get('status') == 'applied':
             return dict(operation_id=ident, status='applied', head=operation['applied'])
@@ -759,7 +758,7 @@ def publish(wiki, state_dir, ident, *, dry_run=False, bootstrap_map=None):
                     commit=item.get('applied') or item.get('candidate'), graph=graph,
                     bootstrap_map_fingerprint=item.get('bootstrap_map_fingerprint'), dry_run=True)
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = _load(runtime, ident)
         if operation.get('status') == 'published':
             return dict(operation_id=ident, status='published', commit=operation['published'], already_reachable=True)

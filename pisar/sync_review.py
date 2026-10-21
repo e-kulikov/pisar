@@ -560,7 +560,7 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
     from datetime import datetime, timezone
     from . import sync
     runtime = operations.Runtime(state_dir, wiki.root)
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = sync._load(runtime, ident)
         if operation.get('status') not in ('prepared', 'reviewed') or not operation.get('candidate'):
             raise WikiError('semantic review requires a sealed prepared candidate')
@@ -620,7 +620,7 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
                     checked['model'] = current_policy.model
                 reports.append(checked)
     if not reports:
-        with runtime.lock():
+        with runtime.writer(ident):
             operation = sync._load(runtime, ident)
             if operation.get('revision') != frozen_revision or operation.get('status') not in ('prepared', 'reviewed'):
                 raise WikiError('sync review became stale while the reviewer was running')
@@ -638,7 +638,7 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
             sync._save(runtime, operation)
         return {'operation_id': ident, 'status': 'no-change', 'revision': token,
                 'candidate_revision': candidate_revision}
-    with runtime.lock():
+    with runtime.writer(ident):
         operation = sync._load(runtime, ident)
         candidate = sync._candidate(runtime, ident)
         sync._assert_candidate(operation, candidate)

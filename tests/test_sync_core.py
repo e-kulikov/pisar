@@ -201,6 +201,39 @@ class SyncLifecycleTests(unittest.TestCase):
                 'mappings': [{'path': path, 'sha256': digest, 'statement_ids': ['s1']}
                              for path, digest in written]}
 
+    def test_pending_sync_blocks_capture_cli_and_mcp_git_but_preserves_reads(self):
+        import io
+        from pisar import cli, mcp
+        self.incoming()
+        pending = sync.pull(Wiki(self.root), self.state)['operation_id']
+        before = sync_git.observe(self.root)
+        index = (self.root / '.git/index').read_bytes()
+        source = self.base / 'source.txt'
+        source.write_bytes(b'Synthetic capture')
+        with self.assertRaisesRegex(WikiError, pending):
+            operations.capture(Wiki(self.root), self.state, 'work/alpha', 'blocked', source)
+        with mock.patch('sys.stdout', new_callable=io.StringIO), mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.assertEqual(cli.main(['--root', str(self.root), '--state-dir', str(self.state),
+                                      'capture', '--space', 'work/alpha', '--id', 'blocked',
+                                      '--source', str(source)]), 1)
+        from pisar.codex_agent import pisar_command
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(),
+                            {**self.env, **pisar_command()[1]})
+        result = server.tool('pisar', {'args': ['capture', '--space', 'work/alpha', '--id', 'blocked',
+                                                '--source', str(source)]})
+        self.assertTrue(result.get('isError'), result)
+        self.assertIn(pending, result['content'][0]['text'])
+        note = 'work/10-projects/alpha/note.md'
+        result = server.tool('git', {'args': ['mv', note, note + '.moved']})
+        self.assertTrue(result.get('isError'), result)
+        self.assertIn(pending, result['content'][0]['text'])
+        self.assertFalse(server.tool('git', {'args': ['status', '--short']}).get('isError'))
+        self.assertEqual(sync_git.observe(self.root), before)
+        self.assertEqual((self.root / '.git/index').read_bytes(), index)
+        sync.close(Wiki(self.root), self.state, pending)
+        self.assertEqual(operations.capture(Wiki(self.root), self.state, 'work/alpha', 'allowed', source)['status'],
+                         'complete')
+
     def test_accept_only_records_decision_then_apply_moves_exact_candidate(self):
         incoming = self.incoming()
         wiki = Wiki(self.root)
@@ -478,7 +511,9 @@ class SyncLifecycleTests(unittest.TestCase):
         sync.manual_review(wiki, self.state, fetched['operation_id'])
         sync.accept(wiki, self.state, fetched['operation_id'], prepared['revision'])
         sync.apply(wiki, self.state, fetched['operation_id'])
-        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        from pisar.codex_agent import pisar_command
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(),
+                            {**self.env, **pisar_command()[1]})
         with mock.patch.object(server, '_confirm_sync') as confirm, \
                 mock.patch.object(sync, 'publish', return_value={'status': 'published'}):
             result = server.tool('sync_publish', {'operation': fetched['operation_id']})
