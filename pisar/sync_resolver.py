@@ -42,7 +42,8 @@ class CandidateTools:
 
     tool_names = TOOL_NAMES
 
-    def __init__(self, candidate, *, domain, allowed_paths, expected_head, initial_staged=None):
+    def __init__(self, candidate, *, domain, allowed_paths, expected_head, initial_staged=None,
+                 initial_index=None):
         raw_repo = Path(candidate)
         if raw_repo.is_symlink():
             raise WikiError('resolver candidate must not be a symlink')
@@ -68,6 +69,9 @@ class CandidateTools:
         self._initial_staged = (set(initial_staged) if initial_staged is not None else
                                 set(p.decode('utf-8', errors='surrogateescape') for p in
                                     sync_git.run(self.repo, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p))
+        self._initial_index = ({name: [tuple(entry) for entry in entries]
+                                for name, entries in initial_index.items()} if initial_index is not None
+                               else self._index_entries(self._initial_staged))
         for name in self.allowed_paths:
             path = self._path(name)
             self._observed[name] = _digest(path.read_bytes()) if path.is_file() else None
@@ -90,9 +94,10 @@ class CandidateTools:
         if not isinstance(name, str) or name not in self.allowed_paths:
             raise WikiError(f'resolver path is outside its bound changed-path scope: {name}')
         relative = PurePosixPath(name)
-        if ('.ruwana' in relative.parts or 'sources' in relative.parts
+        if ('.ruwana' in relative.parts or 'sources' in relative.parts or '.git' in relative.parts
+                or '.gitmodules' in relative.parts
                 or relative.name in ('.wiki.toml', '.domain.toml')):
-            raise WikiError(f'resolver cannot synthesize task, source or wiki metadata: {name}')
+            raise WikiError(f'resolver cannot synthesize task, source, wiki or Git topology metadata: {name}')
         path = self.repo.joinpath(*relative.parts)
         mode = sync_git.text(self.repo, 'ls-files', '-s', '--', name).split()
         if mode and mode[0] == '160000':
@@ -101,6 +106,38 @@ class CandidateTools:
                 or not path.resolve().is_relative_to(self.repo):
             raise WikiError(f'resolver refuses symlink or escaping path: {name}')
         return path
+
+    def _index_entries(self, paths):
+        entries = {}
+        if not paths:
+            return entries
+        raw = sync_git.run(self.repo, 'ls-files', '--stage', '-z', '--', *sorted(paths))
+        for record in raw.split(b'\0'):
+            if not record:
+                continue
+            try:
+                metadata, encoded_path = record.split(b'\t', 1)
+                mode, oid, stage = metadata.decode('ascii').split()
+                name = encoded_path.decode('utf-8', errors='surrogateescape')
+            except (ValueError, UnicodeDecodeError):
+                raise WikiError('Git returned malformed resolver index entries') from None
+            entries.setdefault(name, []).append((mode, oid, stage))
+        return entries
+
+    def _verify_index(self):
+        expected_paths = self._initial_staged | set(self._written)
+        entries = self._index_entries(expected_paths)
+        for name in expected_paths:
+            actual = entries.get(name, [])
+            if name not in self._written:
+                if actual != self._initial_index.get(name, []):
+                    raise WikiError(f'resolver changed an inherited staged index entry: {name}')
+                continue
+            if len(actual) != 1 or actual[0][2] != '0' or actual[0][0] not in ('100644', '100755'):
+                raise WikiError(f'resolver output is absent or unresolved in the Git index: {name}')
+            blob = sync_git.run(self.repo, 'cat-file', 'blob', actual[0][1])
+            if _digest(blob) != self._written[name]:
+                raise WikiError(f'resolver Git index blob differs from accepted output: {name}')
 
     def candidate_context(self):
         self._fresh()
@@ -157,6 +194,7 @@ class CandidateTools:
         if staged != self._initial_staged | set(paths):
             raise WikiError('candidate stage contains paths outside the resolver write set')
         self._staged = set(paths)
+        self._verify_index()
         self._authorized_report = None
         return {'staged': sorted(self._staged)}
 
@@ -171,6 +209,7 @@ class CandidateTools:
                          sync_git.run(self.repo, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p)
         if staged_now != self._initial_staged | self._staged:
             raise WikiError('candidate staged paths differ from the resolver write set')
+        self._verify_index()
         changed = set(p.decode('utf-8', errors='surrogateescape') for p in
                       sync_git.run(self.repo, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
         if changed - self.allowed_paths:
@@ -228,14 +267,16 @@ def acceptance_decision(review_bundle, policy, human_decision=None):
     return 'accepted'
 
 
-def resolve_proposal(candidate, domain, allowed_paths, backend, *, expected_head, supplemental_context=None):
+def resolve_proposal(candidate, domain, allowed_paths, backend, *, expected_head, supplemental_context=None,
+                     initial_staged=None, initial_index=None):
     """Run one bounded resolver against an immutable candidate revision.
 
     BACKEND receives only the scoped context and the four candidate tools. A report
     is returned for host policy and owner review; this function never commits.
     """
     tools = CandidateTools(candidate, domain=domain, allowed_paths=allowed_paths,
-                           expected_head=expected_head)
+                           expected_head=expected_head, initial_staged=initial_staged,
+                           initial_index=initial_index)
     context = tools.candidate_context()
     if supplemental_context:
         if supplemental_context.get('context_complete') is False:
@@ -366,7 +407,8 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 raise WikiError('operation has no pending resolver proposal')
             if revision != proposal.get('revision') or proposal.get('revision') != operations.fingerprint(
                     {key: proposal[key] for key in ('candidate_head', 'merge_head', 'reports', 'written', 'policy',
-                                                    'allowed_paths', 'resolver_identity')}):
+                                                    'allowed_paths', 'resolver_identity', 'initial_staged',
+                                                    'initial_index')}):
                 raise WikiError('resolver proposal revision is stale or invalid')
             if proposal.get('policy') != sync_review.policy().__dict__:
                 raise WikiError('resolver policy changed after proposal; run resolution again')
@@ -381,7 +423,8 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 raise WikiError('resolver merge parents changed after proposal')
             tool = CandidateTools(candidate, domain='*', allowed_paths=set(proposal['allowed_paths']),
                                   expected_head=proposal['candidate_head'],
-                                  initial_staged=proposal['initial_staged'])
+                                  initial_staged=proposal['initial_staged'],
+                                  initial_index=proposal['initial_index'])
             tool._written = dict(proposal['written'])
             tool._staged = set(proposal['written'])
             report = {'summary': 'Resolve semantic candidate', 'confidence': min(
@@ -399,6 +442,12 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                          sync_git.run(candidate, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p)
             if staged != set(proposal['initial_staged']) | set(proposal['written']):
                 raise WikiError('resolver staged paths changed after proposal')
+            changed = set(p.decode('utf-8', errors='surrogateescape') for p in
+                          sync_git.run(candidate, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
+            untracked = set(p.decode('utf-8', errors='surrogateescape') for p in
+                            sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0') if p)
+            if (changed | untracked) - set(proposal['allowed_paths']):
+                raise WikiError('candidate has changes outside the resolver proposal scope')
             policy = sync_review.policy().__dict__
             if policy['approval'] == 'manual' and (not isinstance(decision, str) or not decision.strip()):
                 raise WikiError('resolver commit requires a concrete owner decision')
@@ -406,6 +455,10 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 if (report['confidence'] < policy['min_confidence'] or report['findings']
                         or any(item.get('disposition') in HARD_DISPOSITIONS for item in report['statements'])):
                     raise WikiError('resolver report does not satisfy automatic-resolution gates')
+            from .documents import check as check_documents
+            structural = check_documents(Wiki(candidate))
+            if not structural['ok']:
+                raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
             operation['candidate'] = proposal['candidate_head']
             operation['status'] = 'resolving'
             tool.authorize_commit(report)
@@ -449,6 +502,12 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
         head = sync_git.head(candidate)
         unmerged = sync_git.run(candidate, 'ls-files', '--unmerged', '-z')
         if unmerged:
+            if head != (operation.get('candidate') or operation.get('ours')):
+                raise WikiError('conflict candidate commit changed before resolution')
+            merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}',
+                                       check=False).strip()
+            if merge_head != operation.get('theirs'):
+                raise WikiError('conflict candidate merge parent changed before resolution')
             paths = set()
             for record in unmerged.decode('utf-8', errors='surrogateescape').split('\0'):
                 if record:
@@ -458,30 +517,33 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             allowed = paths | changed
             if any('.ruwana' in Path(path).parts or 'sources' in Path(path).parts for path in allowed):
                 raise WikiError('resolver refuses source or task conflicts')
+            path_domains = sync_review.pinned_domains(candidate, operation, allowed)
             operation['candidate'] = head
         else:
             semantic = operation.get('semantic_review') or {}
             if not semantic or semantic.get('coverage') != 'all' or semantic.get('verdict') == 'clear':
                 raise WikiError('resolver requires a current semantic finding or Git conflict')
-            report_path = runtime.path / 'sync-reports' / ident / f'{semantic["revision"]}.json'
-            if semantic.get('report_path') != str(report_path) or not report_path.is_file() or report_path.is_symlink():
-                raise WikiError('stored semantic report is unavailable for resolution')
-            reports = json.loads(report_path.read_text(encoding='utf-8'))
+            sync._assert_candidate(operation, candidate)
+            requests, reports = sync_review.checked_stored_reports(wiki, runtime, operation, candidate)
             allowed = {path for item in reports for finding in item.get('findings', [])
                        for path in finding.get('paths', [])}
             if not allowed:
                 raise WikiError('semantic report has no resolvable path')
-            requests = sync_review.requests(wiki, operation, candidate)
+            path_domains = {path: request['domain'] for request in requests
+                            for path in request['changed_paths']}
+            if allowed - set(path_domains):
+                raise WikiError('semantic findings reference paths outside the checked candidate report')
             operation['candidate'] = head
         policy = sync_review.policy().__dict__
         initial_staged = sorted(p.decode('utf-8', errors='surrogateescape') for p in
                                 sync_git.run(candidate, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p)
+        index_probe = CandidateTools(candidate, domain='*', allowed_paths=allowed, expected_head=head,
+                                     initial_staged=set(initial_staged))
+        initial_index = {name: [list(entry) for entry in entries]
+                         for name, entries in index_probe._initial_index.items()}
         groups = {}
         for path in allowed:
-            parts = Path(path).parts
-            domain = parts[0] if parts else 'workspace'
-            if domain != 'workspace' and not (candidate / domain / '.domain.toml').is_file():
-                domain = 'workspace'
+            domain = path_domains[path]
             groups.setdefault(domain, set()).add(path)
         resolver = backend or _configured_backend(wiki, runtime.base)
         reports, written = [], {}
@@ -489,7 +551,8 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             supplementary = (next((item for item in requests if item['domain'] == domain), None) if not unmerged
                              else _conflict_context(wiki, candidate, operation, domain, paths))
             result = resolve_proposal(candidate, domain, paths, resolver, expected_head=head,
-                                      supplemental_context=supplementary)
+                                      supplemental_context=supplementary,
+                                      initial_staged=set(initial_staged), initial_index=initial_index)
             report = result['report']
             reports.append(report)
             for mapping in report['mappings']:
@@ -499,12 +562,22 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
         merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None
         revision_value = {'candidate_head': head, 'merge_head': merge_head, 'reports': reports,
                           'written': written, 'policy': policy, 'allowed_paths': sorted(allowed),
-                          'resolver_identity': resolver_identity()}
+                          'resolver_identity': resolver_identity(), 'initial_staged': initial_staged,
+                          'initial_index': initial_index}
         proposal = {**revision_value, 'initial_staged': initial_staged,
                     'revision': operations.fingerprint(revision_value),
                     'recorded_at': datetime.now(timezone.utc).isoformat()}
+        proposal_dir = runtime.path / 'sync-resolver-reports' / ident
+        proposal_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        proposal_path = proposal_dir / f'{proposal["revision"]}.json'
+        if proposal_path.is_symlink():
+            raise WikiError('stored resolver proposal path is unsafe')
+        operations.atomic_bytes(proposal_path, (json.dumps(proposal, ensure_ascii=False, indent=2) + '\n').encode())
         operation['candidate'] = head
         operation['resolver_proposal'] = proposal
+        revisions = operation.setdefault('resolver_proposal_revisions', [])
+        if proposal['revision'] not in revisions:
+            revisions.append(proposal['revision'])
         operation['status'] = 'resolution-pending'
         operation['review'] = None
         operation['accepted'] = None

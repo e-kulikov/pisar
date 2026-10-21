@@ -141,6 +141,31 @@ class SyncLifecycleTests(unittest.TestCase):
         self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
         return self.git(self.clone, 'rev-parse', 'HEAD')
 
+    def _needs_decision(self, request):
+        path = request['changed_paths'][0]
+        quote = request['versions']['candidate'][path]
+        return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                'domain': request['domain'], 'model': 'synthetic-A',
+                'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                'context_complete': True, 'verdict': 'needs_decision', 'statements': [],
+                'findings': [{'id': 'f1', 'category': 'contradiction', 'paths': [path],
+                              'evidence_quotes': [quote], 'explanation': 'Synthetic conflict.',
+                              'options': [], 'question': 'Which statement?'}],
+                'summary': 'Owner decision required.'}
+
+    def _scoped_resolution(self, context, tools):
+        from hashlib import sha256
+        written = []
+        for path, current in context['files'].items():
+            value = current + '\nResolver correction.\n'
+            result = tools.candidate_write(path, sha256(current.encode()).hexdigest(), value)
+            written.append((path, result['sha256']))
+        tools.candidate_stage([path for path, _ in written])
+        return {'summary': 'Scoped resolution', 'confidence': 0.99, 'context_complete': True,
+                'statements': [{'id': 's1', 'disposition': 'preserved'}], 'findings': [],
+                'mappings': [{'path': path, 'sha256': digest, 'statement_ids': ['s1']}
+                             for path, digest in written]}
+
     def test_accept_only_records_decision_then_apply_moves_exact_candidate(self):
         incoming = self.incoming()
         wiki = Wiki(self.root)
@@ -355,6 +380,11 @@ class SyncLifecycleTests(unittest.TestCase):
         sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
         applied = sync.apply(wiki, self.state, fetched['operation_id'])
         self.assertEqual(applied['head'], completed['candidate'])
+        feedback = sync.feedback(wiki, self.state, fetched['operation_id'], 'correct')
+        self.assertEqual(feedback['resolver_proposal_revision'], proposal['revision'])
+        resolver_group = next(row for row in sync.feedback_summary(wiki, self.state)['groups']
+                              if row['review_kind'] == 'resolver')
+        self.assertEqual(resolver_group['correct'], 1)
 
     def test_auto_resolver_commits_candidate_then_requires_fresh_clear_review_before_apply(self):
         from hashlib import sha256
@@ -664,6 +694,128 @@ class SyncLifecycleTests(unittest.TestCase):
         sync._save(runtime, operation)
         with self.assertRaisesRegex(WikiError, 'decision binding'):
             sync.apply(wiki, self.state, fetched['operation_id'])
+
+    def test_resolve_rejects_stale_semantic_candidate_before_backend_call(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        candidate = Path(prepared['candidate_worktree'])
+        (candidate / rel).write_text(document('note', 'work/alpha', body='Externally corrected fact.'))
+        self.git(candidate, 'add', rel)
+        self.git(candidate, 'commit', '-qm', 'external candidate correction')
+        calls = []
+        with self.assertRaisesRegex(WikiError, 'candidate commit changed'):
+            sync.resolve(wiki, self.state, fetched['operation_id'],
+                         backend=lambda context, tools: (calls.append(context),
+                                                         self._scoped_resolution(context, tools))[1])
+        self.assertEqual(calls, [])
+
+    def test_resolve_validates_persisted_finding_report_before_using_its_paths(self):
+        rel = 'work/10-projects/alpha/note.md'
+        unrelated = 'work/10-projects/alpha/other.md'
+        (self.root / unrelated).write_text(document('other', 'work/alpha', body='Unchanged.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        operation = sync._load(operations.Runtime(self.state, self.root), fetched['operation_id'])
+        report_path = Path(operation['semantic_review']['report_path'])
+        reports = json.loads(report_path.read_text(encoding='utf-8'))
+        reports[0]['findings'][0]['paths'] = [unrelated]
+        report_path.write_text(json.dumps(reports), encoding='utf-8')
+        calls = []
+        with self.assertRaisesRegex(WikiError, 'report digest'):
+            sync.resolve(wiki, self.state, fetched['operation_id'],
+                         backend=lambda context, tools: (calls.append(context),
+                                                         self._scoped_resolution(context, tools))[1])
+        self.assertEqual(calls, [])
+        self.assertEqual((self.root / unrelated).read_text(), document('other', 'work/alpha', body='Unchanged.'))
+
+    def test_resolve_refuses_removed_domain_markers_before_combining_context(self):
+        personal = space(self.root, 'personal/projects/home', 'home')
+        (personal / 'private.md').write_text(document('private', 'personal/home', body='Private original.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        work_rel, personal_rel = ('work/10-projects/alpha/note.md', 'personal/projects/home/private.md')
+        self.incoming(work_rel, document('note', 'work/alpha', body='Work incoming fact.'))
+        self.git(self.clone, 'pull', '-q', '--ff-only', 'origin', 'main')
+        self.incoming(personal_rel, document('private', 'personal/home', body='Personal incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        candidate = Path(prepared['candidate_worktree'])
+        (candidate / 'work/.domain.toml').unlink()
+        (candidate / 'personal/.domain.toml').unlink()
+        calls = []
+        with self.assertRaises(WikiError):
+            sync.resolve(wiki, self.state, fetched['operation_id'],
+                         backend=lambda context, tools: (calls.append(context),
+                                                         self._scoped_resolution(context, tools))[1])
+        self.assertEqual(calls, [])
+
+    def test_auto_resolver_validates_candidate_structure_before_candidate_commit(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        candidate = Path(prepared['candidate_worktree'])
+        before_candidate = sync_git.head(candidate)
+        before_live = sync_git.head(self.root)
+
+        def invalid_resolver(context, tools):
+            from hashlib import sha256
+            path = context['changed_paths'][0] if 'changed_paths' in context else next(iter(context['files']))
+            text = document('note', 'personal/nonexistent', body='Invalid owner address.')
+            result = tools.candidate_write(path, sha256(context['files'][path].encode()).hexdigest(), text)
+            tools.candidate_stage([path])
+            return {'summary': 'Invalid structure', 'confidence': 1.0, 'context_complete': True,
+                    'statements': [{'id': 's1', 'disposition': 'preserved'}], 'findings': [],
+                    'mappings': [{'path': path, 'sha256': result['sha256'], 'statement_ids': ['s1']}]}
+
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            with self.assertRaisesRegex(WikiError, 'structural check|space_ids'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], backend=invalid_resolver)
+        self.assertEqual(sync_git.head(candidate), before_candidate)
+        self.assertEqual(sync_git.head(self.root), before_live)
+
+    def test_feedback_summary_keeps_labelled_historical_reviewer_after_rereview(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        first = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        sync.feedback(wiki, self.state, fetched['operation_id'], 'rejected')
+        policy = sync_review.SemanticPolicy(model='synthetic-B')
+
+        def second(request):
+            report = self._needs_decision(request)
+            report['model'] = 'synthetic-B'
+            return report
+
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=second)
+        groups = sync.feedback_summary(wiki, self.state)['groups']
+        old = next(row for row in groups if row['model'] == 'synthetic-A')
+        new = next(row for row in groups if row['model'] == 'synthetic-B')
+        self.assertEqual(old['rejected'], 1)
+        self.assertEqual(old['corrected_or_rejected_fraction'], 1.0)
+        self.assertEqual(new['missing_label'], 1)
 
     def test_semantic_acceptance_token_changes_with_policy_and_binds_report_bytes(self):
         self.incoming()

@@ -73,6 +73,74 @@ class CandidateResolverToolTests(unittest.TestCase):
         self.assertEqual((self.repo / 'work' / 'private.md').read_text(), 'private\n')
         self.assertEqual((self.repo / 'work' / 'note.md').read_text(), 'resolved\n')
 
+    def test_commit_refuses_when_index_blob_differs_from_accepted_worktree_output(self):
+        import hashlib
+        import subprocess
+        expected = hashlib.sha256(b'ours\n').hexdigest()
+        self.tools.candidate_write('work/note.md', expected, 'accepted output\n')
+        self.tools.candidate_stage(['work/note.md'])
+        opposite = subprocess.run(['git', '-C', str(self.repo), 'hash-object', '-w', '--stdin'],
+                                  input=b'opposite indexed bytes\n', capture_output=True, check=True).stdout.decode().strip()
+        sync_git.text(self.repo, 'update-index', '--cacheinfo', '100644', opposite, 'work/note.md')
+        report = {'summary': 'Commit accepted output'}
+        with self.assertRaisesRegex(WikiError, 'index|staged'):
+            self.tools.authorize_commit(report)
+        self.assertEqual(sync_git.head(self.repo), self.base)
+
+    def test_commit_preserves_an_inherited_staged_deletion(self):
+        import hashlib
+        import subprocess
+        (self.repo / 'work/private.md').unlink()
+        sync_git.text(self.repo, 'add', '--', 'work/private.md')
+        expected = hashlib.sha256(b'ours\n').hexdigest()
+        self.tools = sync_resolver.CandidateTools(
+            self.repo, domain='work', allowed_paths={'work/note.md', 'work/private.md'}, expected_head=self.base)
+        self.tools.candidate_write('work/note.md', expected, 'resolved\n')
+        self.tools.candidate_stage(['work/note.md'])
+        report = {'summary': 'Commit candidate resolution'}
+        self.tools.authorize_commit(report)
+        committed = self.tools.candidate_commit(report)
+        absent = subprocess.run(['git', '-C', str(self.repo), 'cat-file', '-e',
+                                 f'{committed["commit"]}:work/private.md'], capture_output=True)
+        self.assertNotEqual(absent.returncode, 0)
+
+    def test_owner_approval_binds_inherited_index_blob_from_the_proposal(self):
+        import hashlib
+        import subprocess
+        from pisar.sync_resolver import CandidateTools
+        (self.repo / 'work/private.md').write_text('inherited staged output\n')
+        sync_git.text(self.repo, 'add', '--', 'work/private.md')
+        initial_staged = {'work/private.md'}
+        first = CandidateTools(self.repo, domain='*', allowed_paths={'work/note.md', 'work/private.md'},
+                               expected_head=self.base, initial_staged=initial_staged)
+        saved_index = {name: [list(entry) for entry in entries]
+                       for name, entries in first._initial_index.items()}
+        first.candidate_write('work/note.md', hashlib.sha256(b'ours\n').hexdigest(), 'accepted\n')
+        first.candidate_stage(['work/note.md'])
+        second = CandidateTools(self.repo, domain='*', allowed_paths={'work/note.md', 'work/private.md'},
+                                expected_head=self.base, initial_staged=initial_staged,
+                                initial_index=saved_index)
+        second._written = dict(first._written)
+        second._staged = set(first._staged)
+        opposite = subprocess.run(['git', '-C', str(self.repo), 'hash-object', '-w', '--stdin'],
+                                  input=b'changed inherited bytes\n', capture_output=True,
+                                  check=True).stdout.decode().strip()
+        sync_git.text(self.repo, 'update-index', '--cacheinfo', '100644', opposite, 'work/private.md')
+        with self.assertRaisesRegex(WikiError, 'inherited staged index entry'):
+            second.authorize_commit({'summary': 'Commit candidate'})
+        self.assertEqual(sync_git.head(self.repo), self.base)
+
+    def test_resolver_refuses_git_topology_metadata(self):
+        path = self.repo / '.gitmodules'
+        path.write_text('[submodule "x"]\n\tpath = x\n\turl = ./one\n', encoding='utf-8')
+        sync_git.text(self.repo, 'add', '.gitmodules')
+        sync_git.text(self.repo, 'commit', '-m', 'fixture submodule metadata')
+        head = sync_git.head(self.repo)
+        with self.assertRaisesRegex(WikiError, 'metadata|topology|Git'):
+            sync_resolver.CandidateTools(self.repo, domain='workspace', allowed_paths={'.gitmodules'},
+                                         expected_head=head).candidate_context()
+        self.assertEqual(path.read_text(), '[submodule "x"]\n\tpath = x\n\turl = ./one\n')
+
     def test_late_stale_candidate_response_is_refused(self):
         context = self.tools.candidate_context()
         (self.repo / 'work' / 'note.md').write_text('changed while resolver ran\n')
@@ -106,10 +174,10 @@ class CandidateResolverToolTests(unittest.TestCase):
         self.assertEqual(sync_git.parents(self.repo, committed['commit']), (self.base,))
 
     def test_resolver_cannot_edit_source_task_or_binary_inputs(self):
-        with self.assertRaisesRegex(WikiError, 'task, source or wiki metadata'):
+        with self.assertRaisesRegex(WikiError, 'task, source, wiki or Git topology metadata'):
             sync_resolver.CandidateTools(self.repo, domain='work', allowed_paths={'work/.ruwana/task.toml'},
                                          expected_head=self.base).candidate_context()
-        with self.assertRaisesRegex(WikiError, 'task, source or wiki metadata'):
+        with self.assertRaisesRegex(WikiError, 'task, source, wiki or Git topology metadata'):
             sync_resolver.CandidateTools(self.repo, domain='work', allowed_paths={'work/sources/original.md'},
                                          expected_head=self.base).candidate_context()
         (self.repo / 'work' / 'binary.bin').write_bytes(b'\xff')

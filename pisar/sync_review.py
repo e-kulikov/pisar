@@ -110,6 +110,57 @@ def validate_stored_report(runtime, operation):
     return token
 
 
+def checked_stored_reports(wiki, runtime, operation, candidate):
+    """Load the exact checked reports for the sealed candidate and current policy."""
+    semantic = operation.get('semantic_review') or {}
+    current_policy = policy()
+    if (semantic.get('coverage') != 'all' or semantic.get('policy') != current_policy.__dict__
+            or semantic.get('git_revision') != operation.get('revision')):
+        raise WikiError('stored sync review is stale for the current candidate or policy')
+    validate_stored_report(runtime, operation)
+    review_requests = requests(wiki, operation, candidate)
+    if not review_requests:
+        raise WikiError('stored sync review has no changed candidate paths')
+    candidate_revision = _candidate_revision(operation, review_requests, current_policy)
+    if candidate_revision != semantic.get('revision'):
+        raise WikiError('stored sync review is stale for the current candidate context')
+    for request in review_requests:
+        request['policy'] = current_policy.__dict__
+        request['candidate_revision'] = candidate_revision
+    report_path = runtime.path / 'sync-reports' / operation['operation_id'] / f'{candidate_revision}.json'
+    try:
+        reports = json.loads(report_path.read_text(encoding='utf-8'))
+    except (ValueError, OSError):
+        raise WikiError('stored sync review report is invalid') from None
+    if not isinstance(reports, list) or len(reports) != len(review_requests):
+        raise WikiError('stored sync review does not cover the current candidate')
+    checked = [validate_review(request, report) for request, report in zip(review_requests, reports)]
+    if report_digest(checked) != semantic.get('report_digest'):
+        raise WikiError('sync review report digest changed after review')
+    return review_requests, checked
+
+
+def pinned_domains(repo, operation, paths):
+    """Classify root paths from immutable O/T/base marker evidence."""
+    commits = [operation.get('ours'), operation.get('theirs')]
+    ours, theirs = operation.get('ours'), operation.get('theirs')
+    if ours and theirs:
+        commits.extend(sync_git.text(repo, 'merge-base', '--all', ours, theirs,
+                                     check=False).splitlines())
+    result = {}
+    for path in paths:
+        parts = PurePosixPath(path).parts
+        domain = parts[0] if parts else 'workspace'
+        if domain != 'workspace':
+            marker = f'{domain}/.domain.toml'
+            if not any(subprocess.run(sync_git.command(repo, 'cat-file', '-e', f'{commit}:{marker}'),
+                                      capture_output=True, env=gitops.environment()).returncode == 0
+                       for commit in commits if commit):
+                domain = 'workspace'
+        result[path] = domain
+    return result
+
+
 def decode_report(data):
     def pairs(items):
         result = {}
@@ -628,6 +679,7 @@ def record_feedback(wiki, state_dir, ident, rating, category=None):
                   'reviewers': [{'model': item['model'], 'prompt_version': item['prompt_version'],
                                  'confidence': item['confidence']} for item in reports],
                   'resolver': (operation.get('resolver_result') or {}).get('resolver_identity'),
+                  'resolver_proposal_revision': (operation.get('resolver_result') or {}).get('proposal_revision'),
                   'rating': rating, 'category': category,
                   'recorded_at': datetime.now(timezone.utc).isoformat()}
         directory = runtime.path / 'feedback'
@@ -651,7 +703,10 @@ def feedback_summary(wiki, state_dir):
             except (OSError, ValueError):
                 continue
             if item.get('rating') in ('correct', 'corrected', 'rejected'):
-                ratings[(item.get('operation_id'), item.get('candidate_revision'))] = item['rating']
+                ratings[(item.get('operation_id'), 'reviewer', item.get('candidate_revision'))] = item['rating']
+                proposal_revision = item.get('resolver_proposal_revision')
+                if isinstance(proposal_revision, str):
+                    ratings[(item.get('operation_id'), 'resolver', proposal_revision)] = item['rating']
     groups = {}
     sync_dir = runtime.path / 'sync'
     if sync_dir.is_dir():
@@ -662,33 +717,51 @@ def feedback_summary(wiki, state_dir):
                 operation = json.loads(path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 continue
-            review = operation.get('semantic_review') or {}
-            if review.get('coverage') != 'all':
-                continue
-            report_path = runtime.path / 'sync-reports' / operation.get('operation_id', '') / f'{review.get("revision", "")}.json'
-            if review.get('report_path') != str(report_path) or report_path.is_symlink() or not report_path.is_file():
-                continue
-            try:
-                reports = json.loads(report_path.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                continue
-            rating = ratings.get((operation.get('operation_id'), review.get('revision')))
-            evaluated = [(report, 'reviewer', str(operation.get('kind', 'integration')))
-                         for report in reports]
-            resolver_result = operation.get('resolver_result') or {}
-            resolver_proposal = operation.get('resolver_proposal') or {}
-            resolver_identity_value = (resolver_result.get('resolver_identity')
-                                       or resolver_proposal.get('resolver_identity'))
-            if resolver_result and resolver_identity_value:
-                evaluated.extend((report, 'resolver', str(operation.get('kind', 'integration')))
-                                 for report in resolver_proposal.get('reports', []))
-            for report, role, operation_kind in evaluated:
+            operation_id = operation.get('operation_id', '')
+            operation_kind = str(operation.get('kind', 'integration'))
+            report_dir = runtime.path / 'sync-reports' / operation_id
+            evaluated = []
+            if report_dir.is_dir():
+                for report_path in sorted(report_dir.glob('*.json')):
+                    if report_path.is_symlink() or not report_path.is_file():
+                        continue
+                    try:
+                        reports = json.loads(report_path.read_text(encoding='utf-8'))
+                    except (OSError, ValueError):
+                        continue
+                    if isinstance(reports, list):
+                        evaluated.extend((report, 'reviewer', operation_kind,
+                                          ratings.get((operation_id, 'reviewer', report_path.stem)))
+                                         for report in reports if isinstance(report, dict))
+            resolver_dir = runtime.path / 'sync-resolver-reports' / operation_id
+            if resolver_dir.is_dir():
+                recorded_revisions = set(operation.get('resolver_proposal_revisions', []))
+                current_proposal = operation.get('resolver_proposal') or {}
+                completed_proposal = operation.get('resolver_result') or {}
+                recorded_revisions.update(revision for revision in
+                                          (current_proposal.get('revision'),
+                                           completed_proposal.get('proposal_revision')) if revision)
+                for proposal_path in sorted(resolver_dir.glob('*.json')):
+                    if (proposal_path.stem not in recorded_revisions or proposal_path.is_symlink()
+                            or not proposal_path.is_file()):
+                        continue
+                    try:
+                        proposal = json.loads(proposal_path.read_text(encoding='utf-8'))
+                    except (OSError, ValueError):
+                        continue
+                    identity = proposal.get('resolver_identity', {})
+                    if isinstance(identity, dict):
+                        evaluated.extend((report, 'resolver', operation_kind,
+                                          ratings.get((operation_id, 'resolver', proposal_path.stem)), identity)
+                                         for report in proposal.get('reports', []) if isinstance(report, dict))
+            for item in evaluated:
+                report, role, operation_kind, rating = item[:4]
                 confidence = report.get('confidence')
                 if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
                     continue
                 band = ('0.00-0.49' if confidence < .5 else '0.50-0.74' if confidence < .75
                         else '0.75-0.89' if confidence < .9 else '0.90-0.94' if confidence < .95 else '0.95-1.00')
-                identity = resolver_identity_value if role == 'resolver' else report
+                identity = item[4] if role == 'resolver' else report
                 key = (str(identity.get('model', 'unknown')), str(identity.get('prompt_version', 'unknown')),
                        role, operation_kind, band)
                 row = groups.setdefault(key, {'model': key[0], 'prompt_version': key[1],
