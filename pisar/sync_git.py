@@ -23,10 +23,10 @@ def command(repo, *args):
     return ['git', '--no-pager', '--no-optional-locks', '-C', str(repo), *gitops.HARDENED, *POLICY, *args]
 
 
-def run(repo, *args, check=True, input=None):
+def run(repo, *args, check=True, input=None, extra_env=None):
     """Run Git without a shell and with inherited Git redirection settings removed."""
     result = subprocess.run(command(repo, *args), input=input, capture_output=True,
-                            env=gitops.environment())
+                            env={**gitops.environment(), **(extra_env or {})})
     if check and result.returncode:
         detail = result.stderr.decode('utf-8', errors='replace').strip()
         raise WikiError(f'git {args[0]} failed in {repo}: {detail}')

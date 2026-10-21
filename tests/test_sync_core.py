@@ -1214,6 +1214,131 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertIn('Resolver correction.', (candidate / personal_rel).read_text())
         self.assertIn('Resolver correction.', (candidate / work_rel).read_text())
 
+    def test_resolver_commit_resumes_after_result_journal_write_failure(self):
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        before_head = sync_git.head(candidate)
+        save = sync._save
+
+        def fail_result_save(runtime, operation):
+            if operation.get('resolver_result'):
+                raise OSError('synthetic result journal failure')
+            return save(runtime, operation)
+
+        with mock.patch.object(sync, '_save', side_effect=fail_result_save):
+            with self.assertRaisesRegex(OSError, 'result journal failure'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                             decision='Preserve the checked resolution.')
+        completed_head = sync_git.head(candidate)
+        self.assertNotEqual(completed_head, before_head)
+        completed_state = self._candidate_state_and_commits(candidate)
+        with mock.patch('pisar.sync_resolver.CandidateTools.candidate_commit',
+                        side_effect=AssertionError('duplicate commit attempt')), \
+                mock.patch.object(sync, 'prepare', side_effect=AssertionError('post-commit validation')):
+            result = sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                                  decision='Preserve the checked resolution.',
+                                  backend=mock.Mock(side_effect=AssertionError('resolver reran')))
+        self.assertEqual(result['candidate'], completed_head)
+        self.assertEqual(result['operation_id'], fetched['operation_id'])
+        self.assertEqual(self._candidate_state_and_commits(candidate), completed_state)
+        operation = sync._load(operations.Runtime(self.state, wiki.root), fetched['operation_id'])
+        self.assertEqual(operation['status'], 'prepared')
+        self.assertEqual(operation['resolver_result']['proposal_revision'], proposal['revision'])
+
+    def test_resolver_recovery_refuses_foreign_commit_without_changing_candidate(self):
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        save = sync._save
+
+        def fail_result_save(runtime, operation):
+            if operation.get('resolver_result'):
+                raise OSError('synthetic result journal failure')
+            return save(runtime, operation)
+
+        with mock.patch.object(sync, '_save', side_effect=fail_result_save), self.assertRaises(OSError):
+            sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                         decision='Preserve the checked resolution.')
+        sync_git.text(candidate, 'commit', '--allow-empty', '-m', 'Foreign candidate change')
+        before = self._candidate_state_and_commits(candidate)
+        with self.assertRaisesRegex(WikiError, 'outside.*commit intent'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                         decision='Preserve the checked resolution.')
+        self.assertEqual(self._candidate_state_and_commits(candidate), before)
+
+    def test_auto_resolver_commit_resumes_saved_prospective_review_after_journal_failure(self):
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        save = sync._save
+
+        def clear_review(request):
+            path = request['changed_paths'][0]
+            content = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': content,
+                                    'disposition': 'preserved', 'output_path': path, 'output_quote': content,
+                                    'reason': 'The checked assertion remains.'}],
+                    'findings': [], 'summary': 'No unresolved findings.'}
+
+        def fail_result_save(runtime, operation):
+            if operation.get('resolver_result'):
+                raise OSError('synthetic automatic result journal failure')
+            return save(runtime, operation)
+
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            with mock.patch.object(sync, '_save', side_effect=fail_result_save), self.assertRaises(OSError):
+                sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution,
+                             review_backend=clear_review)
+            operation = sync._load(operations.Runtime(self.state, wiki.root), fetched['operation_id'])
+            revision = operation['resolver_proposal']['revision']
+            committed_state = self._candidate_state_and_commits(candidate)
+            with mock.patch('pisar.sync_resolver.CandidateTools.candidate_commit',
+                            side_effect=AssertionError('duplicate commit attempt')):
+                result = sync.resolve(wiki, self.state, fetched['operation_id'], revision=revision,
+                                      review_backend=mock.Mock(side_effect=AssertionError('review reran')))
+        self.assertEqual(result['status'], 'applied-automatically')
+        self.assertEqual(sync_git.head(self.root), sync_git.head(candidate))
+        self.assertEqual(self._candidate_state_and_commits(candidate), committed_state)
+
+    def test_resolver_retry_reuses_commit_object_after_ref_update_interruption(self):
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        before_head = sync_git.head(candidate)
+        text = sync_git.text
+
+        def fail_ref_update(repo, *args, **kwargs):
+            if args[0] == 'update-ref':
+                raise OSError('synthetic ref update interruption')
+            return text(repo, *args, **kwargs)
+
+        with mock.patch.object(sync_git, 'text', side_effect=fail_ref_update), self.assertRaises(OSError):
+            sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                         decision='Preserve the checked resolution.')
+        self.assertEqual(sync_git.head(candidate), before_head)
+        commits = self._candidate_state_and_commits(candidate)[1]
+        result = sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                              decision='Preserve the checked resolution.')
+        self.assertEqual(result['status'], 'prepared')
+        self.assertEqual(self._candidate_state_and_commits(candidate)[1], commits)
+
+    def test_resolver_commit_intent_save_failure_creates_no_commit(self):
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        before = self._candidate_state_and_commits(candidate)
+        with mock.patch.object(sync, '_save', side_effect=OSError('synthetic intent journal failure')):
+            with self.assertRaisesRegex(OSError, 'intent journal failure'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                             decision='Preserve the checked resolution.')
+        self.assertEqual(self._candidate_state_and_commits(candidate), before)
+
     def test_resolver_commit_uses_checked_tree_without_post_commit_prepare(self):
         rel = 'work/10-projects/alpha/note.md'
         self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))

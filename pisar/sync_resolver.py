@@ -5,6 +5,7 @@ from importlib.resources import files
 import hashlib
 import json
 import math
+import re
 import shutil
 import stat
 import tempfile
@@ -279,7 +280,7 @@ class CandidateTools:
                 raise WikiError(f'candidate staged bytes changed after resolver write: {name}')
         self._authorized_report = _digest(_canonical(report).encode())
 
-    def candidate_commit(self, report, *, checked_tree=None):
+    def candidate_commit(self, report, *, checked_tree=None, intent=None):
         self._fresh()
         if not self._written or self._staged != set(self._written):
             raise WikiError('candidate write set must be fully staged before commit')
@@ -310,7 +311,9 @@ class CandidateTools:
         args = ['commit-tree', tree]
         for parent in parents:
             args.extend(('-p', parent))
-        commit = sync_git.text(self.repo, *args, '-m', report.get('summary', 'Resolve candidate')).strip()
+        message = intent['message'] if intent else report.get('summary', 'Resolve candidate')
+        commit = sync_git.run(self.repo, *args, '-m', message,
+                              extra_env=intent['environment'] if intent else None).decode('ascii').strip()
         sync_git.text(self.repo, 'update-ref', branch, commit, self.expected_head)
         if self.expected_merge_head:
             sync_git.text(self.repo, 'merge', '--quit')
@@ -475,6 +478,72 @@ def _conflict_context(wiki, candidate, operation, domain, paths):
             'context_complete': True}
 
 
+def _commit_intent(candidate, operation, proposal, tree, report, decision, reviewed):
+    environment = {}
+    for role in ('AUTHOR', 'COMMITTER'):
+        identity = sync_git.text(candidate, 'var', f'GIT_{role}_IDENT').strip()
+        match = re.fullmatch(r'(.*) <([^<>]*)> ([0-9]+) ([+-][0-9]{4})', identity)
+        if match is None:
+            raise WikiError('resolver commit identity is invalid')
+        name, email, timestamp, zone = match.groups()
+        environment.update({f'GIT_{role}_NAME': name, f'GIT_{role}_EMAIL': email,
+                            f'GIT_{role}_DATE': f'@{timestamp} {zone}'})
+    intent = dict(operation_id=operation['operation_id'], proposal_revision=proposal['revision'],
+                  tree=tree, parents=[proposal['candidate_head']] +
+                  ([proposal['merge_head']] if proposal.get('merge_head') else []),
+                  branch='refs/heads/pisar-candidate', environment=environment,
+                  message=(report['summary'] + '\n\nPisar-Operation: sync-' + operation['operation_id']
+                           + '\nPisar-Resolver-Proposal: ' + proposal['revision']),
+                  decision=decision.strip() if isinstance(decision, str) else None,
+                  reviewed=json.loads(_canonical({key: value for key, value in reviewed.items()
+                                                  if key != '_policy'})) if reviewed else None)
+    intent['binding'] = operations.fingerprint(intent)
+    return intent
+
+
+def _check_intent(intent, operation, proposal, decision):
+    if (intent.get('binding') != operations.fingerprint({key: value for key, value in intent.items()
+                                                        if key != 'binding'})
+            or intent.get('operation_id') != operation['operation_id']
+            or intent.get('proposal_revision') != proposal['revision']
+            or intent.get('parents') != [proposal['candidate_head']] +
+                ([proposal['merge_head']] if proposal.get('merge_head') else [])
+            or intent.get('branch') != 'refs/heads/pisar-candidate'
+            or intent.get('decision') != (decision.strip() if isinstance(decision, str) else None)):
+        raise WikiError('resolver commit intent no longer matches this operation/proposal/decision')
+
+
+def _recover_commit(candidate, intent):
+    """Recognize only the exact checked result; perform no new semantic/structural review."""
+    commit = sync_git.head(candidate)
+    branch = sync_git.text(candidate, 'symbolic-ref', '--quiet', 'HEAD', check=False).strip()
+    tree = sync_git.text(candidate, 'rev-parse', f'{commit}^{{tree}}').strip()
+    metadata = sync_git.text(candidate, 'show', '-s',
+                             '--format=%an%x00%ae%x00%at%x00%aI%x00%cn%x00%ce%x00%ct%x00%cI', commit).strip().split('\0')
+    expected = []
+    for role in ('AUTHOR', 'COMMITTER'):
+        environment = intent['environment']
+        timestamp, zone = environment[f'GIT_{role}_DATE'].split()
+        expected.extend((environment[f'GIT_{role}_NAME'], environment[f'GIT_{role}_EMAIL'],
+                         timestamp.removeprefix('@'), zone))
+    if len(metadata) == 8:
+        metadata[3] = metadata[3][-6:].replace(':', '')
+        metadata[7] = metadata[7][-6:].replace(':', '')
+    merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None
+    expected_merge = intent['parents'][1] if len(intent['parents']) == 2 else None
+    if (branch != intent['branch'] or tree != intent['tree']
+            or list(sync_git.parents(candidate, commit)) != intent['parents']
+            or sync_git.text(candidate, 'show', '-s', '--format=%B', commit).rstrip('\n') != intent['message']
+            or metadata != expected or merge_head not in (None, expected_merge)
+            or sync_git.index_tree(candidate) != tree
+            or sync_git.run(candidate, 'diff-files', '--name-only')
+            or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
+        raise WikiError('resolver candidate changed outside its authorized commit intent')
+    if merge_head:
+        sync_git.text(candidate, 'merge', '--quit')
+    return {'commit': commit, 'tree': tree}
+
+
 def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, decision=None,
                       review_backend=None):
     """Create a candidate resolution proposal, or approve and commit a stored proposal."""
@@ -497,93 +566,110 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             if proposal.get('resolver_identity') != resolver_identity():
                 raise WikiError('resolver identity changed after proposal; run resolution again')
             candidate = sync._candidate(runtime, ident)
-            if sync_git.head(candidate) != proposal['candidate_head']:
-                raise WikiError('resolver candidate changed after proposal')
-            current_merge_head = sync_git.text(
-                candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None
-            if current_merge_head != proposal.get('merge_head'):
-                raise WikiError('resolver merge parents changed after proposal')
-            tool = CandidateTools(candidate, domain='*', allowed_paths=set(proposal['allowed_paths']),
-                                  expected_head=proposal['candidate_head'],
-                                  initial_staged=proposal['initial_staged'],
-                                  initial_index=proposal['initial_index'],
-                                  expected_branch='refs/heads/pisar-candidate')
-            tool._written = dict(proposal['written'])
-            tool._staged = set(proposal['written'])
-            report = {'summary': 'Resolve semantic candidate', 'confidence': min(
-                (item.get('confidence', 0) for item in proposal['reports']), default=0),
-                'context_complete': all(item.get('context_complete') is True for item in proposal['reports']),
-                'statements': [statement for item in proposal['reports'] for statement in item.get('statements', [])],
-                'findings': [finding for item in proposal['reports'] for finding in item.get('findings', [])],
-                'mappings': [mapping for item in proposal['reports'] for mapping in item['mappings']]}
-            for path, digest in tool._written.items():
-                target = tool._path(path)
-                actual = _digest(target.read_bytes()) if target.is_file() else None
-                if actual != digest:
-                    raise WikiError(f'resolver candidate changed after proposal: {path}')
-            staged = set(p.decode('utf-8', errors='surrogateescape') for p in
-                         sync_git.run(candidate, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p)
-            if staged != set(proposal['initial_staged']) | set(proposal['written']):
-                raise WikiError('resolver staged paths changed after proposal')
-            changed = set(p.decode('utf-8', errors='surrogateescape') for p in
-                          sync_git.run(candidate, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
-            untracked = set(p.decode('utf-8', errors='surrogateescape') for p in
-                            sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0') if p)
-            if (changed | untracked) - set(proposal['allowed_paths']):
-                raise WikiError('candidate has changes outside the resolver proposal scope')
-            policy = sync_review.policy().__dict__
-            if policy['approval'] == 'manual' and (not isinstance(decision, str) or not decision.strip()):
-                raise WikiError('resolver commit requires a concrete owner decision')
-            if policy['approval'] == 'auto':
-                if (report['confidence'] < policy['min_confidence'] or report['findings']
-                        or any(item.get('disposition') in HARD_DISPOSITIONS for item in report['statements'])):
-                    raise WikiError('resolver report does not satisfy automatic-resolution gates')
-            try:
-                from .documents import check as check_documents
-                structural = check_documents(Wiki(candidate))
-                if not structural['ok']:
-                    raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
-                staged_tree = sync_git.index_tree(candidate)
-                if sync_git.run(candidate, 'diff-files', '--name-only'):
-                    raise WikiError('candidate has unstaged changes before resolver commit')
-                if sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z'):
-                    raise WikiError('candidate has untracked files before resolver commit')
-                sync_git.text(candidate, 'diff', '--cached', '--check')
-                sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
-                sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
-                sync._validate_processing(candidate, staged_tree)
-                operation['candidate'] = proposal['candidate_head']
-                operation['status'] = 'resolving'
-                tool.authorize_commit(report)
-                reviewed = None
+            intent = operation.get('resolver_commit_intent')
+            if intent is not None:
+                _check_intent(intent, operation, proposal, decision)
+            if intent is not None and sync_git.head(candidate) != proposal['candidate_head']:
+                committed = _recover_commit(candidate, intent)
+                policy = proposal['policy']
+                reviewed = json.loads(_canonical(intent['reviewed']))
+                if reviewed is not None:
+                    reviewed['_policy'] = sync_review.policy()
+            else:
+                if sync_git.head(candidate) != proposal['candidate_head']:
+                    raise WikiError('resolver candidate changed after proposal')
+                current_merge_head = sync_git.text(
+                    candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None
+                if current_merge_head != proposal.get('merge_head'):
+                    raise WikiError('resolver merge parents changed after proposal')
+                tool = CandidateTools(candidate, domain='*', allowed_paths=set(proposal['allowed_paths']),
+                                      expected_head=proposal['candidate_head'],
+                                      initial_staged=proposal['initial_staged'],
+                                      initial_index=proposal['initial_index'],
+                                      expected_branch='refs/heads/pisar-candidate')
+                tool._written = dict(proposal['written'])
+                tool._staged = set(proposal['written'])
+                report = {'summary': 'Resolve semantic candidate', 'confidence': min(
+                    (item.get('confidence', 0) for item in proposal['reports']), default=0),
+                    'context_complete': all(item.get('context_complete') is True for item in proposal['reports']),
+                    'statements': [statement for item in proposal['reports'] for statement in item.get('statements', [])],
+                    'findings': [finding for item in proposal['reports'] for finding in item.get('findings', [])],
+                    'mappings': [mapping for item in proposal['reports'] for mapping in item['mappings']]}
+                for path, digest in tool._written.items():
+                    target = tool._path(path)
+                    actual = _digest(target.read_bytes()) if target.is_file() else None
+                    if actual != digest:
+                        raise WikiError(f'resolver candidate changed after proposal: {path}')
+                staged = set(p.decode('utf-8', errors='surrogateescape') for p in
+                             sync_git.run(candidate, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p)
+                if staged != set(proposal['initial_staged']) | set(proposal['written']):
+                    raise WikiError('resolver staged paths changed after proposal')
+                changed = set(p.decode('utf-8', errors='surrogateescape') for p in
+                              sync_git.run(candidate, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
+                untracked = set(p.decode('utf-8', errors='surrogateescape') for p in
+                                sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0') if p)
+                if (changed | untracked) - set(proposal['allowed_paths']):
+                    raise WikiError('candidate has changes outside the resolver proposal scope')
+                policy = sync_review.policy().__dict__
+                if policy['approval'] == 'manual' and (not isinstance(decision, str) or not decision.strip()):
+                    raise WikiError('resolver commit requires a concrete owner decision')
                 if policy['approval'] == 'auto':
-                    reviewed = sync_review.review_prospective_tree(
-                        wiki, operation, candidate, staged_tree, backend=review_backend,
-                        runtime_base=runtime.base)
-                    if (sync_review.policy().__dict__ != policy
-                            or reviewed.get('policy') != policy):
-                        raise WikiError('semantic policy changed during prospective review; run resolution again')
-                    if acceptance_decision(
-                            {'reports': reviewed.get('reports', []), 'technical_checks_passed': True,
-                             'candidate_current': True, 'resolver_commit_valid': True,
-                             'fresh_review': bool(reviewed.get('reports'))},
-                            reviewed.get('policy', {})) != 'accepted':
-                        raise _SemanticGatePending(reviewed)
-                    tool._fresh()
-                    if sync_git.index_tree(candidate) != staged_tree:
-                        raise WikiError('candidate tree changed during prospective semantic review')
-                    if (sync_git.run(candidate, 'diff-files', '--name-only')
-                            or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
-                        raise WikiError('candidate worktree changed during prospective semantic review')
-                    if sync_review.policy().__dict__ != policy:
-                        raise WikiError('semantic policy changed before resolver commit; run resolution again')
-            except _SemanticGatePending as pending:
-                return {'operation_id': ident, 'status': 'needs-decision',
-                        'semantic_review': {key: value for key, value in pending.review.items()
-                                            if not key.startswith('_')}}
-            if policy['approval'] == 'auto' and sync_review.policy().__dict__ != policy:
-                raise WikiError('semantic policy changed before resolver commit; run resolution again')
-            committed = tool.candidate_commit(report, checked_tree=staged_tree)
+                    if (report['confidence'] < policy['min_confidence'] or report['findings']
+                            or any(item.get('disposition') in HARD_DISPOSITIONS for item in report['statements'])):
+                        raise WikiError('resolver report does not satisfy automatic-resolution gates')
+                try:
+                    from .documents import check as check_documents
+                    structural = check_documents(Wiki(candidate))
+                    if not structural['ok']:
+                        raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
+                    staged_tree = sync_git.index_tree(candidate)
+                    if sync_git.run(candidate, 'diff-files', '--name-only'):
+                        raise WikiError('candidate has unstaged changes before resolver commit')
+                    if sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z'):
+                        raise WikiError('candidate has untracked files before resolver commit')
+                    sync_git.text(candidate, 'diff', '--cached', '--check')
+                    sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
+                    sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
+                    sync._validate_processing(candidate, staged_tree)
+                    operation['candidate'] = proposal['candidate_head']
+                    operation['status'] = 'resolving'
+                    tool.authorize_commit(report)
+                    reviewed = None
+                    if policy['approval'] == 'auto':
+                        reviewed = sync_review.review_prospective_tree(
+                            wiki, operation, candidate, staged_tree, backend=review_backend,
+                            runtime_base=runtime.base)
+                        if (sync_review.policy().__dict__ != policy
+                                or reviewed.get('policy') != policy):
+                            raise WikiError('semantic policy changed during prospective review; run resolution again')
+                        if acceptance_decision(
+                                {'reports': reviewed.get('reports', []), 'technical_checks_passed': True,
+                                 'candidate_current': True, 'resolver_commit_valid': True,
+                                 'fresh_review': bool(reviewed.get('reports'))},
+                                reviewed.get('policy', {})) != 'accepted':
+                            raise _SemanticGatePending(reviewed)
+                        tool._fresh()
+                        if sync_git.index_tree(candidate) != staged_tree:
+                            raise WikiError('candidate tree changed during prospective semantic review')
+                        if (sync_git.run(candidate, 'diff-files', '--name-only')
+                                or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
+                            raise WikiError('candidate worktree changed during prospective semantic review')
+                        if sync_review.policy().__dict__ != policy:
+                            raise WikiError('semantic policy changed before resolver commit; run resolution again')
+                except _SemanticGatePending as pending:
+                    return {'operation_id': ident, 'status': 'needs-decision',
+                            'semantic_review': {key: value for key, value in pending.review.items()
+                                                if not key.startswith('_')}}
+                if policy['approval'] == 'auto' and sync_review.policy().__dict__ != policy:
+                    raise WikiError('semantic policy changed before resolver commit; run resolution again')
+                if intent is None:
+                    intent = _commit_intent(candidate, operation, proposal, staged_tree, report, decision, reviewed)
+                    operation['resolver_commit_intent'] = intent
+                    operation['status'] = 'resolution-pending'
+                    sync._save(runtime, operation)
+                elif intent['tree'] != staged_tree:
+                    raise WikiError('resolver staged tree changed after commit intent')
+                committed = tool.candidate_commit(report, checked_tree=staged_tree, intent=intent)
             # The graph and tree were checked against this exact index tree
             # above. Record those checked values directly; do not call
             # sync.prepare after advancing the candidate ref.
