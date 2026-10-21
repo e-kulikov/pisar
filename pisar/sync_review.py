@@ -624,8 +624,10 @@ def record_feedback(wiki, state_dir, ident, rating, category=None):
         reports = json.loads(report_path.read_text(encoding='utf-8'))
         record = {'operation_id': ident, 'candidate_revision': review_data['revision'],
                   'policy': review_data['policy'],
+                  'review_kind': operation.get('kind', 'integration'),
                   'reviewers': [{'model': item['model'], 'prompt_version': item['prompt_version'],
                                  'confidence': item['confidence']} for item in reports],
+                  'resolver': (operation.get('resolver_result') or {}).get('resolver_identity'),
                   'rating': rating, 'category': category,
                   'recorded_at': datetime.now(timezone.utc).isoformat()}
         directory = runtime.path / 'feedback'
@@ -633,3 +635,80 @@ def record_feedback(wiki, state_dir, ident, rating, category=None):
         path = directory / f'{ident}-{review_data["revision"]}.json'
         operations.atomic_bytes(path, (json.dumps(record, ensure_ascii=False, indent=2) + '\n').encode())
         return record
+
+
+def feedback_summary(wiki, state_dir):
+    """Aggregate only local labels and model metadata; never expose report content."""
+    runtime = operations.Runtime(state_dir, wiki.root)
+    feedback_dir = runtime.path / 'feedback'
+    ratings = {}
+    if feedback_dir.is_dir():
+        for path in feedback_dir.glob('*.json'):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                item = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if item.get('rating') in ('correct', 'corrected', 'rejected'):
+                ratings[(item.get('operation_id'), item.get('candidate_revision'))] = item['rating']
+    groups = {}
+    sync_dir = runtime.path / 'sync'
+    if sync_dir.is_dir():
+        for path in sync_dir.glob('*.json'):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                operation = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            review = operation.get('semantic_review') or {}
+            if review.get('coverage') != 'all':
+                continue
+            report_path = runtime.path / 'sync-reports' / operation.get('operation_id', '') / f'{review.get("revision", "")}.json'
+            if review.get('report_path') != str(report_path) or report_path.is_symlink() or not report_path.is_file():
+                continue
+            try:
+                reports = json.loads(report_path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            rating = ratings.get((operation.get('operation_id'), review.get('revision')))
+            evaluated = [(report, 'reviewer', str(operation.get('kind', 'integration')))
+                         for report in reports]
+            resolver_result = operation.get('resolver_result') or {}
+            resolver_proposal = operation.get('resolver_proposal') or {}
+            resolver_identity_value = (resolver_result.get('resolver_identity')
+                                       or resolver_proposal.get('resolver_identity'))
+            if resolver_result and resolver_identity_value:
+                evaluated.extend((report, 'resolver', str(operation.get('kind', 'integration')))
+                                 for report in resolver_proposal.get('reports', []))
+            for report, role, operation_kind in evaluated:
+                confidence = report.get('confidence')
+                if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                    continue
+                band = ('0.00-0.49' if confidence < .5 else '0.50-0.74' if confidence < .75
+                        else '0.75-0.89' if confidence < .9 else '0.90-0.94' if confidence < .95 else '0.95-1.00')
+                identity = resolver_identity_value if role == 'resolver' else report
+                key = (str(identity.get('model', 'unknown')), str(identity.get('prompt_version', 'unknown')),
+                       role, operation_kind, band)
+                row = groups.setdefault(key, {'model': key[0], 'prompt_version': key[1],
+                                              'review_kind': key[2], 'operation_kind': key[3],
+                                              'confidence_band': band,
+                                              'reviews': 0, 'correct': 0, 'corrected': 0,
+                                              'rejected': 0, 'missing_label': 0})
+                row['reviews'] += 1
+                if rating is None:
+                    row['missing_label'] += 1
+                else:
+                    row[rating] += 1
+    result = []
+    for key in sorted(groups):
+        row = groups[key]
+        labelled = row['correct'] + row['corrected'] + row['rejected']
+        row['labelled'] = labelled
+        row['corrected_or_rejected_fraction'] = ((row['corrected'] + row['rejected']) / labelled
+                                                  if labelled else None)
+        result.append(row)
+    return {'groups': result, 'confidence_bands': ['0.00-0.49', '0.50-0.74', '0.75-0.89',
+                                                    '0.90-0.94', '0.95-1.00'],
+            'threshold_tuning': 'disabled'}

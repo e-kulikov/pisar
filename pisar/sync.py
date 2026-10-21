@@ -382,7 +382,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
             result = sync_git.head(candidate)
             if result == operation['candidate']:
                 return inspect(wiki, state_dir, ident)
-            if operation.get('status') not in ('prepared', 'reviewed', 'accepted'):
+            if operation.get('status') not in ('prepared', 'reviewed', 'accepted', 'resolving'):
                 raise WikiError('candidate correction is not allowed in this operation state')
             if sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'):
                 raise WikiError('corrected candidate must be Git-clean before revalidation')
@@ -483,8 +483,14 @@ def inspect(wiki, state_dir, ident=None):
         operation = _load(base, ident)
         fields = ('operation_id', 'kind', 'status', 'branch', 'ours', 'theirs', 'candidate', 'tree',
                   'revision', 'remote', 'target_branch', 'applied', 'published', 'semantic_review',
-                  'publication_graph', 'published_graph', 'bootstrap_map_fingerprint')
+                  'publication_graph', 'published_graph', 'bootstrap_map_fingerprint', 'resolver_result')
         result = {key: operation[key] for key in fields if key in operation}
+        if operation.get('resolver_proposal'):
+            proposal = operation['resolver_proposal']
+            result['resolver_proposal'] = {key: proposal[key] for key in
+                                           ('revision', 'candidate_head', 'reports', 'written', 'recorded_at',
+                                            'policy')
+                                           if key in proposal}
         if operation.get('candidate'):
             result['candidate_worktree'] = str(_candidate(base, ident))
         return result
@@ -560,7 +566,30 @@ def accept(wiki, state_dir, ident, revision, *, decision=None):
         if operation['review'].get('policy') != current_policy:
             raise WikiError('semantic policy changed after review; review the current candidate again')
         semantic = operation.get('semantic_review')
-        if operation['review'].get('kind') == 'semantic' and semantic and semantic.get('verdict') != 'clear':
+        if current_policy.get('approval') == 'auto':
+            report_path = (runtime.path / 'sync-reports' / ident /
+                           f'{(semantic or {}).get("revision", "")}.json')
+            reports = json.loads(report_path.read_text(encoding='utf-8')) if report_path.is_file() else []
+            from .sync_resolver import acceptance_decision
+            candidate = _candidate(runtime, ident)
+            graph = sync_graph.verify_graph(sync_graph.CandidateGraph(Path(candidate), tuple(
+                dict(path=item['path'], candidate=str(candidate) if item['path'] == '.' else str(Path(candidate) / item['path']),
+                     commit=item['candidate'], tree=item['tree'], branch=item['branch'], ours=item['ours'])
+                for item in operation.get('graph', [])))) if operation.get('graph') else None
+            technical_ok = graph['ok'] if graph else check(Wiki(candidate))['ok']
+            resolver_result = operation.get('resolver_result') or {}
+            resolver_commit = resolver_result.get('commit')
+            resolver_commit_valid = (not resolver_result or bool(resolver_commit and sync_git._ancestor(
+                candidate, resolver_commit, operation.get('candidate', ''))))
+            bundle = {'reports': reports, 'technical_checks_passed': technical_ok,
+                      'candidate_current': sync_git.head(candidate) == operation.get('candidate'),
+                      'resolver_commit_valid': resolver_commit_valid,
+                      'fresh_review': bool(semantic and semantic.get('coverage') == 'all'
+                                           and semantic.get('revision'))}
+            if acceptance_decision(bundle, current_policy) != 'accepted':
+                raise WikiError('automatic acceptance hard gates are not satisfied')
+            decision = None
+        elif operation['review'].get('kind') == 'semantic' and semantic and semantic.get('verdict') != 'clear':
             if not isinstance(decision, str) or not decision.strip():
                 raise WikiError('a concrete owner decision is required for unresolved semantic findings')
         elif decision is not None and (not isinstance(decision, str) or not decision.strip()):
@@ -737,12 +766,25 @@ def semantic_review(wiki, state_dir, ident, *, backend=None):
     return sync_review.review_operation(wiki, state_dir, ident, backend=backend)
 
 
+def resolve(wiki, state_dir, ident, *, backend=None, revision=None, decision=None, review_backend=None):
+    """Propose a scoped candidate resolution or commit an explicitly approved proposal."""
+    from . import sync_resolver
+    return sync_resolver.resolve_operation(wiki, state_dir, ident, backend=backend, revision=revision,
+                                           decision=decision, review_backend=review_backend)
+
+
 def feedback(wiki, state_dir, ident, rating, category=None):
     from . import sync_review
     return sync_review.record_feedback(wiki, state_dir, ident, rating, category)
 
 
-def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run=False):
+def feedback_summary(wiki, state_dir):
+    from . import sync_review
+    return sync_review.feedback_summary(wiki, state_dir)
+
+
+def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run=False,
+         review_backend=None):
     if dry_run:
         repo = _repo(wiki, relative)
         snapshot = sync_git.observe(repo)
@@ -752,5 +794,24 @@ def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run
                     cached_remote_tip=remote_tip or None, remote_freshness='unknown')
     fetched = fetch(wiki, state_dir, relative, target)
     result = prepare(wiki, state_dir, fetched['operation_id'], merge=merge)
+    if result.get('status') == 'prepared' and settings.semantic_policy().get('approval') == 'auto':
+        from . import sync_review
+        reviewed = semantic_review(wiki, state_dir, fetched['operation_id'], backend=review_backend)
+        if reviewed.get('status') == 'reviewed':
+            from .sync_resolver import acceptance_decision
+            if acceptance_decision({'reports': reviewed.get('reports', []),
+                                    'technical_checks_passed': True, 'candidate_current': True,
+                                    'resolver_commit_valid': True, 'fresh_review': True},
+                                   reviewed.get('policy', {})) != 'accepted':
+                return {**result, 'operation_id': fetched['operation_id'], 'status': 'needs-decision',
+                        'semantic_review': reviewed}
+            accept(wiki, state_dir, fetched['operation_id'], reviewed['revision'])
+            applied = apply(wiki, state_dir, fetched['operation_id'])
+            return {**result, **applied, 'operation_id': fetched['operation_id'],
+                    'status': 'applied-automatically', 'semantic_review': reviewed}
+        if reviewed.get('status') == 'no-change':
+            return {**result, 'operation_id': fetched['operation_id'], 'status': 'no-change'}
+        return {**result, 'operation_id': fetched['operation_id'], 'status': 'needs-decision',
+                'semantic_review': reviewed}
     return {**result, 'operation_id': fetched['operation_id'],
             'status': 'needs-approval' if result.get('status') == 'prepared' else result.get('status')}

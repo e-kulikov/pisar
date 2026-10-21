@@ -119,6 +119,7 @@ class AgentTests(Fixture):
         self.assertEqual(settings, {'permissions': {'ask': [
             'Bash(pisar lesson accept *)', 'Bash(pisar sync accept *)',
             'Bash(pisar sync apply *)', 'Bash(pisar sync manual-review *)',
+            'Bash(pisar sync resolve-accept *)',
             'Bash(pisar sync publish --operation *)',
         ]}})
 
@@ -128,14 +129,17 @@ class AgentTests(Fixture):
         for rule in ('Bash(pisar sync fetch *)', 'Bash(pisar sync pull *)',
                      'Bash(pisar sync prepare *)', 'Bash(pisar sync status *)',
                      'Bash(pisar sync review *)', 'Bash(pisar sync close *)',
+                     'Bash(pisar sync resolve --operation *)',
                      'Bash(pisar sync feedback *)', 'Bash(pisar sync publish --repo *)'):
             self.assertIn(rule, allowed)
         self.assertNotIn('Bash(pisar sync manual-review *)', allowed)
+        self.assertNotIn('Bash(pisar sync resolve-accept *)', allowed)
         self.assertNotIn('Bash(pisar sync *)', allowed)
         settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
         self.assertEqual(settings['permissions']['ask'], ['Bash(pisar lesson accept *)',
                          'Bash(pisar sync accept *)', 'Bash(pisar sync apply *)',
                          'Bash(pisar sync manual-review *)',
+                         'Bash(pisar sync resolve-accept *)',
                          'Bash(pisar sync publish --operation *)'])
 
     def test_only_the_lesson_workspace_is_writable_by_absolute_path(self):

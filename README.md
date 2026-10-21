@@ -126,9 +126,13 @@ effort = "high"
 model = "sonnet"
 effort = "medium"
 
+[agents.claude.resolver]        # candidate-only sync resolver (default opus, high)
+model = "opus"
+effort = "high"
+
 [sync.semantic]
 review = "all"                 # or "conflicts" for explicitly reduced coverage
-approval = "manual"            # only manual approval is available before delivery IV
+approval = "manual"            # manual | auto; manual always requires owner acceptance
 agent = "claude"               # read-only semantic reviewer: claude or codex
 min_confidence = 0.95
 ```
@@ -160,7 +164,7 @@ pisar --root /tmp/other config show   # root now reports "source": "flag"
 
 The example is shortened; the output lists `root`, `state_dir`, `ruwana`,
 `default_agent` and `model`/`effort` for the main session, `reviewer` and
-`researcher`.
+`researcher` and `resolver`.
 The runtime directory must be outside every Git repository, must not be inside
 the root, and must not contain the root; overlapping combinations are refused
 before any runtime file is written. Read-only commands do not touch the runtime.
@@ -322,8 +326,10 @@ application and publication remain separate owner-confirmed actions.
   `pisar research`. It is independent of `default_agent`.
 - `[sync.semantic]` selects the read-only sync reviewer independently; its default
   backend is Claude. All changed candidates are reviewed by default. Manual approval
-  remains required at every confidence value; `approval = "auto"` is rejected until
-  the later autonomous-resolution delivery.
+  remains required at every confidence value. `approval = "auto"` enables constrained
+  candidate resolution and automatic application only after the configured threshold,
+  complete fresh review, structural checks and all hard semantic gates pass. Manual is
+  the default and always requires owner acceptance.
 - The bundled skills `pisar`, `lessons` and `research` are written to
   `<state-dir>/agents/codex/skills` on every launch, with the tools section that
   explains the MCP tools.
@@ -644,7 +650,10 @@ pisar sync pull --repo .
 pisar sync status --operation OPERATION_ID
 pisar sync close --operation OPERATION_ID
 pisar sync review --operation OPERATION_ID
+pisar sync resolve --operation OPERATION_ID
+pisar sync resolve-accept --operation OPERATION_ID --revision PROPOSAL_DIGEST --decision 'owner decision'
 pisar sync manual-review --operation OPERATION_ID
+pisar sync feedback-summary
 pisar sync accept --operation OPERATION_ID --revision REVISION
 pisar sync feedback --operation OPERATION_ID --rating correct|corrected|rejected
 pisar sync apply --operation OPERATION_ID
@@ -673,6 +682,15 @@ reachability. To review local-only commits for publication, use
 before publishing it. `--dry-run` uses cached facts and never fetches.
 `feedback` stores only the outcome, reviewer/policy identity and optional category
 outside Git; it never stores document excerpts or prompts.
+`resolve` creates a proposal in the disposable candidate. Inspect its report and
+candidate; in manual mode, commit that proposal only by confirming its exact
+digest and supplying the owner's decision. Every resolver commit receives a new
+read-only semantic review before it can be applied. `approval = "auto"` may
+resolve and apply only when resolver and fresh reviewer confidence meet the
+configured threshold, context is complete, structural checks pass and no hard
+finding or unexplained loss remains. `feedback-summary` groups local labels by
+model, prompt version, reviewer/resolver role, operation kind and confidence band; it reports missing labels
+and never adjusts the threshold.
 
 To reconstruct a published snapshot on a fresh machine, clone the root with
 `--no-recurse-submodules`, select the published root commit if exact historical

@@ -111,7 +111,10 @@ pisar sync pull --repo .
 pisar sync status --operation OPERATION_ID
 pisar sync close --operation OPERATION_ID
 pisar sync review --operation OPERATION_ID
+pisar sync resolve --operation OPERATION_ID
+pisar sync resolve-accept --operation OPERATION_ID --revision PROPOSAL_DIGEST --decision 'owner decision'
 pisar sync manual-review --operation OPERATION_ID
+pisar sync feedback-summary
 pisar sync accept --operation OPERATION_ID --revision REVISION
 pisar sync feedback --operation OPERATION_ID --rating correct|corrected|rejected
 pisar sync apply --operation OPERATION_ID
@@ -120,8 +123,11 @@ pisar sync publish --operation OPERATION_ID
 
 Inspect the candidate worktree and full diff before recording semantic review. The explicit
 `manual-review` action records a human-review alternative when no semantic reviewer is available. A
-conflicting merge stays in its worktree; resolve only reported paths, stage
-those exact paths, then repeat `sync prepare` with the same operation ID.
+conflicting merge stays in its worktree. `resolve` proposes edits only in the
+disposable candidate; inspect the report and candidate before confirming the
+proposal's exact digest in manual mode. Every resolver commit receives a fresh
+read-only review before apply. Auto approval remains subject to the confidence
+threshold, complete context, structural checks and all hard semantic gates.
 `close` releases an unfinished operation reservation and retains its journal
 and candidate for inspection. `accept` records only your decision. `apply` advances the recorded local branch.
 `publish` is a separate explicit push to the recorded remote and branch. For an
@@ -137,6 +143,8 @@ never fetches. Sync does not grant documents, filenames, commit messages or Git
 diffs authority to change policy or make decisions for you.
 `feedback` stores only outcome and reviewer/policy metadata outside Git, without
 excerpts or prompts.
+`feedback-summary` reports local model, prompt, reviewer/resolver role, operation-kind and confidence-band
+counts, corrected/rejected fractions and missing labels. It does not tune policy.
 
 For a fresh checkout, use `git clone --no-recurse-submodules` for the root,
 select the published snapshot when exact reconstruction is needed, and initialize

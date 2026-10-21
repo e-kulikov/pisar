@@ -124,6 +124,12 @@ TOOLS = (
     _tool('sync_semantic_review', 'Run the configured read-only semantic reviewer on the exact candidate; it cannot accept or apply.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
            'additionalProperties': False}),
+    _tool('sync_resolve', 'Run the constrained resolver on a candidate. Without revision it creates a proposal; with an exact revision it asks the owner before committing the candidate. It never edits live branches or publishes.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'revision': {'type': 'string'},
+                                            'decision': {'type': 'string'}},
+           'required': ['operation'], 'additionalProperties': False}),
+    _tool('sync_feedback_summary', 'Show local aggregate semantic-review labels by model, prompt, review kind and confidence band; it returns no excerpts and never tunes policy.',
+          {'type': 'object', 'properties': {}, 'additionalProperties': False}),
     _tool('sync_accept', 'Record owner acceptance after a separate user confirmation.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'revision': {'type': 'string'},
                                             'decision': {'type': 'string'}},
@@ -597,6 +603,31 @@ class Server:
             if set(arguments) != {'operation'} or not isinstance(operation, str):
                 raise Refused('sync_semantic_review accepts only a required operation')
             result = sync.semantic_review(Wiki(self.root), self.state, operation)
+        elif name == 'sync_resolve':
+            if set(arguments) - {'operation', 'revision', 'decision'} or 'operation' not in arguments:
+                raise Refused('sync_resolve accepts operation and optional revision/decision')
+            if not isinstance(operation, str):
+                raise Refused('sync_resolve: operation is required')
+            revision, decision = arguments.get('revision'), arguments.get('decision')
+            if revision is not None:
+                if not isinstance(revision, str) or (decision is not None and not isinstance(decision, str)):
+                    raise Refused('sync_resolve revision/decision must be strings')
+                details = sync.inspect(Wiki(self.root), self.state, operation)
+                proposal = details.get('resolver_proposal') or {}
+                summaries = '; '.join(item.get('summary', '') for item in proposal.get('reports', []))
+                paths = ', '.join(sorted(proposal.get('written', {})))
+                if proposal.get('revision') != revision:
+                    raise Refused('sync_resolve: proposal revision is no longer current')
+                if proposal.get('policy', {}).get('approval') == 'manual' and not decision:
+                    raise Refused('sync_resolve: manual resolver commit needs a concrete owner decision')
+                self._confirm_sync(name, f'Commit resolver proposal {revision} for operation {operation}; '
+                                   f'candidate paths: {paths}; resolver summary: {summaries}?'
+                                   + (f' Owner decision: {decision}' if decision else ''))
+            result = sync.resolve(Wiki(self.root), self.state, operation, revision=revision, decision=decision)
+        elif name == 'sync_feedback_summary':
+            if arguments:
+                raise Refused('sync_feedback_summary takes no arguments')
+            result = sync.feedback_summary(Wiki(self.root), self.state)
         elif name == 'sync_accept':
             if set(arguments) - {'operation', 'revision', 'decision'} or not {'operation', 'revision'} <= set(arguments):
                 raise Refused('sync_accept accepts operation, revision and optional decision')

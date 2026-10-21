@@ -224,12 +224,210 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(calls[0]['domain'], 'workspace')
         self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), before)
         sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        summary_before = sync.feedback_summary(wiki, self.state)
+        self.assertEqual(sum(row['missing_label'] for row in summary_before['groups']), 1)
         feedback = sync.feedback(wiki, self.state, fetched['operation_id'], 'correct')
         feedback_file = self.state / 'roots' / operations.sha256(str(self.root).encode())[:24] / 'feedback' / (
             f"{fetched['operation_id']}-{reviewed['candidate_revision']}.json")
         self.assertEqual(feedback['rating'], 'correct')
         self.assertNotIn('quote', feedback_file.read_text())
         self.assertNotIn('incoming', feedback_file.read_text())
+        summary_after = sync.feedback_summary(wiki, self.state)
+        self.assertEqual(sum(row['correct'] for row in summary_after['groups']), 1)
+        self.assertEqual(sum(row['missing_label'] for row in summary_after['groups']), 0)
+        self.assertEqual(summary_after['threshold_tuning'], 'disabled')
+        record = json.loads(feedback_file.read_text())
+        record['rating'] = 'corrected'
+        feedback_file.write_text(json.dumps(record))
+        corrected = sync.feedback_summary(wiki, self.state)['groups'][0]
+        self.assertEqual(corrected['corrected'], 1)
+        self.assertEqual(corrected['corrected_or_rejected_fraction'], 1.0)
+        self.assertEqual(corrected['confidence_band'], '0.90-0.94')
+
+    def test_auto_pull_applies_only_after_clear_review_meets_threshold(self):
+        incoming = self.incoming('work/10-projects/alpha/note.md', document('note', 'work/alpha',
+                                                                          body='A supported update.'))
+        wiki = Wiki(self.root)
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+
+        def reviewer(request):
+            path = request['changed_paths'][0]
+            content = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path,
+                                    'quote': content, 'disposition': 'preserved',
+                                    'output_path': path, 'output_quote': content,
+                                    'reason': 'The changed assertion is supported.'}],
+                    'findings': [], 'summary': 'No unresolved semantic issue.'}
+
+        before = sync_git.head(self.root)
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            result = sync.pull(wiki, self.state, review_backend=reviewer)
+            self.assertEqual(result['status'], 'applied-automatically')
+        self.assertEqual(sync_git.head(self.root), incoming)
+        self.assertNotEqual(before, incoming)
+
+    def test_auto_pull_does_not_apply_below_confidence_threshold(self):
+        self.incoming('work/10-projects/alpha/note.md', document('note', 'work/alpha',
+                                                                  body='A questionable update.'))
+        wiki = Wiki(self.root)
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+
+        def reviewer(request):
+            path = request['changed_paths'][0]
+            content = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.94,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path,
+                                    'quote': content, 'disposition': 'preserved',
+                                    'output_path': path, 'output_quote': content,
+                                    'reason': 'The update remains.'}],
+                    'findings': [], 'summary': 'Low confidence.'}
+
+        before = sync_git.head(self.root)
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            result = sync.pull(wiki, self.state, review_backend=reviewer)
+        self.assertEqual(result['status'], 'needs-decision')
+        self.assertEqual(sync_git.head(self.root), before)
+
+    def test_resolution_lifecycle_keeps_git_conflict_candidate_only_until_owner_approval(self):
+        note = self.root / 'work/10-projects/alpha/note.md'
+        note.write_text(document('note', 'work/alpha', body='Ours statement.'))
+        commit_all(self.root)
+        ours = sync_git.head(self.root)
+        remote_note = self.clone / 'work/10-projects/alpha/note.md'
+        remote_note.write_text(document('note', 'work/alpha', body='Theirs statement.'))
+        self.git(self.clone, 'add', '--', 'work/10-projects/alpha/note.md')
+        self.git(self.clone, 'commit', '-qm', 'incoming conflicting statement')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        theirs = self.git(self.clone, 'rev-parse', 'HEAD')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        conflict = sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+        self.assertEqual(conflict['status'], 'conflict')
+        live_before = sync_git.head(self.root)
+
+        def resolver(context, tools):
+            path = 'work/10-projects/alpha/note.md'
+            output = document('note', 'work/alpha', body='Both statements, with their sources retained.')
+            written = tools.candidate_write(path, __import__('hashlib').sha256(
+                context['files'][path].encode()).hexdigest(), output)
+            tools.candidate_stage([path])
+            return {'summary': 'Retain both attributed statements', 'confidence': 0.99,
+                    'context_complete': True,
+                    'statements': [{'id': 'ours-1', 'disposition': 'preserved'},
+                                   {'id': 'theirs-1', 'disposition': 'preserved'}],
+                    'findings': [], 'mappings': [{'path': path, 'sha256': written['sha256'],
+                                                  'statement_ids': ['ours-1', 'theirs-1']}]}
+
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver)
+        self.assertEqual(proposal['status'], 'resolution-pending')
+        self.assertEqual(sync_git.head(self.root), live_before)
+        with self.assertRaisesRegex(WikiError, 'owner decision'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'])
+        completed = sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                                 decision='Preserve both statements with attribution.')
+        self.assertEqual(completed['status'], 'prepared')
+        candidate = Path(completed['candidate_worktree'])
+        self.assertEqual(sync_git.parents(candidate, completed['candidate']), (ours, theirs))
+        self.assertEqual(sync_git.head(self.root), live_before)
+
+        def reviewer(request):
+            path = request['changed_paths'][0]
+            content = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': content,
+                                    'disposition': 'preserved', 'output_path': path, 'output_quote': content,
+                                    'reason': 'Fresh review accounts for the resolution.'}],
+                    'findings': [], 'summary': 'Resolution has no remaining hard finding.'}
+
+        reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        applied = sync.apply(wiki, self.state, fetched['operation_id'])
+        self.assertEqual(applied['head'], completed['candidate'])
+
+    def test_auto_resolver_commits_candidate_then_requires_fresh_clear_review_before_apply(self):
+        from hashlib import sha256
+        note_rel, other_rel = ('work/10-projects/alpha/note.md', 'work/10-projects/alpha/other.md')
+        (self.root / note_rel).write_text(document('note', 'work/alpha', body='Status: active.'))
+        (self.root / other_rel).write_text(document('other-note', 'work/alpha', body='Decision: continue.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        (self.root / note_rel).write_text(document('note', 'work/alpha', body='Status: active in June.'))
+        commit_all(self.root)
+        (self.clone / other_rel).write_text(document('other-note', 'work/alpha', body='Decision: stop in June.'))
+        self.git(self.clone, 'add', other_rel)
+        self.git(self.clone, 'commit', '-qm', 'remote decision')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+
+        def contradictory_review(request):
+            paths = request['changed_paths']
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'needs_decision', 'statements': [],
+                    'findings': [{'id': 'f1', 'category': 'contradiction', 'paths': paths,
+                                  'evidence_quotes': [request['versions']['candidate'][p] for p in paths],
+                                  'explanation': 'The separate documents disagree.', 'options': [],
+                                  'question': 'Which is current?'}],
+                    'summary': 'A contradiction remains.'}
+
+        def resolver(context, tools):
+            outputs = {}
+            for path, current in context['files'].items():
+                fixed = current.replace('Status: active in June.', 'Status: active in June, decision pending.') \
+                    .replace('Decision: stop in June.', 'Decision: stop in June, status remains under review.')
+                if fixed == current:
+                    continue
+                outputs[path] = tools.candidate_write(path, sha256(current.encode()).hexdigest(), fixed)
+            tools.candidate_stage(sorted(outputs))
+            ids = [f's{index}' for index in range(len(outputs))]
+            return {'summary': 'Reconcile the June statements with explicit uncertainty.',
+                    'confidence': 0.99, 'context_complete': True, 'findings': [],
+                    'statements': [{'id': ident, 'disposition': 'preserved'} for ident in ids],
+                    'mappings': [{'path': path, 'sha256': value['sha256'], 'statement_ids': [ids[index]]}
+                                 for index, (path, value) in enumerate(sorted(outputs.items()))]}
+
+        def clear_review(request):
+            paths = request['changed_paths']
+            statements = []
+            for index, path in enumerate(paths):
+                content = request['versions']['candidate'][path]
+                statements.append({'id': f'r{index}', 'side': 'candidate', 'path': path,
+                                   'quote': content, 'disposition': 'preserved', 'output_path': path,
+                                   'output_quote': content, 'reason': 'The resolution states the uncertainty.'})
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear', 'statements': statements,
+                    'findings': [], 'summary': 'Fresh review passes.'}
+
+        before = sync_git.head(self.root)
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            first = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=contradictory_review)
+            with self.assertRaises(WikiError):
+                sync.accept(wiki, self.state, fetched['operation_id'], first['revision'])
+            result = sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver,
+                                  review_backend=clear_review)
+        self.assertEqual(result['status'], 'applied-automatically')
+        self.assertNotEqual(sync_git.head(self.root), before)
 
     def test_candidate_change_while_reviewer_runs_discards_the_stale_report(self):
         self.incoming()

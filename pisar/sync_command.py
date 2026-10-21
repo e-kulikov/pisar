@@ -25,7 +25,7 @@ def add_parser(commands):
     fetch.add_argument('--remote', default='origin')
     fetch.add_argument('--branch', default='main')
     fetch.add_argument('--bootstrap-map', help='nonsecret JSON map of child paths to {url, branch}')
-    pull = actions.add_parser('pull', help='Fetch and prepare a candidate; manual acceptance is always required')
+    pull = actions.add_parser('pull', help='Fetch, prepare, review and apply only when policy authorizes it')
     pull.add_argument('--repo', required=True)
     pull.add_argument('--remote', default='origin')
     pull.add_argument('--branch', default='main')
@@ -37,6 +37,12 @@ def add_parser(commands):
     prepare.add_argument('--merge', action='store_true', help='Allow a native merge for divergent histories')
     review = actions.add_parser('review', help='Run the configured read-only semantic reviewer')
     review.add_argument('--operation', required=True)
+    resolve = actions.add_parser('resolve', help='Propose or approve a constrained semantic resolution')
+    resolve.add_argument('--operation', required=True)
+    resolve_accept = actions.add_parser('resolve-accept', help='Approve one exact pending resolver proposal')
+    resolve_accept.add_argument('--operation', required=True)
+    resolve_accept.add_argument('--revision', required=True, help='exact pending proposal digest')
+    resolve_accept.add_argument('--decision', help='owner decision required before a manual resolver commit')
     manual_review = actions.add_parser('manual-review', help='Record an explicit human review alternative')
     manual_review.add_argument('--operation', required=True)
     status = actions.add_parser('status', help='Read cached sync operation facts without fetching')
@@ -61,6 +67,7 @@ def add_parser(commands):
     feedback.add_argument('--operation', required=True)
     feedback.add_argument('--rating', required=True, choices=('correct', 'corrected', 'rejected'))
     feedback.add_argument('--category')
+    actions.add_parser('feedback-summary', help='Show local aggregate semantic-review labels without excerpts')
 
 
 def run(args, wiki, state_dir):
@@ -75,6 +82,10 @@ def run(args, wiki, state_dir):
         return sync.prepare(wiki, state_dir, args.operation, merge=args.merge)
     if args.action == 'review':
         return sync.semantic_review(wiki, state_dir, args.operation)
+    if args.action == 'resolve':
+        return sync.resolve(wiki, state_dir, args.operation)
+    if args.action == 'resolve-accept':
+        return sync.resolve(wiki, state_dir, args.operation, revision=args.revision, decision=args.decision)
     if args.action == 'manual-review':
         return sync.manual_review(wiki, state_dir, args.operation)
     if args.action == 'status':
@@ -95,4 +106,6 @@ def run(args, wiki, state_dir):
                             bootstrap_map=_bootstrap_map(args.bootstrap_map))
     if args.action == 'feedback':
         return sync.feedback(wiki, state_dir, args.operation, args.rating, args.category)
+    if args.action == 'feedback-summary':
+        return sync.feedback_summary(wiki, state_dir)
     raise ValueError('unknown sync action')

@@ -101,6 +101,15 @@ class ManualReviewCommandTests(unittest.TestCase):
         parsed = parser().parse_args(['sync', 'manual-review', '--operation', 'op-1'])
         self.assertEqual((parsed.command, parsed.action, parsed.operation),
                          ('sync', 'manual-review', 'op-1'))
+        parsed = parser().parse_args(['sync', 'resolve', '--operation', 'op-2'])
+        self.assertEqual((parsed.action, parsed.operation), ('resolve', 'op-2'))
+        with self.assertRaises(SystemExit):
+            parser().parse_args(['sync', 'resolve', '--operation', 'op-2', '--revision', 'digest'])
+        parsed = parser().parse_args(['sync', 'resolve-accept', '--operation', 'op-2', '--revision', 'digest',
+                                      '--decision', 'keep both'])
+        self.assertEqual((parsed.action, parsed.operation, parsed.revision, parsed.decision),
+                         ('resolve-accept', 'op-2', 'digest', 'keep both'))
+        self.assertEqual(parser().parse_args(['sync', 'feedback-summary']).action, 'feedback-summary')
         with self.assertRaises(SystemExit):
             parser().parse_args(['sync', 'review', '--operation', 'op-1', '--manual'])
 

@@ -35,7 +35,9 @@ CLAUDE_ALLOWED = (
     # Sync review/preparation are bounded CLI actions; owner decisions and live mutations ask first.
     'Bash(pisar sync fetch *)', 'Bash(pisar sync pull *)', 'Bash(pisar sync prepare *)',
     'Bash(pisar sync status *)', 'Bash(pisar sync review *)', 'Bash(pisar sync close *)',
-    'Bash(pisar sync feedback *)', 'Bash(pisar sync publish --repo *)',
+    'Bash(pisar sync resolve --operation *)',
+    'Bash(pisar sync feedback *)', 'Bash(pisar sync feedback-summary*)',
+    'Bash(pisar sync publish --repo *)',
     # Not `lesson accept`: it is in CLAUDE_ASK and always needs the user.
     'Bash(pisar lesson start *)', 'Bash(pisar lesson check *)',
     'Bash(pisar lesson review *)', 'Bash(pisar lesson show *)',
@@ -52,7 +54,8 @@ CLAUDE_DENIED = ('Bash(git push*)', 'Edit(.git/**)',
                  'Agent(statusline-setup)', 'Agent(claude-code-guide)')
 # `ask` overrides `allow`, so accepting a lesson stays a user decision.
 CLAUDE_ASK = ('Bash(pisar lesson accept *)', 'Bash(pisar sync accept *)', 'Bash(pisar sync apply *)',
-              'Bash(pisar sync manual-review *)', 'Bash(pisar sync publish --operation *)')
+              'Bash(pisar sync manual-review *)', 'Bash(pisar sync resolve-accept *)',
+              'Bash(pisar sync publish --operation *)')
 
 
 def lesson_workspace_rule(state):

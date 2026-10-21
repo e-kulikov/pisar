@@ -62,6 +62,8 @@ class ConfigTests(Fixture):
             'agents.claude.effort': {'value': None, 'source': 'default'},
             'agents.claude.reviewer.model': {'value': 'opus', 'source': 'default'},
             'agents.claude.reviewer.effort': {'value': 'high', 'source': 'default'},
+            'agents.claude.resolver.model': {'value': 'opus', 'source': 'default'},
+            'agents.claude.resolver.effort': {'value': 'high', 'source': 'default'},
             'agents.claude.researcher.model': {'value': 'sonnet', 'source': 'default'},
             'commit_message.enabled': {'value': False, 'source': 'default'},
             'commit_message.agent': {'value': 'claude', 'source': 'default'},
@@ -74,6 +76,8 @@ class ConfigTests(Fixture):
             'agents.codex.effort': {'value': None, 'source': 'default'},
             'agents.codex.reviewer.model': {'value': 'gpt-6.1-sol', 'source': 'default'},
             'agents.codex.reviewer.effort': {'value': 'high', 'source': 'default'},
+            'agents.codex.resolver.model': {'value': 'gpt-6.1-sol', 'source': 'default'},
+            'agents.codex.resolver.effort': {'value': 'high', 'source': 'default'},
             'agents.codex.researcher.model': {'value': 'gpt-5.5', 'source': 'default'},
             'agents.codex.researcher.effort': {'value': 'medium', 'source': 'default'},
         })
@@ -104,6 +108,8 @@ effort = "max"
             'agents.claude.effort': ('low', 'config'),
             'agents.claude.reviewer.model': ('some-model', 'config'),
             'agents.claude.reviewer.effort': ('high', 'default'),
+            'agents.claude.resolver.model': ('opus', 'default'),
+            'agents.claude.resolver.effort': ('high', 'default'),
             'agents.claude.researcher.model': ('sonnet', 'default'),
             'agents.claude.researcher.effort': ('max', 'config'),
             'commit_message.enabled': (False, 'default'),
@@ -121,6 +127,8 @@ effort = "max"
             'agents.codex.effort': (None, 'default'),
             'agents.codex.reviewer.model': ('gpt-6.1-sol', 'default'),
             'agents.codex.reviewer.effort': ('high', 'default'),
+            'agents.codex.resolver.model': ('gpt-6.1-sol', 'default'),
+            'agents.codex.resolver.effort': ('high', 'default'),
             'agents.codex.researcher.model': ('gpt-5.5', 'default'),
             'agents.codex.researcher.effort': ('medium', 'default'),
         }
@@ -144,8 +152,10 @@ effort = "max"
         self.assertEqual(shown['sync.semantic.review'], {'value': 'conflicts', 'source': 'config'})
         self.assertEqual(shown['sync.semantic.min_confidence'], {'value': 0.0, 'source': 'config'})
 
-    def test_automatic_approval_is_rejected_before_delivery_four(self):
-        self.refused('[sync.semantic]\napproval = "auto"\n', 'sync.semantic.approval')
+    def test_automatic_approval_is_available_for_delivery_four(self):
+        self.write_config('[sync.semantic]\napproval = "auto"\nmin_confidence = 0.95\n')
+        self.assertEqual(self.show()['settings']['sync.semantic.approval'],
+                         {'value': 'auto', 'source': 'config'})
 
     def test_sync_reviewer_backend_is_independently_configurable(self):
         self.write_config('[sync.semantic]\nagent = "codex"\n')

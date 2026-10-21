@@ -10,7 +10,7 @@ import tomllib
 from .safety import WikiError
 
 AGENTS = ('claude', 'codex')
-ROLES = ('reviewer', 'researcher')
+ROLES = ('reviewer', 'researcher', 'resolver')
 AGENT_KEYS = ('model', 'effort')
 # The commit-message writer ([commit_message]): off by default; timeout bounds in seconds.
 COMMIT_MESSAGE_DEFAULTS = dict(enabled=False, agent='claude', model='sonnet', effort='medium', timeout=120,
@@ -141,8 +141,8 @@ def _validate_sync(file, value):
             raise _error(file, 'sync.semantic.review', 'must be all or conflicts')
     if 'approval' in table:
         _string(file, 'sync.semantic.approval', table['approval'])
-        if table['approval'] != 'manual':
-            raise _error(file, 'sync.semantic.approval', 'only manual approval is available before delivery IV')
+        if table['approval'] not in ('manual', 'auto'):
+            raise _error(file, 'sync.semantic.approval', 'must be manual or auto')
     if 'agent' in table:
         _string(file, 'sync.semantic.agent', table['agent'])
         if table['agent'] not in AGENTS:

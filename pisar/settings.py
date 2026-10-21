@@ -15,6 +15,8 @@ ROLE_DEFAULTS = {'claude': {'reviewer': {'model': 'opus', 'effort': 'high'},
                             'researcher': {'model': 'sonnet', 'effort': 'medium'}},
                  'codex': {'reviewer': {'model': 'gpt-6.1-sol', 'effort': 'high'},
                            'researcher': {'model': 'gpt-5.5', 'effort': 'medium'}}}
+for _agent in ROLE_DEFAULTS:
+    ROLE_DEFAULTS[_agent]['resolver'] = dict(ROLE_DEFAULTS[_agent]['reviewer'])
 
 
 def _environment(name):
@@ -107,7 +109,7 @@ def agent_options(agent, role=None):
 
 
 def semantic_policy():
-    """Effective sync semantic policy; automatic approval is unavailable in delivery II."""
+    """Effective sync semantic policy, including Stage-IV automatic approval when explicitly selected."""
     table = config.load().get('sync', {}).get('semantic', {})
     return {'review': table.get('review', 'all'), 'approval': table.get('approval', 'manual'),
             'agent': table.get('agent', 'claude'),

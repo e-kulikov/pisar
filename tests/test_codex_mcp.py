@@ -149,13 +149,35 @@ class McpTests(Fixture):
         self.assertIn('sync_apply', mcp.TOOL_NAMES)
         self.assertIn('sync_publish', mcp.TOOL_NAMES)
         self.assertIn('sync_semantic_review', mcp.TOOL_NAMES)
+        self.assertIn('sync_resolve', mcp.TOOL_NAMES)
         self.assertIn('sync_publish_prepare', mcp.TOOL_NAMES)
+        self.assertIn('sync_feedback_summary', mcp.TOOL_NAMES)
 
     def test_semantic_review_tool_is_read_only_and_does_not_elicit_acceptance(self):
         server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
         with mock.patch('pisar.sync.semantic_review', return_value={'status': 'reviewed'}):
             result = server.tool('sync_semantic_review', {'operation': 'sync-fixture'})
         self.assertEqual(json.loads(result['content'][0]['text']), {'status': 'reviewed'})
+
+    def test_resolver_commit_requires_confirmation_bound_to_current_proposal(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        details = {'resolver_proposal': {'revision': 'proposal-1', 'written': {'work/note.md': 'hash'},
+                                         'policy': {'approval': 'manual'},
+                                         'reports': [{'summary': 'Keep both sourced statements.'}]}}
+        with mock.patch('pisar.sync.inspect', return_value=details), \
+                mock.patch.object(server, '_confirm_sync') as confirm, \
+                mock.patch('pisar.sync.resolve', return_value={'status': 'prepared'}) as resolve:
+            result = server.tool('sync_resolve', {'operation': 'op-1', 'revision': 'proposal-1',
+                                                  'decision': 'Preserve both.'})
+        self.assertIn('candidate paths: work/note.md', confirm.call_args.args[1])
+        self.assertIn('Keep both sourced statements.', confirm.call_args.args[1])
+        resolve.assert_called_once()
+        self.assertEqual(json.loads(result['content'][0]['text']), {'status': 'prepared'})
+        with mock.patch('pisar.sync.inspect', return_value=details), \
+                mock.patch.object(server, '_confirm_sync') as stale_confirm:
+            stale = server.tool('sync_resolve', {'operation': 'op-1', 'revision': 'stale'})
+        self.assertTrue(stale.get('isError'))
+        stale_confirm.assert_not_called()
 
     def test_publish_only_prepare_tool_never_publishes(self):
         server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
@@ -199,6 +221,8 @@ class McpTests(Fixture):
                      ['sync', 'apply', '--operation', 'x'], ['sync', 'publish', '--operation', 'x']):
             with self.subTest(args=args), self.assertRaises(mcp.Refused):
                 mcp.check_pisar(args)
+        with self.assertRaises(mcp.Refused):
+            mcp.check_pisar(['sync', 'resolve', '--operation', 'x', '--revision', 'digest'])
 
     def test_sync_accept_decline_never_writes_a_decision(self):
         client = self.server(elicit='decline')
