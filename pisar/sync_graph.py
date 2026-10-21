@@ -237,6 +237,20 @@ def publish_children(operation, graph, save, bootstrap_map=None):
     return completed
 
 
+def _publication_upstream(repo, branch, path):
+    """Resolve the remote branch independently of its local fetch-ref mapping."""
+    from . import sync
+    fields = sync_git.text(repo, 'for-each-ref',
+        '--format=%(upstream:remotename)%00%(upstream:remoteref)',
+        f"refs/heads/{branch.removeprefix('refs/heads/')}").strip().split('\0')
+    if len(fields) != 2 or not fields[0] or fields[0] == '.' or not fields[1].startswith('refs/heads/'):
+        raise WikiError(f'submodule has no configured publication upstream branch: {path}')
+    remote, remote_ref = fields
+    destination = remote_ref.removeprefix('refs/heads/')
+    sync._target_ref(repo, sync.Target(remote, destination))
+    return remote, destination
+
+
 def freeze_publication(operation, graph):
     """Bind the reviewed graph to each attached repository's configured upstream."""
     from . import sync
@@ -251,13 +265,7 @@ def freeze_publication(operation, graph):
         if path == '.':
             remote, branch = operation['remote'], operation['target_branch']
         else:
-            upstream = sync_git.text(repo, 'for-each-ref', '--format=%(upstream)',
-                f"refs/heads/{item['branch'].removeprefix('refs/heads/')}").strip()
-            if not upstream.startswith('refs/remotes/'):
-                raise WikiError(f'submodule has no configured publication upstream: {path}')
-            remote, _, branch = upstream.removeprefix('refs/remotes/').partition('/')
-            if not branch:
-                raise WikiError(f'submodule publication upstream is ambiguous: {path}')
+            remote, branch = _publication_upstream(repo, item['branch'], path)
         sync._target_ref(repo, sync.Target(remote, branch))
         fingerprint = sync._remote_fingerprint(repo, remote)
         if sync._remote_fingerprint(repo, remote, push=True) != fingerprint:
@@ -389,13 +397,7 @@ def prepare_graph(operation, root_candidate, *, message=None, ruwana=None, on_co
         incoming_pin = _pin_at(parent_live['repo'], remainder, parent_incoming)
         incoming_commits[relative] = incoming_pin
         source = item['repo']
-        upstream = sync_git.text(source, 'for-each-ref', '--format=%(upstream)',
-                                 f'refs/heads/{item["branch"].removeprefix("refs/heads/")}').strip()
-        if not upstream:
-            raise WikiError(f'submodule has no configured upstream: {relative}')
-        remote, _, branch = upstream.removeprefix('refs/remotes/').partition('/')
-        if not branch:
-            raise WikiError(f'submodule upstream is ambiguous: {relative}')
+        remote, branch = _publication_upstream(source, item['branch'], relative)
         target = sync_git.fetch_tip(source, remote, branch)
         if not sync_git._ancestor(source, incoming_pin, target):
             raise WikiError(f'incoming submodule pin is unavailable from its upstream: {relative}')

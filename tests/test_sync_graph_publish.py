@@ -44,6 +44,55 @@ class SyncGraphPublishTests(unittest.TestCase):
         self.assertEqual([target.path for target in targets],
                          ['work/10-projects/alpha/nested', 'work/10-projects/alpha', '.'])
 
+    def _remap_child_upstream(self):
+        child = self.f.root / self.f.child_path
+        baseline = self.f.git(child, 'rev-parse', 'HEAD')
+        self.f.git(self.f.child_remote, 'update-ref', 'refs/heads/release', baseline)
+        self.f.git(child, 'config', '--replace-all', 'remote.origin.fetch',
+                   '+refs/heads/main:refs/remotes/origin/release')
+        self.f.git(child, 'config', 'branch.main.remote', 'origin')
+        self.f.git(child, 'config', 'branch.main.merge', 'refs/heads/main')
+        self.f.git(child, 'fetch', '-q', 'origin')
+        self.assertEqual(self.f.git(child, 'for-each-ref', '--format=%(upstream)', 'refs/heads/main'),
+                         'refs/remotes/origin/release')
+        return child, baseline
+
+    def test_pull_resolves_child_remote_branch_through_custom_fetch_refspec(self):
+        from pisar import sync
+        from pisar.spaces import Wiki
+        child, baseline = self._remap_child_upstream()
+        incoming, _ = self.f.incoming_child_and_root_pin()
+        ready = sync.pull(Wiki(self.f.root), self.f.state)
+        self.assertEqual(ready['status'], 'needs-approval')
+        candidate = Path(ready['candidate_worktree']) / self.f.child_path
+        self.assertEqual(self.f.git(candidate, 'rev-parse', 'HEAD'), incoming)
+        self.assertEqual(self.f.git(child, 'rev-parse', 'HEAD'), baseline)
+        self.assertEqual(self.f.git(self.f.child_remote, 'rev-parse', 'refs/heads/release'), baseline)
+
+    def test_child_publication_uses_remote_branch_under_custom_fetch_refspec(self):
+        from pisar import sync
+        from pisar.operations import Runtime
+        from pisar.spaces import Wiki
+        child, baseline = self._remap_child_upstream()
+        self.f.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'outgoing.md').write_text('Outgoing child assertion.\n')
+        self.f.git(child, 'add', '--', 'outgoing.md')
+        self.f.git(child, 'commit', '-qm', 'outgoing child assertion')
+        candidate = self.f.git(child, 'rev-parse', 'HEAD')
+        self.f.git(self.f.root, 'add', '--', self.f.child_path)
+        self.f.git(self.f.root, 'commit', '-qm', 'pin outgoing child')
+        wiki = Wiki(self.f.root)
+        ready = sync.publish_only(wiki, self.f.state)
+        operation = sync._load(Runtime(self.f.state, self.f.root), ready['operation_id'])
+        target = next(item for item in operation['publication_graph'] if item['path'] == self.f.child_path)
+        self.assertEqual((target['remote'], target['branch']), ('origin', 'main'))
+        sync.manual_review(wiki, self.f.state, ready['operation_id'])
+        sync.accept(wiki, self.f.state, ready['operation_id'], ready['revision'])
+        sync.publish(wiki, self.f.state, ready['operation_id'])
+        self.assertEqual(self.f.git(self.f.child_remote, 'rev-parse', 'refs/heads/main'), candidate)
+        self.assertEqual(self.f.git(self.f.child_remote, 'rev-parse', 'refs/heads/release'), baseline)
+
     def test_pin_at_publication_destination_but_missing_from_bootstrap_source_is_refused(self):
         graph, op = self._candidate_graph()
         empty_source = self.f.base / 'empty-bootstrap.git'
