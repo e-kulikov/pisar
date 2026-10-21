@@ -459,6 +459,10 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             structural = check_documents(Wiki(candidate))
             if not structural['ok']:
                 raise WikiError('candidate structural check failed: ' + '; '.join(structural['errors']))
+            staged_tree = sync_git.text(candidate, 'write-tree').strip()
+            sync._task_changes(candidate, operation['ours'], operation['theirs'], staged_tree)
+            sync._validate_originals(candidate, operation['ours'], operation['theirs'], staged_tree)
+            sync._validate_processing(candidate, staged_tree)
             operation['candidate'] = proposal['candidate_head']
             operation['status'] = 'resolving'
             tool.authorize_commit(report)
@@ -547,16 +551,25 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             groups.setdefault(domain, set()).add(path)
         resolver = backend or _configured_backend(wiki, runtime.base)
         reports, written = [], {}
+        session_staged = set(initial_staged)
+        session_index = initial_index
         for domain, paths in sorted(groups.items()):
             supplementary = (next((item for item in requests if item['domain'] == domain), None) if not unmerged
                              else _conflict_context(wiki, candidate, operation, domain, paths))
             result = resolve_proposal(candidate, domain, paths, resolver, expected_head=head,
                                       supplemental_context=supplementary,
-                                      initial_staged=set(initial_staged), initial_index=initial_index)
+                                      initial_staged=session_staged, initial_index=session_index)
+            result_tools = result['tools']
+            result_tools._fresh()
+            result_tools._verify_index()
             report = result['report']
             reports.append(report)
             for mapping in report['mappings']:
                 written[mapping['path']] = mapping['sha256']
+            session_staged.update(result_tools._written)
+            indexed = session_staged
+            session_index = {name: [list(entry) for entry in entries]
+                             for name, entries in result_tools._index_entries(indexed).items()}
         if not written:
             raise WikiError('resolver did not produce any candidate writes')
         merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None

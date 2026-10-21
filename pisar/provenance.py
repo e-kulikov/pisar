@@ -37,7 +37,7 @@ class ProcessingInventory:
     incomplete: tuple[tuple[str, str, str], ...]
 
 
-def _committed_blob(wiki, path):
+def _committed_blob(wiki, path, revision=None):
     space = wiki.owner(path)
     if space is None:
         return None
@@ -47,7 +47,7 @@ def _committed_blob(wiki, path):
     if not tracked:
         return None
     try:
-        return gitops.blob(repo, f'HEAD:{relative}')
+        return gitops.blob(repo, f'{revision or "HEAD"}:{relative}')
     except WikiError:
         return None
 
@@ -56,18 +56,19 @@ def _digest(value):
     return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
 
 
-def committed_processing(wiki):
-    """Inventory committed capture descriptors and legacy meeting source links.
+def committed_processing(wiki, *, revision=None):
+    """Inventory one committed revision's capture descriptors and meeting source links.
 
     The working tree supplies paths/space ownership only. Every document and
-    source byte used as evidence is read from its owning repository's HEAD.
+    source byte used as evidence is read from its owning repository's HEAD or
+    the supplied Git tree-ish.
     """
     wiki.require_valid()
     documents = []
     for path in wiki.files():
         if path.suffix.lower() != '.md' or wiki.owner(path) is None:
             continue
-        blob = _committed_blob(wiki, path)
+        blob = _committed_blob(wiki, path, revision)
         if blob is None:
             continue
         try:
@@ -87,14 +88,14 @@ def committed_processing(wiki):
         if meeting_meta.get('type') != 'meeting':
             continue
         meeting_ref = f'wiki:{meeting_space.address}:{meeting_meta.get("id", "")}'
-        meeting_blob = _committed_blob(wiki, meeting_path)
+        meeting_blob = _committed_blob(wiki, meeting_path, revision)
         if meeting_blob is not None and _has_pending_meeting_status(meeting_blob):
             pending_meetings.add((meeting_space.address, meeting_ref))
         sources = meeting_meta.get('sources', [])
         for source in sources if isinstance(sources, list) else ():
             if not isinstance(source, str) or not source.startswith('sources/meetings/'):
                 continue
-            original = _committed_blob(wiki, meeting_space.path / source.split('#', 1)[0])
+            original = _committed_blob(wiki, meeting_space.path / source.split('#', 1)[0], revision)
             if original is not None:
                 meeting_originals.setdefault((meeting_space.address, meeting_ref), set()).add(sha256(original))
     for path, space, meta in documents:
@@ -128,7 +129,7 @@ def committed_processing(wiki):
             incomplete.append((space.address, digest, 'committed processed capture lacks one original source link'))
             continue
         original_path = space.path / originals[0]
-        original = _committed_blob(wiki, original_path)
+        original = _committed_blob(wiki, original_path, revision)
         if original is None or sha256(original) != digest:
             incomplete.append((space.address, digest, 'committed original source is absent or has a different hash'))
             continue
@@ -148,7 +149,7 @@ def committed_processing(wiki):
             if not isinstance(source, str) or not source.startswith('sources/meetings/'):
                 continue
             source_path = space.path / source.split('#', 1)[0]
-            blob = _committed_blob(wiki, source_path)
+            blob = _committed_blob(wiki, source_path, revision)
             if blob is None:
                 incomplete.append((space.address, '', 'committed meeting source link is missing'))
                 continue

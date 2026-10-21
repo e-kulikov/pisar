@@ -228,10 +228,10 @@ def _validate_originals(candidate, ours, theirs, result):
             raise WikiError(f'original source was changed or removed: {path.decode("utf-8", errors="replace")}')
 
 
-def _validate_processing(candidate):
+def _validate_processing(candidate, revision=None):
     from .provenance import committed_processing
     from .spaces import Wiki
-    inventory = committed_processing(Wiki(candidate))
+    inventory = committed_processing(Wiki(candidate), revision=revision)
     if inventory.incomplete:
         reasons = sorted({reason for _, _, reason in inventory.incomplete})
         raise WikiError('processing provenance incomplete: ' + '; '.join(reasons))

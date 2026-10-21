@@ -764,6 +764,152 @@ class SyncLifecycleTests(unittest.TestCase):
                                                          self._scoped_resolution(context, tools))[1])
         self.assertEqual(calls, [])
 
+    def test_two_domain_resolver_proposal_keeps_sessions_separate(self):
+        domain(self.root, 'personal')
+        personal = space(self.root, 'personal/projects/home', 'home')
+        (personal / 'private.md').write_text(document('private', 'personal/home', body='Private original.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        work_rel, personal_rel = ('work/10-projects/alpha/note.md', 'personal/projects/home/private.md')
+        self.incoming(work_rel, document('note', 'work/alpha', body='Work incoming fact.'))
+        self.git(self.clone, 'pull', '-q', '--ff-only', 'origin', 'main')
+        self.incoming(personal_rel, document('private', 'personal/home', body='Personal incoming fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        review_domains = []
+
+        def reviewer(request):
+            review_domains.append(request['domain'])
+            return self._needs_decision(request)
+
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        resolver_contexts = []
+
+        def resolver(context, tools):
+            resolver_contexts.append(context)
+            return self._scoped_resolution(context, tools)
+
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver)
+        self.assertEqual(proposal['status'], 'resolution-pending')
+        self.assertEqual(review_domains, ['personal', 'work'])
+        self.assertEqual([context['domain'] for context in resolver_contexts], ['personal', 'work'])
+        self.assertEqual([sorted(context['files']) for context in resolver_contexts],
+                         [[personal_rel], [work_rel]])
+        self.assertNotIn('Personal incoming fact.', json.dumps(resolver_contexts[1]))
+        self.assertNotIn('Work incoming fact.', json.dumps(resolver_contexts[0]))
+        approved = sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                                decision='Approve this exact two-domain candidate.')
+        self.assertEqual(approved['status'], 'prepared')
+        candidate = Path(approved['candidate_worktree'])
+        self.assertIn('Resolver correction.', (candidate / personal_rel).read_text())
+        self.assertIn('Resolver correction.', (candidate / work_rel).read_text())
+
+    def test_two_domain_native_conflict_resolution_preserves_merge_parents(self):
+        domain(self.root, 'personal')
+        personal = space(self.root, 'personal/projects/home', 'home')
+        (personal / 'private.md').write_text(document('private', 'personal/home', body='Personal base.'))
+        work_rel, personal_rel = ('work/10-projects/alpha/note.md', 'personal/projects/home/private.md')
+        commit_all(self.root)
+        ours = sync_git.head(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        for path, ident, owner, text in ((work_rel, 'note', 'work/alpha', 'Remote work fact.'),
+                                         (personal_rel, 'private', 'personal/home', 'Remote personal fact.')):
+            (self.clone / path).write_text(document(ident, owner, body=text))
+        self.git(self.clone, 'add', '--', work_rel, personal_rel)
+        self.git(self.clone, 'commit', '-qm', 'remote changes in both domains')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        theirs = self.git(self.clone, 'rev-parse', 'HEAD')
+        for path, ident, owner, text in ((work_rel, 'note', 'work/alpha', 'Local work fact.'),
+                                         (personal_rel, 'private', 'personal/home', 'Local personal fact.')):
+            (self.root / path).write_text(document(ident, owner, body=text))
+        commit_all(self.root)
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        conflict = sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+        self.assertEqual(conflict['status'], 'conflict')
+        resolver_contexts = []
+
+        def resolver(context, tools):
+            from hashlib import sha256
+            resolver_contexts.append(context)
+            written = []
+            for path, current in context['files'].items():
+                if path == personal_rel:
+                    value = document('private', 'personal/home', body='Both local and remote personal facts.')
+                else:
+                    value = document('note', 'work/alpha', body='Both local and remote work facts.')
+                result = tools.candidate_write(path, sha256(current.encode()).hexdigest(), value)
+                written.append((path, result['sha256']))
+            tools.candidate_stage([path for path, _ in written])
+            return {'summary': 'Preserve both domain statements', 'confidence': 0.99,
+                    'context_complete': True,
+                    'statements': [{'id': 's1', 'disposition': 'preserved'}], 'findings': [],
+                    'mappings': [{'path': path, 'sha256': digest, 'statement_ids': ['s1']}
+                                 for path, digest in written]}
+
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver)
+        self.assertEqual([context['domain'] for context in resolver_contexts], ['personal', 'work'])
+        self.assertEqual([sorted(context['files']) for context in resolver_contexts],
+                         [[personal_rel], [work_rel]])
+        completed = sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                                 decision='Resolve both domains with separate scoped inputs.')
+        candidate = Path(completed['candidate_worktree'])
+        operation = sync._load(operations.Runtime(self.state, self.root), fetched['operation_id'])
+        self.assertEqual(sync_git.parents(candidate, completed['candidate']),
+                         (operation['ours'], operation['theirs']))
+
+    def test_auto_resolver_rejects_duplicate_processing_before_candidate_commit(self):
+        space_root = self.root / 'work/10-projects/alpha'
+        for ident, source, raw in (('meeting-a', 'sources/meetings/meeting-a/transcript.md', b'original A\\n'),
+                                   ('meeting-b', 'sources/meetings/meeting-b/transcript.md', b'original B\\n')):
+            source_path = space_root / source
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(raw)
+            meeting_path = space_root / 'meetings' / f'{ident}.md'
+            meeting_path.parent.mkdir(parents=True, exist_ok=True)
+            meeting_path.write_text(document(ident, 'work/alpha', sources=[source], body=f'{ident} completed.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        rel = 'work/10-projects/alpha/meetings/meeting-a.md'
+        self.incoming(rel, document('meeting-a', 'work/alpha',
+                                    sources=['sources/meetings/meeting-a/transcript.md'],
+                                    body='Incoming clarification.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        candidate = Path(prepared['candidate_worktree'])
+        before_candidate = sync_git.head(candidate)
+        before_live = sync_git.head(self.root)
+
+        def duplicate(context, tools):
+            from hashlib import sha256
+            path = next(iter(context['files']))
+            value = document('meeting-a', 'work/alpha',
+                             sources=['sources/meetings/meeting-b/transcript.md'],
+                             body='Resolver claimed completion with another original.')
+            output = tools.candidate_write(path, sha256(context['files'][path].encode()).hexdigest(), value)
+            tools.candidate_stage([path])
+            return {'summary': 'Duplicate processing provenance', 'confidence': 1.0,
+                    'context_complete': True, 'statements': [{'id': 's1', 'disposition': 'preserved'}],
+                    'findings': [], 'mappings': [{'path': path, 'sha256': output['sha256'],
+                                                   'statement_ids': ['s1']}]}
+
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            with self.assertRaisesRegex(WikiError, 'duplicate-source-decision-required'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], backend=duplicate)
+        self.assertEqual(sync_git.head(candidate), before_candidate)
+        self.assertEqual(sync_git.head(self.root), before_live)
+
     def test_auto_resolver_validates_candidate_structure_before_candidate_commit(self):
         rel = 'work/10-projects/alpha/note.md'
         self.incoming(rel, document('note', 'work/alpha', body='Incoming fact.'))
