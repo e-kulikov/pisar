@@ -127,7 +127,9 @@ def validate_reduced_coverage(runtime, operation):
             or operation.get('resolver_result') or operation.get('resolver_proposal')
             or operation.get('conflict_provenance') != 'clean'):
         raise WikiError('reduced-coverage authorization is stale or ineligible')
-    revision = _candidate_revision(operation, requests(Wiki(runtime.root), operation, candidate), current)
+    revision = _reduced_coverage_revision(operation, candidate, current)
+    if revision is None:
+        raise WikiError('reduced-coverage authorization has no changed candidate paths')
     token = operations.fingerprint({'authorization': 'conflicts-only-clean', 'candidate_revision': revision})
     if (review.get('candidate_revision') != revision or semantic.get('revision') != revision
             or review.get('acceptance_revision') != token or semantic.get('acceptance_revision') != token):
@@ -580,6 +582,28 @@ def _candidate_revision(operation, requests, current_policy):
                                    'context': context})
 
 
+def _reduced_coverage_revision(operation, candidate, current_policy):
+    """Bind clean coverage to pinned Git bytes, including all dependency context.
+
+    The Git revision seals O/T, the candidate tree and every graph repository.
+    Their object IDs cover binary files and unchanged context without building a
+    semantic text package. Empty file diffs retain the separate no-change path.
+    """
+    from . import sync
+    paths = _changed_text_paths(candidate, operation['ours'], operation['theirs'], operation['candidate'])
+    for item in operation.get('graph', []):
+        if item['path'] != '.':
+            paths.update(f'{item["path"]}/{path}' for path in _changed_text_paths(
+                Path(candidate) / item['path'], item['ours'], item.get('theirs', item['candidate']),
+                item['candidate']))
+    if not paths:
+        return None
+    return operations.fingerprint({'authorization': 'conflicts-only-clean',
+                                   'git_candidate_revision': sync._revision(operation),
+                                   'policy': current_policy.__dict__, 'prompt_version': PROMPT_VERSION,
+                                   'changed_paths': sorted(paths)})
+
+
 def review_operation(wiki, state_dir, ident, *, backend=None):
     """Run configured read-only reviewer and persist reports outside Git."""
     from datetime import datetime, timezone
@@ -593,6 +617,34 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
         sync._assert_candidate(operation, candidate)
         current_policy = policy()
         frozen_revision = operation['revision']
+        reduced_eligible = (current_policy.review == 'conflicts'
+                            and operation.get('conflict_provenance') == 'clean'
+                            and not (operation.get('resolver_result') or operation.get('resolver_proposal')))
+        candidate_revision = (_reduced_coverage_revision(operation, candidate, current_policy)
+                              if reduced_eligible else None)
+        if reduced_eligible and (candidate_revision is not None or current_policy.approval != 'auto'):
+            if current_policy.approval == 'auto':
+                token = operations.fingerprint({'authorization': 'conflicts-only-clean',
+                                                'candidate_revision': candidate_revision})
+                operation['review'] = dict(kind='reduced-coverage', candidate_revision=candidate_revision,
+                                           git_revision=frozen_revision, acceptance_revision=token,
+                                           policy=current_policy.__dict__)
+                operation['semantic_review'] = dict(coverage='uncovered', revision=candidate_revision,
+                                                    git_revision=frozen_revision, acceptance_revision=token,
+                                                    policy=current_policy.__dict__,
+                                                    label='not semantically reviewed')
+                operation['accepted'] = None
+                operation['status'] = 'reviewed'
+                sync._save(runtime, operation)
+                return dict(operation_id=ident, status='uncovered', revision=token,
+                            label='not semantically reviewed', policy=current_policy.__dict__)
+            operation['review'] = None
+            operation['semantic_review'] = {'coverage': 'uncovered', 'revision': candidate_revision,
+                                            'policy': current_policy.__dict__}
+            operation['accepted'] = None
+            operation['status'] = 'prepared'
+            sync._save(runtime, operation)
+            return {'operation_id': ident, 'status': 'uncovered', 'label': 'not semantically reviewed'}
         review_requests = requests(wiki, operation, candidate)
         for request in review_requests:
             request['policy'] = current_policy.__dict__
@@ -619,32 +671,6 @@ def review_operation(wiki, state_dir, ident, *, backend=None):
                     'candidate_revision': candidate_revision,
                     'reports': cached,
                     'policy': current_policy.__dict__, 'reused': True}
-        if (current_policy.review == 'conflicts'
-                and operation.get('conflict_provenance') == 'clean'
-                and (review_requests or current_policy.approval != 'auto')):
-            if current_policy.approval == 'auto' and review_requests and not (
-                    operation.get('resolver_result') or operation.get('resolver_proposal')):
-                token = operations.fingerprint({'authorization': 'conflicts-only-clean',
-                                                'candidate_revision': candidate_revision})
-                operation['review'] = dict(kind='reduced-coverage', candidate_revision=candidate_revision,
-                                           git_revision=frozen_revision, acceptance_revision=token,
-                                           policy=current_policy.__dict__)
-                operation['semantic_review'] = dict(coverage='uncovered', revision=candidate_revision,
-                                                    git_revision=frozen_revision, acceptance_revision=token,
-                                                    policy=current_policy.__dict__,
-                                                    label='not semantically reviewed')
-                operation['accepted'] = None
-                operation['status'] = 'reviewed'
-                sync._save(runtime, operation)
-                return dict(operation_id=ident, status='uncovered', revision=token,
-                            label='not semantically reviewed', policy=current_policy.__dict__)
-            operation['review'] = None
-            operation['semantic_review'] = {'coverage': 'uncovered', 'revision': candidate_revision,
-                                            'policy': current_policy.__dict__}
-            operation['accepted'] = None
-            operation['status'] = 'prepared'
-            sync._save(runtime, operation)
-            return {'operation_id': ident, 'status': 'uncovered', 'label': 'not semantically reviewed'}
         for request in review_requests:
             if not request['context_complete']:
                 omitted = ', '.join(request['omitted_context'][:10])
