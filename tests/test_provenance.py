@@ -77,7 +77,8 @@ class ProvenanceTests(Fixture):
         (self.alpha / 'meetings').mkdir()
         pending = meeting('work/alpha', 'interrupted', transcript).replace(
             'Synthetic meeting record.',
-            '## Ruwana references\n\nPending: operation `save-interrupted` is incomplete. No task IDs claimed.')
+            '## Ruwana references\n\nPending: operation `save-interrupted` is incomplete. No task IDs claimed.\n\n'
+            'Current task status is authoritative only in ruwana.')
         (self.alpha / 'meetings/interrupted.md').write_text(pending)
         commit_all(self.root)
 
@@ -85,6 +86,53 @@ class ProvenanceTests(Fixture):
         self.assertFalse(inventory.processed)
         with self.assertRaisesRegex(WikiError, 'incomplete'):
             find_processed(inventory, 'work/alpha', digest)
+
+    def test_processed_capture_linked_to_pending_meeting_remains_incomplete(self):
+        from pisar.provenance import committed_processing, find_processed
+        source = b'processed descriptor with pending meeting\n'
+        digest = hashlib.sha256(source).hexdigest()
+        capture_id, meeting_id = 'capture-one', 'interrupted'
+        meeting_ref = f'wiki:work/alpha:{meeting_id}'
+        transcript = f'sources/meetings/{meeting_id}/transcript.md'
+        (self.alpha / f'sources/captures/{capture_id}').mkdir(parents=True)
+        (self.alpha / f'sources/captures/{capture_id}/original').write_bytes(source)
+        (self.alpha / 'inbox').mkdir()
+        (self.alpha / f'inbox/{capture_id}.md').write_text(
+            processed_capture('work/alpha', capture_id, digest, meeting_ref))
+        (self.alpha / transcript).parent.mkdir(parents=True)
+        (self.alpha / transcript).write_bytes(source)
+        (self.alpha / 'meetings').mkdir()
+        pending = meeting('work/alpha', meeting_id, transcript).replace(
+            'Synthetic meeting record.',
+            '## Ruwana references\n\nPending: operation `save-interrupted` is incomplete. No task IDs claimed.\n\n'
+            'Current task status is authoritative only in ruwana.')
+        (self.alpha / f'meetings/{meeting_id}.md').write_text(pending)
+        commit_all(self.root)
+
+        inventory = committed_processing(Wiki(self.root))
+        self.assertFalse(inventory.processed)
+        with self.assertRaisesRegex(WikiError, 'incomplete'):
+            find_processed(inventory, 'work/alpha', digest)
+
+    def test_completed_meeting_quoting_pending_footer_is_not_incomplete(self):
+        from pisar.provenance import committed_processing, find_processed
+        source = b'completed transcript with quoted pending example\n'
+        digest = hashlib.sha256(source).hexdigest()
+        transcript = 'sources/meetings/quoted-pending/transcript.md'
+        (self.alpha / transcript).parent.mkdir(parents=True)
+        (self.alpha / transcript).write_bytes(source)
+        (self.alpha / 'meetings').mkdir()
+        body = ('Synthetic meeting record.\n\nPending: operation `save-example` is incomplete. '
+                'No task IDs claimed.')
+        complete = meeting('work/alpha', 'quoted-pending', transcript).replace(
+            'Synthetic meeting record.', body + '\n\n## Ruwana references\n\nNo agreed tasks to create.\n\n'
+            'Current task status is authoritative only in ruwana.')
+        (self.alpha / 'meetings/quoted-pending.md').write_text(complete)
+        commit_all(self.root)
+
+        inventory = committed_processing(Wiki(self.root))
+        found = find_processed(inventory, 'work/alpha', digest)
+        self.assertEqual(len(found), 1)
 
     def test_two_independent_capture_ids_for_one_original_remain_two_decisions(self):
         from pisar.provenance import committed_processing, find_processed

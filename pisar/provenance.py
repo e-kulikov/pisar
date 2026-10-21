@@ -7,6 +7,11 @@ from .documents import metadata
 from .safety import WikiError, sha256
 
 
+_PENDING_MEETING = re.compile(
+    rb'\n## Ruwana references\n\nPending: operation `[a-z0-9][a-z0-9-]*` is incomplete\.'
+    rb' No task IDs claimed\.\n\nCurrent task status is authoritative only in ruwana\.\n\Z')
+
+
 @dataclass(frozen=True)
 class ProcessedSource:
     space_address: str
@@ -73,8 +78,7 @@ def committed_processing(wiki):
             continue
         meeting_ref = f'wiki:{meeting_space.address}:{meeting_meta.get("id", "")}'
         meeting_blob = _committed_blob(wiki, meeting_path)
-        if meeting_blob is not None and re.search(
-                rb'Pending: operation `[a-z0-9][a-z0-9-]*` is incomplete\. No task IDs claimed\.', meeting_blob):
+        if meeting_blob is not None and _PENDING_MEETING.search(meeting_blob):
             pending_meetings.add((meeting_space.address, meeting_ref))
         sources = meeting_meta.get('sources', [])
         for source in sources if isinstance(sources, list) else ():
@@ -103,6 +107,10 @@ def committed_processing(wiki):
         if digest not in meeting_originals.get((space.address, meeting_reference), set()):
             incomplete.append((space.address, digest,
                                'committed processed capture has no matching committed meeting source'))
+            continue
+        if (space.address, meeting_reference) in pending_meetings:
+            incomplete.append((space.address, digest,
+                               'committed capture points to pending meeting processing'))
             continue
         originals = [source for source in meta.get('sources', [])
                      if isinstance(source, str) and source.startswith('sources/captures/')]

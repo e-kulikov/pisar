@@ -183,6 +183,45 @@ class SaveTests(Fixture):
             save(Wiki(self.root), self.base / 'second-runtime', plan_path, binary)
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
 
+    def test_processed_capture_cannot_override_pending_meeting_on_fresh_replay(self):
+        from pisar.operations import capture, save
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source = self.external('committed capture with interrupted save\n')
+        capture(Wiki(self.root), self.state, 'work/alpha', 'capture-interrupted', source)
+        path, plan = self.plan('save-interrupted', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, self.base / 'missing-ruwana')
+
+        descriptor = self.alpha / 'inbox/capture-interrupted.md'
+        value = descriptor.read_text()
+        value = value.replace('ingest_status = "pending"\n',
+                              'ingest_status = "processed"\nprocessed_by = "save-interrupted"\n'
+                              'meeting_reference = "wiki:work/alpha:launch-meeting"\n')
+        descriptor.write_text(value)
+        commit_all(self.root)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(WikiError, 'committed processing is incomplete'):
+            save(Wiki(self.root), self.base / 'fresh-interrupted-runtime', path,
+                 self.base / 'missing-ruwana')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_completed_result_with_quoted_pending_footer_replays(self):
+        from pisar.operations import save
+        from pisar.spaces import Wiki
+        path, plan = self.plan('quoted-pending', tasks=[])
+        plan['meeting']['body'] = ('Historical quoted log: Pending: operation `save-old` is incomplete. '
+                                   'No task IDs claimed.')
+        path.write_text(json.dumps(plan))
+        first = save(Wiki(self.root), self.state, path, self.base / 'missing-ruwana')
+        self.assertEqual(first['status'], 'complete')
+        replay = save(Wiki(self.root), self.base / 'fresh-quoted-runtime', path,
+                      self.base / 'missing-ruwana')
+        self.assertEqual(replay['status'], 'already-processed')
+
     def test_save_rejects_unagreed_tasks_and_cross_domain(self):
         for tasks in ([dict(id='idea', space_id='work/alpha', title='Maybe launch', agreed=False)],
                       [dict(id='private', space_id='personal/home', title='Copy work', agreed=True)]):
