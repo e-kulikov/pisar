@@ -59,6 +59,41 @@ class SyncGitTests(unittest.TestCase):
         parents = sync_git.parents(candidate, sync_git.head(candidate))
         self.assertEqual(parents, (ours, theirs))
 
+    def test_candidate_refuses_missing_repository_local_merge_driver(self):
+        (self.repo / '.gitattributes').write_text('base.md merge=guard\n')
+        (self.repo / 'base.md').write_text('first\n' + 'middle\n' * 20 + 'last\n')
+        sync_git.text(self.repo, 'config', 'merge.guard.driver', 'false')
+        commit_all(self.repo)
+        base = sync_git.head(self.repo)
+        sync_git.text(self.repo, 'switch', '-c', 'theirs')
+        path = self.repo / 'base.md'
+        path.write_text(path.read_text().replace('first', 'incoming'))
+        commit_all(self.repo)
+        theirs = sync_git.head(self.repo)
+        sync_git.text(self.repo, 'switch', '-c', 'ours', base)
+        path.write_text(path.read_text().replace('last', 'local'))
+        commit_all(self.repo)
+        ours = sync_git.head(self.repo)
+        native = subprocess.run(sync_git.command(self.repo, 'merge', '--no-commit', theirs),
+                                capture_output=True, env=clean_environ())
+        self.assertNotEqual(native.returncode, 0)
+        sync_git.text(self.repo, 'merge', '--abort')
+        before = ((self.repo / '.git/index').read_bytes(), path.read_bytes())
+        with self.assertRaisesRegex(WikiError, 'candidate-compatibility.*merge.guard.driver'):
+            sync_git.prepare_candidate(self.repo, self.base / 'candidate', ours, theirs, merge=True)
+        self.assertEqual(sync_git.head(self.repo), ours)
+        self.assertEqual(((self.repo / '.git/index').read_bytes(), path.read_bytes()), before)
+
+    def test_candidate_refuses_local_filter_on_incoming_attributes(self):
+        ours = sync_git.head(self.repo)
+        sync_git.text(self.repo, 'config', 'filter.guard.smudge', 'cat')
+        (self.repo / '.gitattributes').write_text('base.md filter=guard\n')
+        commit_all(self.repo)
+        theirs = sync_git.head(self.repo)
+        sync_git.text(self.repo, 'switch', '--detach', ours)
+        with self.assertRaisesRegex(WikiError, 'candidate-compatibility.*filter.guard.smudge'):
+            sync_git.prepare_candidate(self.repo, self.base / 'candidate', ours, theirs)
+
     def test_manual_candidate_conflict_resolution(self):
         subprocess.run(['git', '-C', str(self.repo), 'switch', '-c', 'theirs'],
                        env=clean_environ(), check=True, capture_output=True)

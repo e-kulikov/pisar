@@ -69,6 +69,21 @@ class SyncSubmoduleTests(unittest.TestCase):
             raise AssertionError(result.stderr)
         return result.stdout.strip()
 
+    def test_candidate_refuses_repository_local_driver_in_child(self):
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / '.gitattributes').write_text('note.md merge=guard\n')
+        self.git(child, 'config', 'merge.guard.driver', 'false')
+        commit_all(child)
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        with self.assertRaisesRegex(WikiError, 'candidate-compatibility.*merge.guard.driver'):
+            sync.prepare(wiki, self.state, fetched['operation_id'])
+
     def incoming_child_and_root_pin(self, *, child_metadata=None, child_task=False):
         writer = self.base / 'root-writer'
         subprocess.run(['git', 'clone', '--no-local', '-q', str(self.root_remote), str(writer)],

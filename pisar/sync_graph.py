@@ -429,6 +429,7 @@ def prepare_graph(operation, root_candidate, *, message=None):
         sync_git._identity(source, candidate_path)
         sync_git.text(candidate_path, 'fetch', '--no-tags', '--no-recurse-submodules', '--',
                       str(source), item['ours'], incoming_pin)
+        sync_git.check_candidate_compatibility(source, candidate_path, item['ours'], incoming_pin)
         candidate_head = sync_git.head(candidate_path)
         candidate_urls = {path: url for path, (url, _) in _links(candidate_path, candidate_head).items()}
         if candidate_urls != original:

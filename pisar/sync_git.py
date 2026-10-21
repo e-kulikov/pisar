@@ -123,6 +123,46 @@ def _identity(source, candidate):
             text(candidate, 'config', key, value)
 
 
+def _candidate_attributes(repo, commit):
+    paths = run(repo, 'ls-tree', '-r', '--name-only', '-z', commit)
+    with tempfile.TemporaryDirectory(prefix='pisar-attributes-') as temporary:
+        environment = {**gitops.environment(), 'GIT_INDEX_FILE': str(Path(temporary) / 'index')}
+        for args, data in ((('read-tree', commit), None),
+                           (('check-attr', '--cached', '-z', '--stdin', 'merge', 'filter'), paths)):
+            result = subprocess.run(command(repo, *args), input=data, capture_output=True,
+                                    env=environment)
+            if result.returncode:
+                raise WikiError('candidate-compatibility: cannot inspect pinned Git attributes')
+        fields = result.stdout.split(b'\0')
+        return {(fields[i], fields[i + 1]): fields[i + 2]
+                for i in range(0, len(fields) - 1, 3)}
+
+
+def check_candidate_compatibility(source, candidate, ours, theirs):
+    """Refuse local merge/checkout semantics that an ordinary clone cannot reproduce."""
+    keys = {'merge.default', 'merge.renormalize', 'core.autocrlf', 'core.eol'}
+    commits = {ours, theirs, *text(source, 'merge-base', '--all', ours, theirs, check=False).splitlines()}
+    for commit in sorted(commits):
+        attributes = _candidate_attributes(source, commit)
+        if attributes != _candidate_attributes(candidate, commit):
+            raise WikiError('candidate-compatibility: repository-local Git attributes differ')
+        for (_, attribute), raw_value in attributes.items():
+            value = raw_value.decode('utf-8', errors='surrogateescape')
+            if value in ('set', 'unset', 'unspecified'):
+                continue
+            if attribute == b'merge':
+                keys.update(f'merge.{value}.{option}' for option in ('driver', 'recursive'))
+            elif attribute == b'filter':
+                keys.update(f'filter.{value}.{option}' for option in ('clean', 'smudge', 'process', 'required'))
+    default = text(source, 'config', '--get', 'merge.default', check=False).strip()
+    if default:
+        keys.update(f'merge.{default}.{option}' for option in ('driver', 'recursive'))
+    for key in sorted(keys):
+        if (run(source, 'config', '--get-all', key, check=False)
+                != run(candidate, 'config', '--get-all', key, check=False)):
+            raise WikiError(f'candidate-compatibility: required Git configuration differs: {key}')
+
+
 def prepare_candidate(source, candidate, ours, theirs, *, merge=False, message=None, local_only=False):
     """Clone source ordinarily, import exact O/T objects, then prepare a detached candidate branch."""
     source, candidate = Path(source).resolve(), Path(candidate).absolute()
@@ -146,6 +186,7 @@ def prepare_candidate(source, candidate, ours, theirs, *, merge=False, message=N
     text(candidate, 'fetch', '--no-tags', '--no-recurse-submodules', '--', str(source), ours, theirs)
     text(candidate, 'cat-file', '-e', f'{ours}^{{commit}}')
     text(candidate, 'cat-file', '-e', f'{theirs}^{{commit}}')
+    check_candidate_compatibility(source, candidate, ours, theirs)
     text(candidate, 'switch', '--detach', ours)
     text(candidate, 'switch', '-c', 'pisar-candidate')
     if local_only:
