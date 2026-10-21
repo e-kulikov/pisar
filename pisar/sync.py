@@ -94,11 +94,20 @@ def _target_ref(repo, target):
 def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=None):
     changed = set()
     history_commits = set()
+    base_commits = []
+    result_is_tree = sync_git.text(candidate, 'cat-file', '-t', result, check=False).strip() == 'tree'
     for before, after in ((ours, result), (theirs, result)):
         raw = sync_git.run(candidate, 'diff', '--name-only', '-z', before, after)
         changed.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
-    for base in (ours, theirs):
-        commits = sync_git.text(candidate, 'rev-list', '--reverse', f'{base}..{result}').splitlines()
+    if result_is_tree:
+        base_commits = sync_git.text(candidate, 'merge-base', '--all', ours, theirs).splitlines()
+        if not base_commits:
+            raise WikiError('task-validation-unavailable: no common task history')
+        ranges = [f'{base}..{side}' for base in base_commits for side in (ours, theirs)]
+    else:
+        ranges = [f'{base}..{result}' for base in (ours, theirs)]
+    for revision_range in ranges:
+        commits = sync_git.text(candidate, 'rev-list', '--reverse', revision_range).splitlines()
         for commit in commits:
             history_commits.add(commit)
             raw = sync_git.run(candidate, 'diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z',
@@ -112,10 +121,22 @@ def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=N
 
         def snapshot(commit):
             with tempfile.TemporaryDirectory(prefix='pisar-task-snapshot-') as directory:
+                is_tree = sync_git.text(candidate, 'cat-file', '-t', commit, check=False).strip() == 'tree'
+
+                def materialize(repo, destination):
+                    destination.mkdir(parents=True, exist_ok=True)
+                    if is_tree:
+                        index = Path(directory) / f'index-{len(list(Path(directory).glob("index-*")))}'
+                        gitops.run(repo, 'read-tree', commit, index=index)
+                        gitops.run(repo, 'checkout-index', '--all', '--force', f'--prefix={destination}/',
+                                   index=index)
+                        return
+                    sync_git.run(repo, 'clone', '--no-local', '--no-checkout', str(repo), str(destination))
+                    sync_git.run(destination, 'checkout', '--detach', commit)
+
                 if wiki_root is None:
                     checkout = Path(directory) / 'repo'
-                    sync_git.run(candidate, 'clone', '--no-local', '--no-checkout', str(candidate), str(checkout))
-                    sync_git.run(checkout, 'checkout', '--detach', commit)
+                    materialize(candidate, checkout)
                     task_root = checkout
                     selected_spaces = None
                 else:
@@ -125,8 +146,7 @@ def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=N
                     if task_repo.is_symlink() or not task_repo.is_dir():
                         raise WikiError('task-validation-unavailable: owning submodule path is missing/unsafe')
                     shutil.rmtree(task_repo)
-                    sync_git.run(candidate, 'clone', '--no-local', '--no-checkout', str(candidate), str(task_repo))
-                    sync_git.run(task_repo, 'checkout', '--detach', commit)
+                    materialize(candidate, task_repo)
                     task_root = checkout
                 try:
                     from .spaces import Wiki
@@ -150,7 +170,8 @@ def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=N
                 return result_tasks
 
         try:
-            base_commits = sync_git.text(candidate, 'merge-base', '--all', ours, theirs).splitlines()
+            if not base_commits:
+                base_commits = sync_git.text(candidate, 'merge-base', '--all', ours, theirs).splitlines()
             if not base_commits:
                 raise WikiError('task-validation-unavailable: no common task history')
             versions = {commit: snapshot(commit)
@@ -231,7 +252,27 @@ def _validate_originals(candidate, ours, theirs, result):
 def _validate_processing(candidate, revision=None):
     from .provenance import committed_processing
     from .spaces import Wiki
-    inventory = committed_processing(Wiki(candidate), revision=revision)
+    revisions = revision
+    if revision is not None and not isinstance(revision, dict):
+        root = Path(candidate).resolve()
+        revisions = {str(root): revision}
+        pending = [(root, revision)]
+        while pending:
+            parent, parent_revision = pending.pop()
+            records = gitops.run(parent, 'ls-tree', '-r', '-z', parent_revision)
+            for record in records.split('\0'):
+                if not record:
+                    continue
+                header, relative = record.split('\t', 1)
+                mode, kind, oid = header.split()
+                if mode != '160000' or kind != 'commit':
+                    continue
+                child = (parent / relative).resolve()
+                if not child.is_relative_to(root):
+                    raise WikiError('processing provenance submodule escapes wiki root')
+                revisions[str(child)] = oid
+                pending.append((child, oid))
+    inventory = committed_processing(Wiki(candidate), revision=revisions)
     if inventory.incomplete:
         reasons = sorted({reason for _, _, reason in inventory.incomplete})
         raise WikiError('processing provenance incomplete: ' + '; '.join(reasons))

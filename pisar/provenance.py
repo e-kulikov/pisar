@@ -43,12 +43,18 @@ def _committed_blob(wiki, path, revision=None):
         return None
     repo = gitops.owner(path, wiki.root)
     relative = path.relative_to(repo).as_posix()
+    if isinstance(revision, dict):
+        if str(repo.resolve()) not in revision:
+            raise WikiError(f'processing provenance revision missing for owning repository {repo}')
+        revision = revision[str(repo.resolve())]
     tracked = gitops.run(repo, 'ls-files', '--error-unmatch', '-z', '--', relative, check=False)
     if not tracked:
         return None
     try:
         return gitops.blob(repo, f'{revision or "HEAD"}:{relative}')
     except WikiError:
+        if isinstance(revision, str):
+            raise WikiError(f'processing provenance revision unavailable in owning repository {repo}')
         return None
 
 

@@ -68,6 +68,27 @@ class SyncPortableTests(Fixture):
         with patch.object(Ruwana, 'snapshot', self._snapshot_stub(records)):
             sync._task_changes(repo, base, theirs, theirs)
 
+    def test_sync_accepts_staged_tree_for_one_sided_task_status_change(self):
+        import sys
+        from pisar.ruwana import Ruwana
+        repo, task_path, base = self._task_repo()
+        theirs = self._commit_task_edit(repo, task_path, 'done task\n')
+        (repo / 'note.md').write_text('prospective tree content\n')
+        git(repo, 'add', 'note.md')
+        tree = git(repo, 'write-tree')
+
+        def snapshot(adapter, spaces=None):
+            from pisar.ruwana import TaskRecord, TaskSnapshot
+            state = 'done' if (adapter.wiki.root / '.ruwana/tasks/one.md').read_text() == 'done task\n' else 'open'
+            return TaskSnapshot((TaskRecord('one', 'work/alpha', 'work/alpha',
+                                            ('wiki:work/alpha:meeting#task-one',), 'Task', None, None,
+                                            state, '.ruwana/tasks/one.md', '0' * 64, 'created', 'modified',
+                                            (), (), ()),))
+
+        with patch('pisar.sync.settings.ruwana', return_value=sys.executable), \
+                patch.object(Ruwana, 'snapshot', snapshot):
+            sync._task_changes(repo, base, theirs, tree)
+
     def test_sync_refuses_divergent_task_status_changes(self):
         from pisar.ruwana import Ruwana
         repo, task_path, base = self._task_repo()
@@ -266,6 +287,48 @@ class SyncPortableTests(Fixture):
         commit_all(self.root)
         _validate_processing(self.root)
         self.assertEqual(len(digest), 64)
+
+    def test_staged_root_tree_validates_pending_child_meeting_at_pinned_revision(self):
+        from pisar.spaces import Wiki
+        remote = self.base / 'module-origin'
+        init_repo(remote)
+        (remote / '.wiki.toml').write_text(
+            'schema_version = 1\nid = "module"\nkind = "project"\nstatus = "active"\n')
+        (remote / 'sources/meetings/one').mkdir(parents=True)
+        (remote / 'sources/meetings/one/transcript.md').write_text('Committed source.\n')
+        (remote / 'meetings').mkdir()
+        (remote / 'meetings/one.md').write_text(
+            '+++\nschema_version = 1\nid = "one"\ntype = "meeting"\ntitle = "Meeting"\n'
+            'space_ids = ["work/module"]\nsources = ["sources/meetings/one/transcript.md"]\n+++\n\n'
+            '## Ruwana references\n\nPending: operation `save-one` is incomplete. No task IDs claimed.\n')
+        commit_all(remote)
+        git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(remote),
+            'work/team/module')
+        child = self.root / 'work/team/module'
+        git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        git(child, 'config', 'user.name', 'Synthetic fixture')
+        commit_all(self.root)
+        tree = git(self.root, 'write-tree')
+        with self.assertRaisesRegex(WikiError, 'processing provenance incomplete'):
+            _validate_processing(self.root, tree)
+
+    def test_staged_root_tree_accepts_completed_child_meeting_at_pinned_revision(self):
+        remote = self.base / 'module-origin'
+        init_repo(remote)
+        (remote / '.wiki.toml').write_text(
+            'schema_version = 1\nid = "module"\nkind = "project"\nstatus = "active"\n')
+        (remote / 'sources/meetings/one').mkdir(parents=True)
+        (remote / 'sources/meetings/one/transcript.md').write_text('Committed source.\n')
+        (remote / 'meetings').mkdir()
+        (remote / 'meetings/one.md').write_text(
+            '+++\nschema_version = 1\nid = "one"\ntype = "meeting"\ntitle = "Meeting"\n'
+            'space_ids = ["work/module"]\nsources = ["sources/meetings/one/transcript.md"]\n+++\n\n'
+            '## Ruwana references\n\nNo agreed tasks to create.\n')
+        commit_all(remote)
+        git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(remote),
+            'work/team/module')
+        commit_all(self.root)
+        _validate_processing(self.root, git(self.root, 'write-tree'))
 
 
 if __name__ == '__main__':

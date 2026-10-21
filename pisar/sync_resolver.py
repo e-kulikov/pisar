@@ -38,20 +38,27 @@ def _candidate_transaction(candidate, paths):
             raise WikiError(f'resolver refuses symlink candidate path: {name}')
         original_files[name] = ((target.read_bytes(), stat.S_IMODE(target.stat().st_mode))
                                 if target.is_file() else None)
+    transaction = {'expected_index': original_index,
+                   'expected_files': {name: _digest(value[0]) if value else None
+                                      for name, value in original_files.items()}}
     try:
-        yield
+        yield transaction
     except BaseException:
-        for name, value in original_files.items():
-            target = root.joinpath(*PurePosixPath(name).parts)
-            if value is None:
-                if target.is_file() or target.is_symlink():
-                    target.unlink()
-            else:
-                data, mode = value
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
-                target.chmod(mode)
-        index.write_bytes(original_index)
+        if index.read_bytes() == transaction['expected_index']:
+            for name, value in original_files.items():
+                target = root.joinpath(*PurePosixPath(name).parts)
+                current = _digest(target.read_bytes()) if target.is_file() and not target.is_symlink() else None
+                if current != transaction['expected_files'][name]:
+                    continue
+                if value is None:
+                    if target.is_file() or target.is_symlink():
+                        target.unlink()
+                else:
+                    data, mode = value
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                    target.chmod(mode)
+            index.write_bytes(original_index)
         raise
 
 
@@ -584,7 +591,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             domain = path_domains[path]
             groups.setdefault(domain, set()).add(path)
         resolver = backend or _configured_backend(wiki, runtime.base)
-        def make_proposal():
+        def make_proposal(transaction):
             reports, written = [], {}
             session_staged = set(initial_staged)
             session_index = initial_index
@@ -601,6 +608,11 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 reports.append(report)
                 for mapping in report['mappings']:
                     written[mapping['path']] = mapping['sha256']
+                transaction['expected_files'].update(result_tools._written)
+                index_path = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
+                if not index_path.is_absolute():
+                    index_path = candidate / index_path
+                transaction['expected_index'] = index_path.read_bytes()
                 session_staged.update(result_tools._written)
                 session_index = {name: [list(entry) for entry in entries]
                                  for name, entries in result_tools._index_entries(session_staged).items()}
@@ -638,8 +650,8 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                               'approval': policy['approval']}
             return proposal_value, response_value
 
-        with _candidate_transaction(candidate, allowed):
-            proposal, response = make_proposal()
+        with _candidate_transaction(candidate, allowed) as transaction:
+            proposal, response = make_proposal(transaction)
     if policy['approval'] == 'auto':
         return resolve_operation(wiki, state_dir, ident, backend=backend, revision=proposal['revision'],
                                  review_backend=review_backend)

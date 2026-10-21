@@ -791,6 +791,17 @@ class SyncLifecycleTests(unittest.TestCase):
         original_personal = (candidate / personal_rel).read_bytes()
         original_work = (candidate / work_rel).read_bytes()
 
+        def late_manual_edit(context, tools):
+            if context['domain'] == 'personal':
+                (candidate / personal_rel).write_text('New manual candidate edit while resolver runs.\n')
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'changed outside its write tool'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=late_manual_edit)
+        self.assertEqual((candidate / personal_rel).read_text(),
+                         'New manual candidate edit while resolver runs.\n')
+        (candidate / personal_rel).write_bytes(original_personal)
+
         def fail_late(context, tools):
             if context['domain'] == 'work':
                 raise WikiError('synthetic later-domain failure')
