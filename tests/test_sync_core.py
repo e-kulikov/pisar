@@ -545,6 +545,40 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(self._candidate_state_and_commits(candidate),
                          (baseline['state'], baseline['commits']))
 
+    def test_auto_resolver_policy_change_during_fresh_review_precedes_commit(self):
+        policy = [sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)]
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        baseline = {}
+
+        def resolver(context, tools):
+            report = self._scoped_resolution(context, tools)
+            baseline['state'], baseline['commits'] = self._candidate_state_and_commits(candidate)
+            return report
+
+        def clear_then_change_policy(request):
+            path = request['changed_paths'][0]
+            quote = request['versions']['candidate'][path]
+            policy[0] = sync_review.SemanticPolicy(approval='auto', min_confidence=1.0)
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 'r1', 'side': 'candidate', 'path': path,
+                                    'quote': quote, 'disposition': 'preserved',
+                                    'output_path': path, 'output_quote': quote,
+                                    'reason': 'The resolution preserves the statement.'}],
+                    'findings': [], 'summary': 'Fresh review passes under the old policy.'}
+
+        with mock.patch.object(sync_review, 'policy', side_effect=lambda: policy[0]), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            with self.assertRaisesRegex(WikiError, 'policy changed during prospective review'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver,
+                             review_backend=clear_then_change_policy)
+
+        self.assertEqual(self._candidate_state_and_commits(candidate),
+                         (baseline['state'], baseline['commits']))
+
     def test_detached_candidate_is_rejected_before_candidate_commit_object_creation(self):
         rel = 'work/10-projects/alpha/note.md'
         self.incoming(rel, document('note', 'work/alpha', body='Incoming assertion.'))

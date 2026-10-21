@@ -575,6 +575,9 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                         reviewed = sync_review.review_prospective_tree(
                             wiki, operation, candidate, staged_tree, backend=review_backend,
                             runtime_base=runtime.base)
+                        if (sync_review.policy().__dict__ != policy
+                                or reviewed.get('policy') != policy):
+                            raise WikiError('semantic policy changed during prospective review; run resolution again')
                         if acceptance_decision(
                                 {'reports': reviewed.get('reports', []), 'technical_checks_passed': True,
                                  'candidate_current': True, 'resolver_commit_valid': True,
@@ -587,10 +590,14 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                         if (sync_git.run(candidate, 'diff-files', '--name-only')
                                 or sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z')):
                             raise WikiError('candidate worktree changed during prospective semantic review')
+                        if sync_review.policy().__dict__ != policy:
+                            raise WikiError('semantic policy changed before resolver commit; run resolution again')
             except _SemanticGatePending as pending:
                 return {'operation_id': ident, 'status': 'needs-decision',
                         'semantic_review': {key: value for key, value in pending.review.items()
                                             if not key.startswith('_')}}
+            if policy['approval'] == 'auto' and sync_review.policy().__dict__ != policy:
+                raise WikiError('semantic policy changed before resolver commit; run resolution again')
             committed = tool.candidate_commit(report, checked_tree=staged_tree)
             # The graph and tree were checked against this exact index tree
             # above. Record those checked values directly; do not call
