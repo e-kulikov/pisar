@@ -223,7 +223,10 @@ def publish_children(operation, graph, save, bootstrap_map=None):
             observed = None
         if not observed or not sync_git._ancestor(target.repo, target.candidate, observed):
             if result.returncode and observed:
-                raise WikiError(f'remote-advanced: child push was rejected: {target.path}')
+                if observed != target.baseline:
+                    raise WikiError(f'remote-advanced: child push was rejected: {target.path}')
+                raise WikiError('publication failed; remote did not accept candidate: '
+                                f'{target.path}')
             if result.returncode:
                 raise WikiError('publication-unknown: child push result could not be observed')
             raise WikiError(f'child publication was not reachable at destination: {target.path}')

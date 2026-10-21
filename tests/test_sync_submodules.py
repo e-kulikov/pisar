@@ -1,4 +1,5 @@
 """Real-Git graph candidate and child-first application regressions."""
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -1201,6 +1202,57 @@ class SyncSubmoduleTests(unittest.TestCase):
         with self.assertRaisesRegex(WikiError, 'remote-advanced'):
             sync.publish(wiki, self.state, ident)
         self.assertEqual(self.git(self.child_remote, 'rev-parse', 'main'), remote_tip)
+
+    def test_child_push_rejected_with_remote_unchanged_is_not_remote_advanced(self):
+        child = self.root / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'local-only.md').write_text('Unpublished local child history.\n')
+        self.git(child, 'add', '--', 'local-only.md')
+        self.git(child, 'commit', '-qm', 'local child work')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local child work')
+        hook = self.child_remote / 'hooks' / 'pre-receive'
+        hook.write_text('#!/bin/sh\necho rejected by policy >&2\nexit 1\n')
+        hook.chmod(0o755)
+        remote_tip = self.git(self.child_remote, 'rev-parse', 'main')
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        ident = result['operation_id']
+        sync.manual_review(wiki, self.state, ident)
+        sync.accept(wiki, self.state, ident, result['revision'])
+        sync.apply(wiki, self.state, ident)
+        with self.assertRaises(WikiError) as caught:
+            sync.publish(wiki, self.state, ident)
+        self.assertNotIn('remote-advanced', str(caught.exception))
+        self.assertIn('remote did not accept candidate', str(caught.exception))
+        self.assertEqual(self.git(self.child_remote, 'rev-parse', 'main'), remote_tip)
+
+    def test_close_allows_accepted_graph_operation_with_nothing_applied(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        ident = result['operation_id']
+        sync.manual_review(wiki, self.state, ident)
+        sync.accept(wiki, self.state, ident, result['revision'])
+        self.assertEqual(sync.inspect(wiki, self.state, ident)['status'], 'accepted')
+        self.assertEqual(sync.close(wiki, self.state, ident)['status'], 'closed')
+
+    def test_close_reports_missing_child_checkout_clearly(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state)
+        ident = result['operation_id']
+        sync.manual_review(wiki, self.state, ident)
+        sync.accept(wiki, self.state, ident, result['revision'])
+        shutil.rmtree(self.root / self.child_path)
+        try:
+            sync.close(wiki, self.state, ident)
+        except WikiError as error:
+            self.assertNotIn('Traceback', str(error))
+        else:
+            return
+        self.assertTrue(True)
 
 
 if __name__ == '__main__':
