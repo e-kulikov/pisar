@@ -461,6 +461,8 @@ def prepare(wiki, state_dir, ident, *, merge=False, ruwana=None):
                 raise WikiError('candidate correction is not allowed in this operation state')
             if sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'):
                 raise WikiError('corrected candidate must be Git-clean before revalidation')
+            if operation.get('conflict_provenance') != 'conflicted':
+                operation['conflict_provenance'] = 'corrected'
         elif candidate.exists():
             # A conflict handoff is never overwritten. A user-created merge commit can be sealed on retry.
             merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()

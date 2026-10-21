@@ -2200,6 +2200,26 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(operation['review']['kind'], 'reduced-coverage')
         reviewer.assert_not_called()
 
+    def test_conflicts_only_corrected_clean_candidate_reaches_reviewer(self):
+        relative = 'work/10-projects/alpha/note.md'
+        self.incoming(relative, document('note', 'work/alpha', body='Incoming assertion.'))
+        wiki = Wiki(self.root)
+        ident = sync.fetch(wiki, self.state)['operation_id']
+        sync.prepare(wiki, self.state, ident)
+        runtime = operations.Runtime(self.state, self.root)
+        candidate = sync._candidate(runtime, ident)
+        (candidate / relative).write_text(document('note', 'work/alpha', body='Deleted assertion.'))
+        commit_all(candidate)
+        sync.prepare(wiki, self.state, ident)
+        policy = sync_review.SemanticPolicy(review='conflicts', approval='auto')
+        reviewer = mock.Mock(side_effect=WikiError('required correction review'))
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': 'auto'}):
+            with self.assertRaisesRegex(WikiError, 'required correction review'):
+                sync.pull(wiki, self.state, review_backend=reviewer)
+        reviewer.assert_called_once()
+        self.assertEqual(sync._load(runtime, ident)['conflict_provenance'], 'corrected')
+
     def test_conflicts_only_unknown_provenance_requires_review(self):
         self.incoming('work/10-projects/alpha/note.md',
                       document('note', 'work/alpha', body='Incoming assertion.'))
