@@ -570,6 +570,10 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 raise WikiError('resolver policy changed after proposal; run resolution again')
             if proposal.get('resolver_identity') != resolver_identity():
                 raise WikiError('resolver identity changed after proposal; run resolution again')
+            # A concrete owner decision commits the exact proposal for manual
+            # review, including when an automatic semantic gate stayed pending.
+            automatic = (proposal['policy']['approval'] == 'auto'
+                         and not (isinstance(decision, str) and decision.strip()))
             candidate = sync._candidate(runtime, ident)
             intent = operation.get('resolver_commit_intent')
             if intent is not None:
@@ -618,7 +622,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                 policy = sync_review.policy().__dict__
                 if policy['approval'] == 'manual' and (not isinstance(decision, str) or not decision.strip()):
                     raise WikiError('resolver commit requires a concrete owner decision')
-                if policy['approval'] == 'auto':
+                if automatic:
                     if (report['confidence'] < policy['min_confidence'] or report['findings']
                             or any(item.get('disposition') in HARD_DISPOSITIONS for item in report['statements'])):
                         raise WikiError('resolver report does not satisfy automatic-resolution gates')
@@ -643,7 +647,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                     operation['status'] = 'resolving'
                     tool.authorize_commit(report)
                     reviewed = None
-                    if policy['approval'] == 'auto':
+                    if automatic:
                         reviewed = sync_review.review_prospective_tree(
                             wiki, operation, candidate, staged_tree, backend=review_backend,
                             runtime_base=runtime.base)
@@ -671,7 +675,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                     return {'operation_id': ident, 'status': 'needs-decision',
                             'semantic_review': {key: value for key, value in pending.review.items()
                                                 if not key.startswith('_')}}
-                if policy['approval'] == 'auto' and sync_review.policy().__dict__ != policy:
+                if automatic and sync_review.policy().__dict__ != policy:
                     raise WikiError('semantic policy changed before resolver commit; run resolution again')
                 if intent is None:
                     intent = _commit_intent(candidate, operation, proposal, staged_tree, report, decision, reviewed)
@@ -702,14 +706,14 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             operation['review'] = None
             operation['accepted'] = None
             operation['semantic_review'] = None
-            if policy['approval'] == 'auto':
+            if automatic:
                 reviewed = sync_review.record_prospective_review(runtime, operation, reviewed)
             sync._save(runtime, operation)
         prepared = {'operation_id': ident, 'status': 'prepared',
                     'candidate': committed['commit'], 'candidate_worktree': str(candidate),
                     'revision': operation['revision'],
                     'check': {'ok': True, 'errors': []}}
-        if policy['approval'] == 'auto':
+        if automatic:
             sync.accept(wiki, state_dir, ident, reviewed['revision'])
             applied = sync.apply(wiki, state_dir, ident)
             return {**prepared, **applied, 'operation_id': ident, 'status': 'applied-automatically',

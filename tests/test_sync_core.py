@@ -819,6 +819,16 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(self._candidate_state_and_commits(candidate),
                          (baseline['state'], baseline['commits']))
 
+        operation = sync._load(operations.Runtime(self.state, self.root), fetched['operation_id'])
+        with mock.patch.object(sync_review, 'policy', return_value=policy):
+            completed = sync.resolve(wiki, self.state, fetched['operation_id'],
+                revision=operation['resolver_proposal']['revision'],
+                decision='Preserve the proposed statement with owner approval.',
+                review_backend=needs_decision)
+        self.assertEqual(completed['status'], 'prepared')
+        self.assertNotEqual(sync_git.head(candidate), operation['candidate'])
+        self.assertNotEqual(sync_git.head(self.root), sync_git.head(candidate))
+
     def test_auto_resolver_policy_change_during_fresh_review_precedes_commit(self):
         policy = [sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)]
         wiki, fetched, candidate = self._auto_resolver_failure_fixture()
