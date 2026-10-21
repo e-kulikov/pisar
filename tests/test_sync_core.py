@@ -1,11 +1,14 @@
 """Real-Git regression coverage for the delivery-I candidate primitives."""
 import subprocess
 import tempfile
+import json
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from .support import clean_environ, init_repo, commit_all, domain, space, document
-from pisar import operations, sync, sync_git
+from pisar import operations, settings, sync, sync_git, sync_review
 from pisar.safety import WikiError
 from pisar.spaces import Wiki
 
@@ -192,6 +195,394 @@ class SyncLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(WikiError, 'task-validation-unavailable'):
             sync.prepare(wiki, self.state, fetched['operation_id'])
 
+    def test_semantic_review_binds_full_candidate_and_feedback_stores_no_excerpt(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        calls = []
+
+        def reviewer(request):
+            calls.append(request)
+            path = request['changed_paths'][0]
+            content = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 0.94,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path,
+                                    'quote': content, 'disposition': 'preserved',
+                                    'output_path': path, 'output_quote': content,
+                                    'reason': 'The incoming content remains.'}],
+                    'findings': [], 'summary': 'All changed content is accounted for.'}
+
+        before = self.git(self.root, 'rev-parse', 'HEAD')
+        reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        self.assertEqual(reviewed['status'], 'reviewed')
+        self.assertEqual(calls[0]['candidate_revision'], reviewed['candidate_revision'])
+        self.assertNotEqual(reviewed['candidate_revision'], prepared['revision'])
+        self.assertEqual(calls[0]['domain'], 'workspace')
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), before)
+        sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        feedback = sync.feedback(wiki, self.state, fetched['operation_id'], 'correct')
+        feedback_file = self.state / 'roots' / operations.sha256(str(self.root).encode())[:24] / 'feedback' / (
+            f"{fetched['operation_id']}-{reviewed['candidate_revision']}.json")
+        self.assertEqual(feedback['rating'], 'correct')
+        self.assertNotIn('quote', feedback_file.read_text())
+        self.assertNotIn('incoming', feedback_file.read_text())
+
+    def test_candidate_change_while_reviewer_runs_discards_the_stale_report(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        candidate = self.state / 'roots' / operations.sha256(str(self.root).encode())[:24] / 'candidates' / fetched['operation_id']
+
+        def reviewer(request):
+            (candidate / 'late.md').write_text('external change during review\n')
+            self.git(candidate, 'add', 'late.md')
+            self.git(candidate, 'commit', '-qm', 'external change during review')
+            path = request['changed_paths'][0]
+            text = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': text,
+                                    'disposition': 'preserved', 'output_path': path, 'output_quote': text,
+                                    'reason': 'The changed document is preserved.'}],
+                    'findings': [], 'summary': 'Current revision reviewed.'}
+
+        with self.assertRaisesRegex(WikiError, 'candidate commit changed'):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        self.assertEqual(sync.inspect(wiki, self.state, fetched['operation_id'])['status'], 'prepared')
+        self.assertEqual(sync.inspect(wiki, self.state, fetched['operation_id']).get('semantic_review'), None)
+        self.assertEqual(prepared['revision'], sync.inspect(wiki, self.state, fetched['operation_id'])['revision'])
+
+    def test_closed_operation_does_not_reactivate_when_review_returns_late(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        def reviewer(request):
+            sync.close(wiki, self.state, fetched['operation_id'])
+            path = request['changed_paths'][0]
+            text = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': text,
+                                    'disposition': 'preserved', 'output_path': path, 'output_quote': text,
+                                    'reason': 'The incoming document is retained.'}],
+                    'findings': [], 'summary': 'All assertions are accounted for.'}
+
+        with self.assertRaisesRegex(WikiError, 'became stale'):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        status = sync.inspect(wiki, self.state, fetched['operation_id'])
+        self.assertEqual(status['status'], 'closed')
+        self.assertEqual(status['revision'], prepared['revision'])
+
+    def test_semantic_policy_change_invalidates_acceptance_before_apply(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.manual_review(wiki, self.state, fetched['operation_id'])
+        sync.accept(wiki, self.state, fetched['operation_id'], prepared['revision'])
+        changed = {'review': 'conflicts', 'approval': 'manual', 'agent': 'claude', 'min_confidence': 0.95}
+        before = self.git(self.root, 'rev-parse', 'HEAD')
+        with mock.patch('pisar.sync.settings.semantic_policy', return_value=changed):
+            with self.assertRaisesRegex(WikiError, 'policy changed after acceptance'):
+                sync.apply(wiki, self.state, fetched['operation_id'])
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), before)
+
+    def test_nontext_source_context_stops_semantic_review_with_explicit_reason(self):
+        source = self.root / 'work/10-projects/alpha/sources/scan.pdf'
+        source.write_bytes(b'%PDF synthetic')
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        self.incoming('work/10-projects/alpha/new.md', document('new-note', 'work/alpha'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        operation = sync._load(operations.Runtime(self.state, self.root), fetched['operation_id'])
+        review_request = sync_review.requests(wiki, operation, self.state / 'roots' /
+                                              operations.sha256(str(self.root).encode())[:24] /
+                                              'candidates' / fetched['operation_id'])
+        self.assertFalse(review_request[0]['context_complete'], review_request[0])
+        called = []
+        with self.assertRaisesRegex(WikiError, 'context is incomplete'):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=lambda req: called.append(req))
+        self.assertEqual(called, [])
+
+    def test_review_context_is_split_by_personal_and_work_domain(self):
+        domain(self.root, 'personal')
+        personal = space(self.root, 'personal/10-projects/home', 'home')
+        (personal / 'note.md').write_text(document('private-note', 'personal/home', body='Private base fact.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        work_note = self.clone / 'work/10-projects/alpha/note.md'
+        work_note.write_text(document('note', 'work/alpha', body='Public work fact.'))
+        private_note = self.clone / 'personal/10-projects/home/note.md'
+        private_note.write_text(document('private-note', 'personal/home', body='Private new fact.'))
+        self.git(self.clone, 'add', '--', 'work/10-projects/alpha/note.md', 'personal/10-projects/home/note.md')
+        self.git(self.clone, 'commit', '-qm', 'change both domains')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        observed = []
+
+        def reviewer(request):
+            observed.append(request)
+            path = request['changed_paths'][0]
+            text = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': text,
+                                    'disposition': 'preserved', 'output_path': path, 'output_quote': text,
+                                    'reason': 'The candidate preserves the changed document.'}],
+                    'findings': [], 'summary': 'Changed statement accounted for.'}
+
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        self.assertEqual({request['domain'] for request in observed}, {'personal', 'work'})
+        by_domain = {request['domain']: json.dumps(request) for request in observed}
+        self.assertIn('Private new fact.', by_domain['personal'])
+        self.assertNotIn('Private new fact.', by_domain['work'])
+        self.assertIn('Public work fact.', by_domain['work'])
+        self.assertNotIn('Public work fact.', by_domain['personal'])
+        self.assertEqual({request['candidate_revision'] for request in observed},
+                         {observed[0]['candidate_revision']})
+
+    def test_removed_domain_changes_remain_partitioned_by_original_domain(self):
+        domain(self.root, 'personal')
+        private = space(self.root, 'personal/10-projects/private', 'private')
+        (private / 'note.md').write_text(document('private-note', 'personal/private', body='PRIVATE MATERIAL'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'pull', '--ff-only')
+        self.git(self.clone, 'rm', '-r', 'personal')
+        self.git(self.clone, 'rm', 'work/.domain.toml', 'work/10-projects/alpha/note.md')
+        self.git(self.clone, 'commit', '-qm', 'remove domains and documents')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        operation = sync._load(operations.Runtime(self.state, self.root), fetched['operation_id'])
+        candidate = sync._candidate(operations.Runtime(self.state, self.root), fetched['operation_id'])
+        requests = sync_review.requests(wiki, operation, candidate)
+        self.assertEqual({request['domain'] for request in requests}, {'personal', 'work'})
+        payloads = {request['domain']: json.dumps(request) for request in requests}
+        self.assertIn('PRIVATE MATERIAL', payloads['personal'])
+        self.assertNotIn('PRIVATE MATERIAL', payloads['work'])
+        self.assertIn('Discussed', payloads['work'])
+        self.assertNotIn('Discussed', payloads['personal'])
+
+    def test_review_domain_partition_uses_pinned_git_snapshots_after_live_domain_removal(self):
+        domain(self.root, 'personal')
+        private = space(self.root, 'personal/10-projects/private', 'private')
+        (private / 'note.md').write_text(document('private-note', 'personal/private', body='PINNED PRIVATE'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'pull', '--ff-only')
+        self.git(self.clone, 'rm', '-r', 'personal')
+        self.git(self.clone, 'rm', 'work/.domain.toml', 'work/10-projects/alpha/note.md')
+        self.git(self.clone, 'commit', '-qm', 'remove domains and documents')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        initial_wiki = Wiki(self.root)
+        fetched = sync.fetch(initial_wiki, self.state)
+        sync.prepare(initial_wiki, self.state, fetched['operation_id'])
+        self.git(self.root, 'rm', '-r', 'personal')
+        self.git(self.root, 'rm', 'work/.domain.toml', 'work/10-projects/alpha/note.md')
+        self.git(self.root, 'commit', '-qm', 'remove live domains before review packaging')
+        stale_wiki = Wiki(self.root)
+        runtime = operations.Runtime(self.state, self.root)
+        operation = sync._load(runtime, fetched['operation_id'])
+        packaged = sync_review.requests(stale_wiki, operation,
+                                        sync._candidate(runtime, fetched['operation_id']))
+        self.assertEqual({request['domain'] for request in packaged}, {'personal', 'work'})
+        payloads = {request['domain']: json.dumps(request) for request in packaged}
+        self.assertIn('PINNED PRIVATE', payloads['personal'])
+        self.assertNotIn('PINNED PRIVATE', payloads['work'])
+        self.assertIn('Discussed', payloads['work'])
+
+    def test_review_context_includes_directly_referenced_same_domain_document(self):
+        policy_space = space(self.root, 'work/10-projects/beta', 'beta')
+        (policy_space / 'policy.md').write_text(
+            document('deployment-policy', 'work/beta', body='Canonical decision: deployment is forbidden.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'pull', '--ff-only')
+        note = self.clone / 'work/10-projects/alpha/note.md'
+        note.write_text(document('note', 'work/alpha', body=(
+            'Deployment is authorized according to [Policy](wiki:work/beta:deployment-policy).')))
+        self.git(self.clone, 'add', '--', 'work/10-projects/alpha/note.md')
+        self.git(self.clone, 'commit', '-qm', 'reference deployment policy')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        runtime = operations.Runtime(self.state, self.root)
+        operation = sync._load(runtime, fetched['operation_id'])
+        requests = sync_review.requests(wiki, operation, sync._candidate(runtime, fetched['operation_id']))
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(requests[0]['context_complete'])
+        self.assertIn('deployment is forbidden', json.dumps(requests[0]).lower())
+
+    def test_unresolved_semantic_finding_requires_exact_owner_decision(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+
+        def reviewer(request):
+            path = request['changed_paths'][0]
+            quote = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 1.0,
+                    'context_complete': True, 'verdict': 'needs_decision', 'statements': [],
+                    'findings': [{'id': 'f1', 'category': 'contradiction', 'paths': [path],
+                                  'evidence_quotes': [quote], 'explanation': 'Two statements conflict.',
+                                  'options': [], 'question': 'Which statement is current?'}],
+                    'summary': 'Owner decision required.'}
+
+        reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        with self.assertRaisesRegex(WikiError, 'owner decision'):
+            sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        accepted = sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'],
+                               decision='Keep the candidate statement as current.')
+        self.assertEqual(accepted['status'], 'accepted')
+        runtime = operations.Runtime(self.state, self.root)
+        operation = sync._load(runtime, fetched['operation_id'])
+        operation['accepted']['decision'] = 'changed after acceptance'
+        sync._save(runtime, operation)
+        with self.assertRaisesRegex(WikiError, 'decision binding'):
+            sync.apply(wiki, self.state, fetched['operation_id'])
+
+    def test_semantic_acceptance_token_changes_with_policy_and_binds_report_bytes(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+
+        def reviewer(request):
+            path = request['changed_paths'][0]
+            text = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': text,
+                                    'disposition': 'preserved', 'output_path': path, 'output_quote': text,
+                                    'reason': 'The candidate content is retained.'}],
+                    'findings': [], 'summary': 'First report.'}
+
+        first = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        with mock.patch.object(sync_review, 'PROMPT_VERSION', 'sync-review-v2'):
+            with self.assertRaisesRegex(WikiError, 'policy changed'):
+                sync.accept(wiki, self.state, fetched['operation_id'], first['revision'])
+        original_policy = settings.semantic_policy()
+        changed_policy = {**original_policy, 'min_confidence': 0.99}
+        with mock.patch('pisar.sync.settings.semantic_policy', return_value=changed_policy):
+            refreshed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+            self.assertNotEqual(first['revision'], refreshed['revision'])
+            with self.assertRaisesRegex(WikiError, 'revision'):
+                sync.accept(wiki, self.state, fetched['operation_id'], first['revision'])
+
+        runtime = operations.Runtime(self.state, self.root)
+        operation = sync._load(runtime, fetched['operation_id'])
+        report_path = Path(operation['semantic_review']['report_path'])
+        reports = json.loads(report_path.read_text(encoding='utf-8'))
+        reports[0]['summary'] = 'Replaced report after review.'
+        report_path.write_text(json.dumps(reports), encoding='utf-8')
+        with mock.patch('pisar.sync.settings.semantic_policy', return_value=changed_policy):
+            with self.assertRaisesRegex(WikiError, 'report digest'):
+                sync.accept(wiki, self.state, fetched['operation_id'], refreshed['revision'])
+
+    def test_configured_model_change_invalidates_cache_and_old_acceptance_token(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        model = ['model-A']
+
+        def bounded(argv, prompt, cwd, environment):
+            request = json.loads(prompt)
+            path = request['changed_paths'][0]
+            text = request['versions']['candidate'][path]
+            response = {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                        'domain': request['domain'], 'model': 'untrusted-model-field',
+                        'prompt_version': 'sync-review-v1', 'confidence': 0.99,
+                        'context_complete': True, 'verdict': 'clear',
+                        'statements': [{'id': 's1', 'side': 'candidate', 'path': path, 'quote': text,
+                                        'disposition': 'preserved', 'output_path': path, 'output_quote': text,
+                                        'reason': 'The candidate content is retained.'}],
+                        'findings': [], 'summary': 'Configured reviewer response.'}
+            envelope = json.dumps({'structured_output': response})
+            return SimpleNamespace(state='ok', returncode=0, stdout=envelope.encode(), stderr='')
+
+        with mock.patch('pisar.sync_review.shutil.which', return_value='/synthetic/claude'), \
+                mock.patch('pisar.sync_review.research.run_bounded', side_effect=bounded), \
+                mock.patch('pisar.settings.agent_option', side_effect=lambda *args: (model[0], 'config')):
+            first = sync.semantic_review(wiki, self.state, fetched['operation_id'])
+            model[0] = 'model-B'
+            second = sync.semantic_review(wiki, self.state, fetched['operation_id'])
+            self.assertFalse(second.get('reused', False))
+            self.assertNotEqual(first['candidate_revision'], second['candidate_revision'])
+            self.assertEqual(second['reports'][0]['model'], 'model-B')
+            with self.assertRaisesRegex(WikiError, 'revision'):
+                sync.accept(wiki, self.state, fetched['operation_id'], first['revision'])
+
+    def test_clean_merge_with_opposing_paragraphs_is_reviewed_and_stays_unapplied(self):
+        note_rel = 'work/10-projects/alpha/note.md'
+        other_rel = 'work/10-projects/alpha/other.md'
+        note = self.root / note_rel
+        note.write_text(document('note', 'work/alpha', body='Status: active.'))
+        (self.root / other_rel).write_text(document('other-note', 'work/alpha', body='Decision: continue.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'fetch', '-q', 'origin')
+        self.git(self.clone, 'merge', '--ff-only', 'FETCH_HEAD')
+        note.write_text(document('note', 'work/alpha', body='Status: active in June.'))
+        commit_all(self.root)
+        ours = self.git(self.root, 'rev-parse', 'HEAD')
+        incoming = document('other-note', 'work/alpha', body='Decision: stop in June.')
+        (self.clone / other_rel).write_text(incoming)
+        self.git(self.clone, 'add', other_rel)
+        self.git(self.clone, 'commit', '-qm', 'remote decision')
+        self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+        self.assertEqual(prepared['status'], 'prepared')
+        before = self.git(self.root, 'rev-parse', 'HEAD')
+
+        def reviewer(request):
+            changed = request['changed_paths']
+            quotes = [request['versions']['candidate'][path] for path in changed]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 1.0,
+                    'context_complete': True, 'verdict': 'needs_decision', 'statements': [],
+                    'findings': [{'id': 'f1', 'category': 'contradiction', 'paths': changed,
+                                  'evidence_quotes': quotes,
+                                  'explanation': 'Separate paragraphs give opposite status decisions.',
+                                  'options': [], 'question': 'Which June decision is current?'}],
+                    'summary': 'The Git-clean result contains an unresolved contradiction.'}
+
+        reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        with self.assertRaisesRegex(WikiError, 'owner decision'):
+            sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), before)
+
     def test_task_file_change_then_revert_is_still_blocked(self):
         path = '.ruwana/tasks/one.md'
         task = self.clone / path
@@ -300,6 +691,27 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(result['remote_freshness'], 'unknown')
         self.assertFalse(self.state.exists())
 
+    def test_no_change_candidate_needs_no_semantic_model_call(self):
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        self.assertEqual(prepared['candidate'], fetched['ours'])
+        with mock.patch('pisar.sync_review.shutil.which', return_value=None):
+            result = sync.semantic_review(wiki, self.state, fetched['operation_id'])
+        self.assertEqual(result['status'], 'no-change')
+        sync.accept(wiki, self.state, fetched['operation_id'], result['revision'])
+
+    def test_conflicts_only_marks_fast_forward_unreviewed(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        sync.prepare(wiki, self.state, fetched['operation_id'])
+        with mock.patch('pisar.sync_review.policy', return_value=sync_review.SemanticPolicy(review='conflicts')):
+            result = sync.semantic_review(wiki, self.state, fetched['operation_id'],
+                                          backend=lambda request: self.fail('uncovered FF called reviewer'))
+        self.assertEqual(result['status'], 'uncovered')
+        self.assertEqual(result['label'], 'not semantically reviewed')
+
     def test_invalid_incoming_candidate_is_never_applied(self):
         path = self.clone / 'work/10-projects/alpha/note.md'
         path.write_text(path.read_text().replace('schema_version = 1', 'schema_version = 99'))
@@ -334,8 +746,22 @@ class SyncLifecycleTests(unittest.TestCase):
         result = sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
         self.assertEqual(result['status'], 'prepared')
         self.assertEqual(sync_git.parents(candidate, result['candidate']), (fetched['ours'], fetched['theirs']))
-        sync.manual_review(wiki, self.state, fetched['operation_id'])
-        sync.accept(wiki, self.state, fetched['operation_id'], result['revision'])
+
+        def reviewer(request):
+            statements = []
+            path = 'work/10-projects/alpha/note.md'
+            source = request['versions']['theirs'][path]
+            output = request['versions']['candidate'][path]
+            statements.append({'id': 's1', 'side': 'theirs', 'path': path, 'quote': 'Remote proposal.',
+                               'disposition': 'equivalent', 'output_path': path, 'output_quote': output,
+                               'reason': 'The candidate explicitly records both proposals.'})
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic', 'prompt_version': 'sync-review-v1',
+                    'confidence': 0.99, 'context_complete': True, 'verdict': 'clear',
+                    'statements': statements, 'findings': [], 'summary': f'Reviewed {len(source)} bytes.'}
+
+        reviewed = sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
+        sync.accept(wiki, self.state, fetched['operation_id'], reviewed['revision'])
         self.assertEqual(sync.apply(wiki, self.state, fetched['operation_id'])['head'], result['candidate'])
 
 

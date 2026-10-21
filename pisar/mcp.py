@@ -109,14 +109,20 @@ TOOLS = (
     _tool('sync_prepare', 'Prepare a disposable sync candidate; this never changes a live branch.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'merge': {'type': 'boolean'}},
            'required': ['operation'], 'additionalProperties': False}),
+    _tool('sync_publish_prepare', 'Freeze local outgoing commits in a publish-only candidate; this does not push or move a live branch.',
+          {'type': 'object', 'properties': {}, 'additionalProperties': False}),
     _tool('sync_status', 'Read cached facts for a sync operation without fetching.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
            'additionalProperties': False}),
     _tool('sync_review', 'Record human review only after the user confirms they inspected the candidate.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
            'additionalProperties': False}),
+    _tool('sync_semantic_review', 'Run the configured read-only semantic reviewer on the exact candidate; it cannot accept or apply.',
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
+           'additionalProperties': False}),
     _tool('sync_accept', 'Record owner acceptance after a separate user confirmation.',
-          {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'revision': {'type': 'string'}},
+          {'type': 'object', 'properties': {'operation': {'type': 'string'}, 'revision': {'type': 'string'},
+                                            'decision': {'type': 'string'}},
            'required': ['operation', 'revision'], 'additionalProperties': False}),
     _tool('sync_apply', 'Apply the exact accepted sync candidate after separate user confirmation.',
           {'type': 'object', 'properties': {'operation': {'type': 'string'}}, 'required': ['operation'],
@@ -546,6 +552,10 @@ class Server:
             if arguments:
                 raise Refused('sync_fetch takes no arguments')
             result = sync.fetch(Wiki(self.root), self.state)
+        elif name == 'sync_publish_prepare':
+            if arguments:
+                raise Refused('sync_publish_prepare takes no arguments')
+            result = sync.publish_only(Wiki(self.root), self.state)
         elif name == 'sync_prepare':
             if set(arguments) - {'operation', 'merge'} or type(arguments.get('merge', False)) is not bool:
                 raise Refused('sync_prepare accepts operation and an optional boolean merge')
@@ -569,14 +579,21 @@ class Server:
                        'candidate worktree before confirming. This records review only; it does not accept or apply.')
             self._confirm_sync(name, message)
             result = sync.manual_review(Wiki(self.root), self.state, operation)
+        elif name == 'sync_semantic_review':
+            if set(arguments) != {'operation'} or not isinstance(operation, str):
+                raise Refused('sync_semantic_review accepts only a required operation')
+            result = sync.semantic_review(Wiki(self.root), self.state, operation)
         elif name == 'sync_accept':
-            if set(arguments) != {'operation', 'revision'}:
-                raise Refused('sync_accept accepts only operation and revision')
+            if set(arguments) - {'operation', 'revision', 'decision'} or not {'operation', 'revision'} <= set(arguments):
+                raise Refused('sync_accept accepts operation, revision and optional decision')
             revision = arguments.get('revision')
             if not isinstance(operation, str) or not isinstance(revision, str):
                 raise Refused('sync_accept: operation and revision are required')
-            self._confirm_sync(name, f'Accept sync operation {operation} at exact revision {revision}? Acceptance changes only the local decision record.')
-            result = sync.accept(Wiki(self.root), self.state, operation, revision)
+            decision = arguments.get('decision')
+            self._confirm_sync(name, f'Accept sync operation {operation} at exact revision {revision}?'
+                               + (f' Owner decision: {decision}' if decision else '')
+                               + ' Acceptance changes only the local decision record.')
+            result = sync.accept(Wiki(self.root), self.state, operation, revision, decision=decision)
         elif name == 'sync_apply':
             if set(arguments) != {'operation'}:
                 raise Refused('sync_apply accepts only operation')

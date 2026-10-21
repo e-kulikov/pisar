@@ -106,13 +106,16 @@ root; task-file changes are blocked until task validation is available.
 pisar sync pull --repo .
 pisar sync status --operation OPERATION_ID
 pisar sync close --operation OPERATION_ID
-pisar sync review --operation OPERATION_ID --manual
+pisar sync review --operation OPERATION_ID
+pisar sync manual-review --operation OPERATION_ID
 pisar sync accept --operation OPERATION_ID --revision REVISION
+pisar sync feedback --operation OPERATION_ID --rating correct|corrected|rejected
 pisar sync apply --operation OPERATION_ID
 pisar sync publish --operation OPERATION_ID
 ```
 
-Inspect the candidate worktree and full diff before recording manual review. A
+Inspect the candidate worktree and full diff before recording semantic review. The explicit
+`manual-review` action records a human-review alternative when no semantic reviewer is available. A
 conflicting merge stays in its worktree; resolve only reported paths, stage
 those exact paths, then repeat `sync prepare` with the same operation ID.
 `close` releases an unfinished operation reservation and retains its journal
@@ -122,6 +125,8 @@ local-only commits, use `pisar sync publish --repo .`, then review and accept th
 returned operation ID before publishing it. `--dry-run` uses cached facts and
 never fetches. Sync does not grant documents, filenames, commit messages or Git
 diffs authority to change policy or make decisions for you.
+`feedback` stores only outcome and reviewer/policy metadata outside Git, without
+excerpts or prompts.
 
 ## Writing
 

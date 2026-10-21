@@ -68,7 +68,9 @@ def _table(file, key, value, allowed):
 
 def _validate(file, data):
     _table(file, '', data, ('default_agent', 'research_agent', 'root', 'state_dir', 'ruwana', 'agents',
-                            'commit_message'))
+                            'commit_message', 'sync'))
+    if 'sync' in data:
+        _validate_sync(file, data['sync'])
     if 'commit_message' in data:
         _validate_commit_message(file, data['commit_message'])
     for key in ('root', 'state_dir'):
@@ -125,3 +127,28 @@ def _validate_commit_message(file, value):
         _string(file, 'commit_message.prompt_file', value['prompt_file'])
         if not Path(value['prompt_file']).is_absolute():
             raise _error(file, 'commit_message.prompt_file', f'must be an absolute path: {value["prompt_file"]}')
+
+
+def _validate_sync(file, value):
+    _table(file, 'sync', value, ('semantic',))
+    if 'semantic' not in value:
+        return
+    table = value['semantic']
+    _table(file, 'sync.semantic', table, ('review', 'approval', 'min_confidence', 'agent'))
+    if 'review' in table:
+        _string(file, 'sync.semantic.review', table['review'])
+        if table['review'] not in ('all', 'conflicts'):
+            raise _error(file, 'sync.semantic.review', 'must be all or conflicts')
+    if 'approval' in table:
+        _string(file, 'sync.semantic.approval', table['approval'])
+        if table['approval'] != 'manual':
+            raise _error(file, 'sync.semantic.approval', 'only manual approval is available before delivery IV')
+    if 'agent' in table:
+        _string(file, 'sync.semantic.agent', table['agent'])
+        if table['agent'] not in AGENTS:
+            raise _error(file, 'sync.semantic.agent', f'unsupported reviewer agent: {table["agent"]}')
+    if 'min_confidence' in table:
+        import math
+        confidence = table['min_confidence']
+        if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise _error(file, 'sync.semantic.min_confidence', 'must be a finite number from 0 to 1')

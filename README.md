@@ -125,6 +125,12 @@ effort = "high"
 [agents.claude.researcher]      # research subagent (default sonnet, medium)
 model = "sonnet"
 effort = "medium"
+
+[sync.semantic]
+review = "all"                 # or "conflicts" for explicitly reduced coverage
+approval = "manual"            # only manual approval is available before delivery IV
+agent = "claude"               # read-only semantic reviewer: claude or codex
+min_confidence = 0.95
 ```
 
 A missing file is fine. Unknown keys, wrong types, empty strings, a relative
@@ -303,7 +309,8 @@ CODEX_HOME=~/.local/share/pisar/agents/codex HOME=~/.local/share/pisar/agents/co
 
 Alternatively set `OPENAI_API_KEY` or `CODEX_API_KEY`; both are passed through.
 Codex's own shell is disabled, so it reaches the knowledge only through the
-`pisar`, `git`, `lesson_accept` and `lesson_review` tools.
+`pisar`, `git`, lesson tools and the read-only sync review tools. Sync acceptance,
+application and publication remain separate owner-confirmed actions.
 
 - `default_agent = "codex"` and `agents.codex.model|effort` (main session) and
   `agents.codex.reviewer|researcher.model|effort` in the config file, shown by
@@ -313,6 +320,10 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
   your account does not have them.
 - `research_agent = "claude"` (default) or `"codex"` selects the researcher behind
   `pisar research`. It is independent of `default_agent`.
+- `[sync.semantic]` selects the read-only sync reviewer independently; its default
+  backend is Claude. All changed candidates are reviewed by default. Manual approval
+  remains required at every confidence value; `approval = "auto"` is rejected until
+  the later autonomous-resolution delivery.
 - The bundled skills `pisar`, `lessons` and `research` are written to
   `<state-dir>/agents/codex/skills` on every launch, with the tools section that
   explains the MCP tools.
@@ -335,6 +346,7 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
 | 12 environment isolation | explicit allowlist for every Codex process | `test_codex_agent.test_child_gets_an_explicit_environment...`; `test_research_codex.test_environment_is_an_allowlist...` |
 | 13 fake-executable tests | `codex` fake for argv, environment and files; real checks with `PISAR_TEST_CODEX=1` (configuration only, no model call) | `test_codex_*.py`, `test_codex_smoke.py` |
 | 14 commit-message writer | `[commit_message] agent = "codex"`: `codex exec` with no tools (read-only, web search, shell, MCP, plugins, hooks and subagents off), `--ignore-user-config --ignore-rules --ephemeral`, the login of the main session in a private HOME, the same bounds, validation and fail-closed behaviour; a Claude model name is never passed to Codex | `test_commit_message_codex.*` |
+| 15 sync reviewer and lifecycle | `sync_semantic_review` is read-only; `sync_publish_prepare` only prepares; `sync_accept`, `sync_apply` and `sync_publish` are separate tools with user confirmation | `test_sync_permissions.*`; `test_codex_mcp.*` |
 
 **Differences in mechanism.** Codex's `.rules` execpolicy is not default-deny (an
 unmatched command is not refused), so the restriction is the MCP server's
@@ -626,14 +638,17 @@ task validation is available.
 pisar sync pull --repo .
 pisar sync status --operation OPERATION_ID
 pisar sync close --operation OPERATION_ID
-pisar sync review --operation OPERATION_ID --manual
+pisar sync review --operation OPERATION_ID
+pisar sync manual-review --operation OPERATION_ID
 pisar sync accept --operation OPERATION_ID --revision REVISION
+pisar sync feedback --operation OPERATION_ID --rating correct|corrected|rejected
 pisar sync apply --operation OPERATION_ID
 pisar sync publish --operation OPERATION_ID
 ```
 
 Inspect the reported candidate worktree and its full diff before recording
-manual review. A conflicting merge stays in that worktree; resolve only the
+semantic review. `manual-review` explicitly records a human-review alternative
+when no semantic reviewer is available. A conflicting merge stays in that worktree; resolve only the
 reported paths, stage those exact paths, then repeat `sync prepare` with the
 same operation ID. `close` releases an unfinished operation reservation while
 retaining its journal and candidate for inspection. `accept` records only the owner decision. `apply` advances
@@ -641,6 +656,8 @@ the recorded local branch. `publish` is a separate explicit push to the frozen
 remote and branch. To review local-only commits for publication, use
 `pisar sync publish --repo .`, then review and accept its returned operation ID
 before publishing it. `--dry-run` uses cached facts and never fetches.
+`feedback` stores only the outcome, reviewer/policy identity and optional category
+outside Git; it never stores document excerpts or prompts.
 
 ## Known-space inbox capture
 

@@ -19,10 +19,10 @@ def add_parser(commands):
     prepare = actions.add_parser('prepare', help='Prepare a disposable Git candidate')
     prepare.add_argument('--operation', required=True)
     prepare.add_argument('--merge', action='store_true', help='Allow a native merge for divergent histories')
-    review = actions.add_parser('review', help='Record explicit human review of a prepared candidate')
+    review = actions.add_parser('review', help='Run the configured read-only semantic reviewer')
     review.add_argument('--operation', required=True)
-    review.add_argument('--manual', action='store_true', required=True,
-                        help='Record a human review alternative (delivery I has no AI reviewer)')
+    manual_review = actions.add_parser('manual-review', help='Record an explicit human review alternative')
+    manual_review.add_argument('--operation', required=True)
     status = actions.add_parser('status', help='Read cached sync operation facts without fetching')
     status.add_argument('--operation')
     close = actions.add_parser('close', help='Release an unfinished operation reservation and retain its candidate')
@@ -30,6 +30,7 @@ def add_parser(commands):
     accept = actions.add_parser('accept', help='Record owner acceptance without moving Git state')
     accept.add_argument('--operation', required=True)
     accept.add_argument('--revision', required=True)
+    accept.add_argument('--decision', help='Owner decision for a reported semantic ambiguity/loss')
     apply = actions.add_parser('apply', help='Apply exactly an accepted candidate')
     apply.add_argument('--operation', required=True)
     publish = actions.add_parser('publish', help='Explicitly publish an applied operation')
@@ -39,6 +40,10 @@ def add_parser(commands):
     publish.add_argument('--dry-run', action='store_true')
     publish.add_argument('--remote', default='origin')
     publish.add_argument('--branch', default='main')
+    feedback = actions.add_parser('feedback', help='Record local outcome feedback without excerpts or prompts')
+    feedback.add_argument('--operation', required=True)
+    feedback.add_argument('--rating', required=True, choices=('correct', 'corrected', 'rejected'))
+    feedback.add_argument('--category')
 
 
 def run(args, wiki, state_dir):
@@ -50,13 +55,15 @@ def run(args, wiki, state_dir):
     if args.action == 'prepare':
         return sync.prepare(wiki, state_dir, args.operation, merge=args.merge)
     if args.action == 'review':
+        return sync.semantic_review(wiki, state_dir, args.operation)
+    if args.action == 'manual-review':
         return sync.manual_review(wiki, state_dir, args.operation)
     if args.action == 'status':
         return sync.inspect(wiki, state_dir, args.operation)
     if args.action == 'close':
         return sync.close(wiki, state_dir, args.operation)
     if args.action == 'accept':
-        return sync.accept(wiki, state_dir, args.operation, args.revision)
+        return sync.accept(wiki, state_dir, args.operation, args.revision, decision=args.decision)
     if args.action == 'apply':
         return sync.apply(wiki, state_dir, args.operation)
     if args.action == 'publish':
@@ -66,4 +73,6 @@ def run(args, wiki, state_dir):
                 return sync.pull(wiki, state_dir, args.repo, target, dry_run=True)
             return sync.publish_only(wiki, state_dir, args.repo, target)
         return sync.publish(wiki, state_dir, args.operation, dry_run=args.dry_run)
+    if args.action == 'feedback':
+        return sync.feedback(wiki, state_dir, args.operation, args.rating, args.category)
     raise ValueError('unknown sync action')

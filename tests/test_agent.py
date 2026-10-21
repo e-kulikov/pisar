@@ -116,7 +116,27 @@ class AgentTests(Fixture):
         _, call = self.launch()
         argv = call['argv']
         settings = json.loads(argv[argv.index('--settings') + 1])
-        self.assertEqual(settings, {'permissions': {'ask': ['Bash(pisar lesson accept *)']}})
+        self.assertEqual(settings, {'permissions': {'ask': [
+            'Bash(pisar lesson accept *)', 'Bash(pisar sync accept *)',
+            'Bash(pisar sync apply *)', 'Bash(pisar sync manual-review *)',
+            'Bash(pisar sync publish --operation *)',
+        ]}})
+
+    def test_sync_cli_actions_are_narrow_and_owner_decisions_ask(self):
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        for rule in ('Bash(pisar sync fetch *)', 'Bash(pisar sync pull *)',
+                     'Bash(pisar sync prepare *)', 'Bash(pisar sync status *)',
+                     'Bash(pisar sync review *)', 'Bash(pisar sync close *)',
+                     'Bash(pisar sync feedback *)', 'Bash(pisar sync publish --repo *)'):
+            self.assertIn(rule, allowed)
+        self.assertNotIn('Bash(pisar sync manual-review *)', allowed)
+        self.assertNotIn('Bash(pisar sync *)', allowed)
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        self.assertEqual(settings['permissions']['ask'], ['Bash(pisar lesson accept *)',
+                         'Bash(pisar sync accept *)', 'Bash(pisar sync apply *)',
+                         'Bash(pisar sync manual-review *)',
+                         'Bash(pisar sync publish --operation *)'])
 
     def test_only_the_lesson_workspace_is_writable_by_absolute_path(self):
         _, call = self.launch()

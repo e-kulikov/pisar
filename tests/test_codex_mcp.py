@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import io
 import subprocess
 import unittest
+from unittest import mock
 
 from pisar import mcp
 from . import support
@@ -146,6 +148,22 @@ class McpTests(Fixture):
         self.assertIn('sync_accept', mcp.TOOL_NAMES)
         self.assertIn('sync_apply', mcp.TOOL_NAMES)
         self.assertIn('sync_publish', mcp.TOOL_NAMES)
+        self.assertIn('sync_semantic_review', mcp.TOOL_NAMES)
+        self.assertIn('sync_publish_prepare', mcp.TOOL_NAMES)
+
+    def test_semantic_review_tool_is_read_only_and_does_not_elicit_acceptance(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        with mock.patch('pisar.sync.semantic_review', return_value={'status': 'reviewed'}):
+            result = server.tool('sync_semantic_review', {'operation': 'sync-fixture'})
+        self.assertEqual(json.loads(result['content'][0]['text']), {'status': 'reviewed'})
+
+    def test_publish_only_prepare_tool_never_publishes(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        result = {'status': 'prepared', 'kind': 'publish-only'}
+        with mock.patch('pisar.sync.publish_only', return_value=result) as prepare:
+            response = server.tool('sync_publish_prepare', {})
+        prepare.assert_called_once()
+        self.assertEqual(json.loads(response['content'][0]['text']), result)
 
     def test_unknown_method_is_a_json_rpc_error(self):
         client = self.server()

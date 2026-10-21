@@ -54,6 +54,10 @@ class ConfigTests(Fixture):
             'ruwana': {'value': 'ruwana', 'source': 'default'},
             'default_agent': {'value': None, 'source': 'default'},
             'research_agent': {'value': 'claude', 'source': 'default'},
+            'sync.semantic.review': {'value': 'all', 'source': 'default'},
+            'sync.semantic.approval': {'value': 'manual', 'source': 'default'},
+            'sync.semantic.agent': {'value': 'claude', 'source': 'default'},
+            'sync.semantic.min_confidence': {'value': 0.95, 'source': 'default'},
             'agents.claude.model': {'value': None, 'source': 'default'},
             'agents.claude.effort': {'value': None, 'source': 'default'},
             'agents.claude.reviewer.model': {'value': 'opus', 'source': 'default'},
@@ -109,6 +113,10 @@ effort = "max"
             'commit_message.timeout': (120, 'default'),
             'commit_message.prompt_file': (None, 'default'),
             'research_agent': ('claude', 'default'),
+            'sync.semantic.review': ('all', 'default'),
+            'sync.semantic.approval': ('manual', 'default'),
+            'sync.semantic.agent': ('claude', 'default'),
+            'sync.semantic.min_confidence': (0.95, 'default'),
             'agents.codex.model': (None, 'default'),
             'agents.codex.effort': (None, 'default'),
             'agents.codex.reviewer.model': ('gpt-6.1-sol', 'default'),
@@ -129,6 +137,26 @@ effort = "max"
                              env=env)['settings']
         self.assertEqual([(settings[k]['value'], settings[k]['source']) for k in ('root', 'state_dir', 'ruwana')],
                          [('/flag/root', 'flag'), ('/flag/state', 'flag'), ('flag-ruwana', 'flag')])
+
+    def test_semantic_policy_is_validated_and_reported(self):
+        self.write_config('[sync.semantic]\nreview = "conflicts"\napproval = "manual"\nmin_confidence = 0.0\n')
+        shown = self.show()['settings']
+        self.assertEqual(shown['sync.semantic.review'], {'value': 'conflicts', 'source': 'config'})
+        self.assertEqual(shown['sync.semantic.min_confidence'], {'value': 0.0, 'source': 'config'})
+
+    def test_automatic_approval_is_rejected_before_delivery_four(self):
+        self.refused('[sync.semantic]\napproval = "auto"\n', 'sync.semantic.approval')
+
+    def test_sync_reviewer_backend_is_independently_configurable(self):
+        self.write_config('[sync.semantic]\nagent = "codex"\n')
+        shown = self.show()['settings']['sync.semantic.agent']
+        self.assertEqual(shown, {'value': 'codex', 'source': 'config'})
+        self.refused('[sync.semantic]\nagent = "unknown"\n', 'sync.semantic.agent')
+
+    def test_semantic_confidence_rejects_nonfinite_or_out_of_range_values(self):
+        for value in ('nan', '1.1', '-0.1'):
+            with self.subTest(value=value):
+                self.refused(f'[sync.semantic]\nmin_confidence = {value}\n', 'sync.semantic.min_confidence')
 
     def test_empty_environment_falls_through_to_the_file(self):
         self.write_config(f'root = "{self.config_root}"\n')

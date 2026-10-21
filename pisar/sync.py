@@ -129,6 +129,27 @@ def _revision(operation):
     return operations.fingerprint(data)
 
 
+def _decision_binding(accepted):
+    return operations.fingerprint({'review_revision': accepted['revision'],
+                                   'candidate_revision': accepted['candidate_revision'],
+                                   'policy': accepted['policy'], 'decision': accepted.get('decision')})
+
+
+def _validate_acceptance(runtime, operation):
+    accepted = operation.get('accepted') or {}
+    if accepted.get('candidate_revision') != operation.get('revision') or _revision(operation) != operation.get('revision'):
+        raise WikiError('accepted candidate is stale')
+    review = operation.get('review') or {}
+    from . import sync_review
+    if accepted.get('policy') != sync_review.policy().__dict__:
+        raise WikiError('semantic reviewer identity or policy changed after acceptance')
+    token = sync_review.validate_stored_report(runtime, operation)
+    if not token or accepted.get('revision') != token:
+        raise WikiError('acceptance revision no longer matches the reviewed report')
+    if accepted.get('decision_binding') != _decision_binding(accepted):
+        raise WikiError('acceptance decision binding is invalid')
+
+
 def _candidate_message(wiki, runtime, candidate, operation_id):
     paths = [p.decode('utf-8', errors='surrogateescape') for p in
              sync_git.run(candidate, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p]
@@ -243,6 +264,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
         operation['status'] = 'prepared'
         operation['review'] = None
         operation['accepted'] = None
+        operation['semantic_review'] = None
         operation.pop('_candidate_path', None)
         _save(runtime, operation)
         return dict(operation_id=ident, status='prepared', candidate=result,
@@ -258,7 +280,7 @@ def inspect(wiki, state_dir, ident=None):
     if ident:
         operation = _load(base, ident)
         fields = ('operation_id', 'kind', 'status', 'branch', 'ours', 'theirs', 'candidate', 'tree',
-                  'revision', 'remote', 'target_branch', 'applied', 'published')
+                  'revision', 'remote', 'target_branch', 'applied', 'published', 'semantic_review')
         result = {key: operation[key] for key in fields if key in operation}
         if operation.get('candidate'):
             result['candidate_worktree'] = str(_candidate(base, ident))
@@ -290,6 +312,7 @@ def close(wiki, state_dir, ident):
 
 
 def manual_review(wiki, state_dir, ident):
+    from . import sync_review
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         operation = _load(runtime, ident)
@@ -300,23 +323,52 @@ def manual_review(wiki, state_dir, ident):
         if _revision(operation) != operation['revision']:
             raise WikiError('candidate changed; prepare and review the current revision again')
         operation['review'] = dict(kind='manual', revision=operation['revision'],
+                                   candidate_revision=operation['revision'],
+                                   git_revision=operation['revision'],
+                                   acceptance_revision=operation['revision'],
+                                   policy=sync_review.policy().__dict__,
                                    recorded_at=datetime.now(timezone.utc).isoformat())
         operation['status'] = 'reviewed'
         _save(runtime, operation)
         return dict(operation_id=ident, status='reviewed', revision=operation['revision'], review='manual')
 
 
-def accept(wiki, state_dir, ident, revision):
+def accept(wiki, state_dir, ident, revision, *, decision=None):
+    from . import sync_review
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         operation = _load(runtime, ident)
+        current_policy = sync_review.policy().__dict__
+        if operation.get('status') == 'accepted' and operation.get('accepted', {}).get('revision') == revision:
+            existing_decision = operation['accepted'].get('decision')
+            if decision is None or decision == existing_decision:
+                _validate_acceptance(runtime, operation)
+                if operation['accepted'].get('policy') == current_policy:
+                    return dict(operation_id=ident, status='accepted', revision=revision, reused=True)
+                raise WikiError('semantic policy changed after acceptance')
+            raise WikiError('acceptance decision is already bound to this revision')
         if operation.get('status') not in ('reviewed', 'accepted') or not operation.get('review'):
             raise WikiError('manual review is required before acceptance')
-        if operation['review'].get('revision') != revision or operation.get('revision') != revision:
-            raise WikiError('acceptance revision does not match the reviewed candidate')
+        if operation['review'].get('git_revision', operation['review'].get('revision')) != operation.get('revision'):
+            raise WikiError('acceptance candidate revision does not match the reviewed candidate')
+        expected_revision = sync_review.validate_stored_report(runtime, operation)
+        if revision != expected_revision:
+            raise WikiError('acceptance revision does not match the reviewed report')
+        if operation['review'].get('policy') != current_policy:
+            raise WikiError('semantic policy changed after review; review the current candidate again')
+        semantic = operation.get('semantic_review')
+        if operation['review'].get('kind') == 'semantic' and semantic and semantic.get('verdict') != 'clear':
+            if not isinstance(decision, str) or not decision.strip():
+                raise WikiError('a concrete owner decision is required for unresolved semantic findings')
+        elif decision is not None and (not isinstance(decision, str) or not decision.strip()):
+            raise WikiError('owner decision must be nonempty')
         candidate = _candidate(runtime, ident)
         _assert_candidate(operation, candidate)
-        operation['accepted'] = dict(revision=revision, recorded_at=datetime.now(timezone.utc).isoformat())
+        accepted = dict(revision=revision, candidate_revision=operation['revision'], policy=current_policy,
+                        decision=decision.strip() if isinstance(decision, str) else None,
+                        recorded_at=datetime.now(timezone.utc).isoformat())
+        accepted['decision_binding'] = _decision_binding(accepted)
+        operation['accepted'] = accepted
         operation['status'] = 'accepted'
         _save(runtime, operation)
         return dict(operation_id=ident, status='accepted', revision=revision)
@@ -330,8 +382,7 @@ def apply(wiki, state_dir, ident):
             return dict(operation_id=ident, status='applied', head=operation['applied'])
         if operation.get('status') != 'accepted' or not operation.get('accepted'):
             raise WikiError('operation has no valid owner acceptance')
-        if operation['accepted'].get('revision') != operation['revision'] or _revision(operation) != operation['revision']:
-            raise WikiError('accepted candidate is stale')
+        _validate_acceptance(runtime, operation)
         repo = _repo(wiki, operation['repo'])
         live = sync_git.observe(repo)
         if operation.get('kind') == 'publish-only':
@@ -384,6 +435,7 @@ def publish(wiki, state_dir, ident, *, dry_run=False):
         publish_only = operation.get('kind') == 'publish-only'
         if operation.get('status') != ('accepted' if publish_only else 'applied'):
             raise WikiError('only an applied integration or accepted publish-only operation can be published')
+        _validate_acceptance(runtime, operation)
         repo = _repo(wiki, operation['repo'])
         live = sync_git.observe(repo)
         if publish_only:
@@ -443,6 +495,16 @@ def publish(wiki, state_dir, ident, *, dry_run=False):
 def publish_only(wiki, state_dir, relative='.', target=Target()):
     fetched = fetch(wiki, state_dir, relative, target, kind='publish-only')
     return prepare(wiki, state_dir, fetched['operation_id'])
+
+
+def semantic_review(wiki, state_dir, ident, *, backend=None):
+    from . import sync_review
+    return sync_review.review_operation(wiki, state_dir, ident, backend=backend)
+
+
+def feedback(wiki, state_dir, ident, rating, category=None):
+    from . import sync_review
+    return sync_review.record_feedback(wiki, state_dir, ident, rating, category)
 
 
 def pull(wiki, state_dir, relative='.', target=Target(), *, merge=False, dry_run=False):

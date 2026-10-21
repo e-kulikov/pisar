@@ -24,6 +24,10 @@ Run git with the `git` tool: `args` starts with the subcommand, for example
 `lesson_draft_write` (pass the sha256 you last read), not by editing draft.md.
 Accept a lesson only with the `lesson_accept` tool; it asks the user to confirm.
 Review a lesson revision with the `lesson_review` tool.
+For a sync candidate, call `sync_semantic_review` first for the configured read-only reviewer. If that reviewer is
+unavailable, use `sync_review` only after the user has personally inspected the full candidate. Then get the user's
+separate acceptance with `sync_accept`; review output never accepts or applies the candidate.
+For local-only outgoing commits, start with `sync_publish_prepare` and continue with the returned operation ID.
 '''
 REVIEW_STEP = '''5. Review is mandatory: call the `lesson_review` tool with `["--batch", "ID"]`.
    It sends the current revision (its text and sha256) to the senior reviewer,

@@ -102,6 +102,36 @@ class SyncPublishTests(unittest.TestCase):
         self.assertTrue(result['already_reachable'])
         self.assertEqual(self.git(['-C', str(self.remote), 'rev-parse', 'refs/heads/main']), before)
 
+    def test_publish_only_candidate_receives_semantic_review_of_outgoing_change(self):
+        (self.root / 'local.txt').write_text('outgoing assertion\n')
+        commit_all(self.root)
+        local_tip = self.git(['-C', str(self.root), 'rev-parse', 'HEAD'])
+        wiki = Wiki(self.root)
+        prepared = sync.publish_only(wiki, self.state)
+        seen = []
+
+        def reviewer(request):
+            seen.append(request)
+            path = request['changed_paths'][0]
+            text = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': 'sync-review-v1', 'confidence': 0.97,
+                    'context_complete': True, 'verdict': 'clear',
+                    'statements': [{'id': 's1', 'side': 'ours', 'path': path, 'quote': text,
+                                    'disposition': 'preserved', 'output_path': path,
+                                    'output_quote': text, 'reason': 'The outgoing claim is retained.'}],
+                    'findings': [], 'summary': 'Outgoing assertions are accounted for.'}
+
+        before = self.git(['-C', str(self.root), 'rev-parse', 'HEAD'])
+        reviewed = sync.semantic_review(wiki, self.state, prepared['operation_id'], backend=reviewer)
+        self.assertEqual(reviewed['status'], 'reviewed')
+        self.assertIn('local.txt', seen[0]['changed_paths'])
+        self.assertEqual(seen[0]['candidate_revision'], reviewed['candidate_revision'])
+        self.assertNotEqual(reviewed['candidate_revision'], prepared['revision'])
+        self.assertEqual(self.git(['-C', str(self.root), 'rev-parse', 'HEAD']), before)
+        self.assertEqual(before, local_tip)
+
     def test_publish_only_task_history_then_revert_is_blocked(self):
         (self.root / '.ruwana/tasks').mkdir(parents=True)
         task = self.root / '.ruwana/tasks/one.md'
