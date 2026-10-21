@@ -801,8 +801,8 @@ def apply(wiki, state_dir, ident):
 def publish(wiki, state_dir, ident, *, dry_run=False, bootstrap_map=None):
     if dry_run:
         item = inspect(wiki, state_dir, ident)
-        if item.get('status') not in ('applied', 'accepted'):
-            raise WikiError('only an applied or accepted publish-only operation can be published')
+        if item.get('status') != ('accepted' if item.get('kind') == 'publish-only' else 'applied'):
+            raise WikiError('only an applied integration or accepted publish-only operation can be published')
         graph = sorted(item.get('publication_graph', []),
                        key=lambda target: (target['path'].count('/'), target['path'] != '.'), reverse=True)
         return dict(operation_id=ident, status='ready', remote=item['remote'], branch=item['target_branch'],

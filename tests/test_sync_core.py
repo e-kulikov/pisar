@@ -2131,6 +2131,18 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(index.read_bytes(), before)
         self.assertFalse(self.state.exists())
 
+    def test_publish_dry_run_refuses_accepted_unapplied_integration(self):
+        self.incoming()
+        wiki = Wiki(self.root)
+        ready = sync.pull(wiki, self.state)
+        ident = ready['operation_id']
+        sync.manual_review(wiki, self.state, ident)
+        sync.accept(wiki, self.state, ident, ready['revision'])
+        with self.assertRaisesRegex(WikiError, 'applied integration'):
+            sync.publish(wiki, self.state, ident, dry_run=True)
+        sync.apply(wiki, self.state, ident)
+        self.assertEqual(sync.publish(wiki, self.state, ident, dry_run=True)['status'], 'ready')
+
     def test_dry_run_status_does_not_create_runtime(self):
         wiki = Wiki(self.root)
         result = sync.pull(wiki, self.state, dry_run=True)
