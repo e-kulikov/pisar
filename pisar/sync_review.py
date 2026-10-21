@@ -366,14 +366,24 @@ def _graph_blob(operation, candidate, root_commit, path):
     return _read_blob(repo, item['candidate'], relative)
 
 
-def requests(wiki, operation, candidate):
-    repo = candidate
-    ours, theirs, result = operation['ours'], operation['theirs'], operation['candidate']
+def _changed_text_paths(repo, ours, theirs, result):
+    """Find changed paths, excluding gitlinks in this repository's pinned trees."""
     paths = set()
-    sources = {}
     for before in (ours, theirs):
         raw = sync_git.run(repo, 'diff', '--name-only', '-z', before, result)
         paths.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
+    for commit in (ours, theirs, result):
+        for record in sync_git.run(repo, 'ls-tree', '-r', '-z', commit).split(b'\0'):
+            if record.startswith(b'160000 '):
+                paths.discard(record.split(b'\t', 1)[1].decode('utf-8', 'surrogateescape'))
+    return paths
+
+
+def requests(wiki, operation, candidate):
+    repo = candidate
+    ours, theirs, result = operation['ours'], operation['theirs'], operation['candidate']
+    paths = _changed_text_paths(repo, ours, theirs, result)
+    sources = {}
     # Gitlinks are opaque commit objects; review the changed files from each child candidate.
     for item in operation.get('graph', []):
         if item['path'] == '.':
@@ -384,21 +394,11 @@ def requests(wiki, operation, candidate):
         bases_child = sync_git.text(child_repo, 'merge-base', '--all', child_ours, child_theirs,
                                     check=False).splitlines()
         child_base = bases_child[0] if bases_child else child_theirs
-        child_paths = set()
-        for before in (child_ours, child_theirs):
-            raw = sync_git.run(child_repo, 'diff', '--name-only', '-z', before, child_result)
-            child_paths.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
+        child_paths = _changed_text_paths(child_repo, child_ours, child_theirs, child_result)
         for relative in child_paths:
             combined = f'{item["path"]}/{relative}'
             paths.add(combined)
             sources[combined] = (child_repo, child_base, child_ours, child_theirs, child_result, relative)
-    # Exclude gitlink entries from root blob reads.
-    gitlinks = set()
-    for commit in (ours, theirs, result):
-        for record in sync_git.run(repo, 'ls-tree', '-r', '-z', commit).split(b'\0'):
-            if record.startswith(b'160000 '):
-                gitlinks.add(record.split(b'\t', 1)[1].decode('utf-8', 'surrogateescape'))
-    paths.difference_update(gitlinks)
     for path in paths:
         sources.setdefault(path, (repo, None, ours, theirs, result, path))
     if len(paths) > MAX_PATHS:

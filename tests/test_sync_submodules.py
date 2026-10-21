@@ -838,6 +838,93 @@ class SyncSubmoduleTests(unittest.TestCase):
         self.assertEqual(self.git(candidate_child, 'rev-list', '--parents', '-n', '1', resolution).split()[1:],
                          [local_child, incoming_child])
 
+    def _nested_pin_semantic_review(self, mode, divergent=False):
+        from unittest import mock
+        from pisar import settings, sync_review
+        self.incoming_child_and_root_pin()
+        writer = self.base / 'root-writer'
+        child = writer / self.child_path
+        grandchild = child / 'nested'
+        self.git(grandchild, 'config', 'user.name', 'Synthetic fixture')
+        self.git(grandchild, 'config', 'user.email', 'synthetic@example.invalid')
+        (grandchild / 'grandchild.txt').write_text('Incoming nested assertion.\n')
+        commit_all(grandchild)
+        incoming = self.git(grandchild, 'rev-parse', 'HEAD')
+        self.git(grandchild, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        commit_all(child)
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        commit_all(writer)
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        if divergent:
+            local_child = self.root / self.child_path
+            local_nested = local_child / 'nested'
+            for repo in (local_child, local_nested):
+                self.git(repo, 'config', 'user.name', 'Synthetic fixture')
+                self.git(repo, 'config', 'user.email', 'synthetic@example.invalid')
+            (local_nested / 'local.txt').write_text('Local nested assertion.\n')
+            commit_all(local_nested)
+            local = self.git(local_nested, 'rev-parse', 'HEAD')
+            commit_all(local_child)
+            commit_all(self.root)
+        wiki = Wiki(self.root)
+        requests = []
+        def reviewer(request):
+            requests.append(request)
+            # Account for every real text document, exposing any opaque gitlink
+            # that was incorrectly included in changed_paths to validation.
+            return self._root_clear_review({**request, 'changed_paths': list(request['versions']['candidate'])})
+        policy = sync_review.SemanticPolicy(approval=mode)
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'approval': mode}):
+            result = sync.pull(wiki, self.state, merge=divergent, review_backend=reviewer)
+            ident = result['operation_id']
+            if mode == 'manual':
+                self.assertEqual(result['status'], 'needs-approval')
+                reviewed = sync.semantic_review(wiki, self.state, ident, backend=reviewer)
+                self.assertEqual(reviewed['status'], 'reviewed')
+                before = self._resolver_graph_state(self.root)
+                sync.accept(wiki, self.state, ident, reviewed['revision'])
+                self.assertEqual(self._resolver_graph_state(self.root), before)
+                self.assertEqual(sync.apply(wiki, self.state, ident)['status'], 'applied')
+            else:
+                self.assertEqual(result['status'], 'applied-automatically')
+                self.assertEqual(result['semantic_review']['status'], 'reviewed')
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        expected = {f'{self.child_path}/note.md', f'{self.child_path}/nested/grandchild.txt'}
+        if divergent:
+            expected.add(f'{self.child_path}/nested/local.txt')
+        self.assertEqual(set(request['changed_paths']), expected)
+        for versions in request['versions'].values():
+            self.assertNotIn(self.child_path, versions)
+            self.assertNotIn(f'{self.child_path}/nested', versions)
+        live_child = self.root / self.child_path
+        live_nested = live_child / 'nested'
+        nested_head = self.git(live_nested, 'rev-parse', 'HEAD')
+        if divergent:
+            self.assertEqual(self.git(live_nested, 'rev-list', '--parents', '-n', '1', 'HEAD').split()[1:],
+                             [local, incoming])
+            self.assertEqual((live_nested / 'local.txt').read_text(), 'Local nested assertion.\n')
+        else:
+            self.assertEqual(nested_head, incoming)
+        self.assertEqual((live_nested / 'grandchild.txt').read_text(), 'Incoming nested assertion.\n')
+        self.assertEqual(self.git(live_child, 'rev-parse', 'HEAD:nested'), nested_head)
+        self.assertEqual(self.git(self.root, 'rev-parse', f'HEAD:{self.child_path}'),
+                         self.git(live_child, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
+
+    def test_nested_fast_forward_semantic_review_manual_accept_and_apply(self):
+        self._nested_pin_semantic_review('manual')
+
+    def test_nested_fast_forward_semantic_review_auto_apply(self):
+        self._nested_pin_semantic_review('auto')
+
+    def test_nested_divergent_pins_semantic_review_manual_accept_and_apply(self):
+        self._nested_pin_semantic_review('manual', divergent=True)
+
+    def test_nested_divergent_pins_semantic_review_auto_apply(self):
+        self._nested_pin_semantic_review('auto', divergent=True)
+
     def test_changed_grandchild_applies_child_first_and_finishes_clean(self):
         incoming_child, _ = self.incoming_child_and_root_pin()
         writer = self.base / 'root-writer'
