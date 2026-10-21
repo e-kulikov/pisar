@@ -765,6 +765,7 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_two_domain_resolver_proposal_keeps_sessions_separate(self):
+        from hashlib import sha256
         domain(self.root, 'personal')
         personal = space(self.root, 'personal/projects/home', 'home')
         (personal / 'private.md').write_text(document('private', 'personal/home', body='Private original.'))
@@ -790,6 +791,34 @@ class SyncLifecycleTests(unittest.TestCase):
         candidate = Path(prepared['candidate_worktree'])
         original_personal = (candidate / personal_rel).read_bytes()
         original_work = (candidate / work_rel).read_bytes()
+
+        def interrupted_session(context, tools):
+            if context['domain'] == 'personal':
+                current = context['files'][personal_rel]
+                tools.candidate_write(personal_rel, sha256(current.encode()).hexdigest(),
+                                      current + '\nPartial resolver output.\n')
+                raise WikiError('synthetic resolver interruption after write')
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'resolver interruption'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=interrupted_session)
+        self.assertEqual(sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'), '')
+        self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
+        self.assertEqual((candidate / work_rel).read_bytes(), original_work)
+
+        def interrupted_after_stage(context, tools):
+            if context['domain'] == 'personal':
+                current = context['files'][personal_rel]
+                tools.candidate_write(personal_rel, sha256(current.encode()).hexdigest(),
+                                      current + '\nStaged partial resolver output.\n')
+                tools.candidate_stage([personal_rel])
+                raise WikiError('synthetic resolver interruption after stage')
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'resolver interruption after stage'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=interrupted_after_stage)
+        self.assertEqual(sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'), '')
+        self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
 
         def late_manual_edit(context, tools):
             if context['domain'] == 'personal':

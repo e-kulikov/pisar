@@ -210,6 +210,27 @@ class CandidateResolverToolTests(unittest.TestCase):
         with self.assertRaisesRegex(WikiError, 'unsupported tool'):
             sync_resolver.execute_plan(plan, tools)
 
+    def test_json_tool_plan_rejects_oversized_statement_id_before_candidate_writes(self):
+        import hashlib
+        original_index = sync_git.text(self.repo, 'write-tree')
+        output = 'would otherwise be written\n'
+        digest = hashlib.sha256(output.encode()).hexdigest()
+        ident = 's' * 201
+        report = {'summary': 'Reject malformed accounting', 'confidence': 0.99,
+                  'context_complete': True,
+                  'statements': [{'id': ident, 'disposition': 'preserved'}], 'findings': [],
+                  'mappings': [{'path': 'work/note.md', 'sha256': digest, 'statement_ids': [ident]}]}
+        plan = {'tool_calls': [
+            {'name': 'candidate_write', 'arguments': {'path': 'work/note.md',
+             'expected_sha256': hashlib.sha256(b'ours\n').hexdigest(), 'text': output}},
+            {'name': 'candidate_stage', 'arguments': {'paths': ['work/note.md']}},
+            {'name': 'candidate_commit', 'arguments': {'report': report}}], 'report': report}
+        with self.assertRaisesRegex(WikiError, 'statement accounting is invalid'):
+            sync_resolver.execute_plan(plan, self.tools)
+        self.assertEqual((self.repo / 'work/note.md').read_text(), 'ours\n')
+        self.assertEqual(sync_git.text(self.repo, 'write-tree'), original_index)
+        self.assertEqual(sync_git.text(self.repo, 'status', '--porcelain=v1'), '')
+
     def test_fake_resolver_resolves_a_real_git_conflict_without_touching_other_files(self):
         import hashlib
         sync_git.text(self.repo, 'switch', '-c', 'theirs')

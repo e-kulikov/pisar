@@ -106,6 +106,7 @@ class CandidateTools:
         self._written = {}
         self._staged = set()
         self._authorized_report = None
+        self._transaction_checkpoint = None
         self._observed = {}
         self._initial_staged = (set(initial_staged) if initial_staged is not None else
                                 set(p.decode('utf-8', errors='surrogateescape') for p in
@@ -216,6 +217,8 @@ class CandidateTools:
         self._observed[path] = self._written[path]
         self._staged.discard(path)
         self._authorized_report = None
+        if self._transaction_checkpoint:
+            self._transaction_checkpoint(self, (path,))
         return {'path': path, 'sha256': self._written[path]}
 
     def candidate_stage(self, paths):
@@ -235,6 +238,8 @@ class CandidateTools:
         if staged != self._initial_staged | set(paths):
             raise WikiError('candidate stage contains paths outside the resolver write set')
         self._staged = set(paths)
+        if self._transaction_checkpoint:
+            self._transaction_checkpoint(self, paths)
         self._verify_index()
         self._authorized_report = None
         return {'staged': sorted(self._staged)}
@@ -309,7 +314,7 @@ def acceptance_decision(review_bundle, policy, human_decision=None):
 
 
 def resolve_proposal(candidate, domain, allowed_paths, backend, *, expected_head, supplemental_context=None,
-                     initial_staged=None, initial_index=None):
+                     initial_staged=None, initial_index=None, transaction_checkpoint=None):
     """Run one bounded resolver against an immutable candidate revision.
 
     BACKEND receives only the scoped context and the four candidate tools. A report
@@ -318,6 +323,7 @@ def resolve_proposal(candidate, domain, allowed_paths, backend, *, expected_head
     tools = CandidateTools(candidate, domain=domain, allowed_paths=allowed_paths,
                            expected_head=expected_head, initial_staged=initial_staged,
                            initial_index=initial_index)
+    tools._transaction_checkpoint = transaction_checkpoint
     context = tools.candidate_context()
     if supplemental_context:
         if supplemental_context.get('context_complete') is False:
@@ -595,12 +601,22 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             reports, written = [], {}
             session_staged = set(initial_staged)
             session_index = initial_index
+
+            def checkpoint(tools, paths):
+                transaction['expected_files'].update({name: tools._written.get(name)
+                                                      for name in paths})
+                index_path = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
+                if not index_path.is_absolute():
+                    index_path = candidate / index_path
+                transaction['expected_index'] = index_path.read_bytes()
+
             for domain, paths in sorted(groups.items()):
                 supplementary = (next((item for item in requests if item['domain'] == domain), None)
                                  if not unmerged else _conflict_context(wiki, candidate, operation, domain, paths))
                 result = resolve_proposal(candidate, domain, paths, resolver, expected_head=head,
                                           supplemental_context=supplementary,
-                                          initial_staged=session_staged, initial_index=session_index)
+                                          initial_staged=session_staged, initial_index=session_index,
+                                          transaction_checkpoint=checkpoint)
                 result_tools = result['tools']
                 result_tools._fresh()
                 result_tools._verify_index()
@@ -718,6 +734,7 @@ def execute_plan(response, tools, context=None):
             or not isinstance(findings, list) or len(findings) > 100):
         raise WikiError('resolver report requires statements and mappings')
     if not all(isinstance(item, dict) and isinstance(item.get('id'), str) and item['id']
+               and len(item['id']) <= 200
                and item.get('disposition') in ('preserved', 'equivalent', 'superseded', 'lost', 'uncertain')
                for item in statements):
         raise WikiError('resolver statement accounting is invalid')
