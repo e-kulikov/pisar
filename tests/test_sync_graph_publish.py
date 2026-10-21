@@ -242,6 +242,84 @@ class SyncGraphPublishTests(unittest.TestCase):
         self.assertEqual(self.f.git(self.f.child_remote, 'rev-parse', 'refs/heads/main'), child_c)
         self.assertEqual(self.f.git(self.f.root_remote, 'rev-parse', 'refs/heads/main'), ready['candidate'])
 
+    def test_final_snapshot_pin_must_remain_at_selected_nested_destination(self):
+        child = self.f.root / self.f.child_path
+        nested = child / 'nested'
+        old_nested = self.f.git(self.f.grandchild_remote, 'rev-parse', 'refs/heads/main')
+        self.f.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        self.f.git(nested, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(nested, 'config', 'user.email', 'synthetic@example.invalid')
+        (nested / 'final-pin.md').write_text('final nested pin\n')
+        self.f.git(nested, 'add', '--', 'final-pin.md')
+        self.f.git(nested, 'commit', '-qm', 'nested pin G1')
+        grandchild_pin = self.f.git(nested, 'rev-parse', 'HEAD')
+        self.f.git(nested, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        backup = self.f.base / 'bootstrap-grandchild.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.f.grandchild_remote), str(backup)],
+                       env=self.f.env, check=True)
+        self.f.git(child, 'add', '--', 'nested')
+        self.f.git(child, 'commit', '-qm', 'child B pins nested G1')
+        child_pin = self.f.git(child, 'rev-parse', 'HEAD')
+        self.f.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.f.git(self.f.root, 'add', '--', self.f.child_path)
+        self.f.git(self.f.root, 'commit', '-qm', 'root C pins child B')
+        root_pin = self.f.git(self.f.root, 'rev-parse', 'HEAD')
+        self.f.git(self.f.grandchild_remote, 'update-ref', 'refs/heads/main', old_nested)
+        # The nested target has been rewound to A; the bootstrap mirror still advertises G1.
+        graph = sync_graph.CandidateGraph(self.f.root, (
+            dict(path='.', candidate=str(self.f.root), commit=root_pin, repo=self.f.root),
+            dict(path=self.f.child_path, candidate=str(child), commit=child_pin, repo=child),
+            dict(path=f'{self.f.child_path}/nested', candidate=str(nested), commit=grandchild_pin, repo=nested),
+        ))
+        destinations = {'.': ('origin', 'main'), self.f.child_path: ('origin', 'main'),
+                        f'{self.f.child_path}/nested': ('origin', 'main')}
+        with self.assertRaisesRegex(WikiError, 'destination|unavailable|publication'):
+            sync_graph.required_publication(graph, destinations,
+                {f'{self.f.child_path}/nested': {'url': str(backup), 'branch': 'main'}},
+                require_remote_pins=True)
+
+    def test_root_push_stops_if_nested_destination_rewinds_before_final_pass(self):
+        from pisar import sync
+        from pisar.spaces import Wiki
+        child = self.f.root / self.f.child_path
+        nested = child / 'nested'
+        old_nested = self.f.git(self.f.grandchild_remote, 'rev-parse', 'refs/heads/main')
+        for repo in (child, nested):
+            self.f.git(repo, 'config', 'user.name', 'Synthetic fixture')
+            self.f.git(repo, 'config', 'user.email', 'synthetic@example.invalid')
+        (nested / 'new-pin.md').write_text('G1\n')
+        self.f.git(nested, 'add', '--', 'new-pin.md')
+        self.f.git(nested, 'commit', '-qm', 'nested G1')
+        grandchild_pin = self.f.git(nested, 'rev-parse', 'HEAD')
+        backup = self.f.base / 'bootstrap-grandchild.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.f.grandchild_remote), str(backup)],
+                       env=self.f.env, check=True)
+        self.f.git(nested, 'remote', 'add', 'backup', str(backup))
+        self.f.git(nested, 'push', '-q', 'backup', 'HEAD:refs/heads/main')
+        self.f.git(nested, 'fetch', '-q', 'backup', 'main')
+        self.f.git(child, 'add', '--', 'nested')
+        self.f.git(child, 'commit', '-qm', 'child B pins G1')
+        self.f.git(self.f.root, 'add', '--', self.f.child_path)
+        self.f.git(self.f.root, 'commit', '-qm', 'root C pins child B')
+        root_baseline = self.f.git(self.f.root_remote, 'rev-parse', 'refs/heads/main')
+        mapping = {f'{self.f.child_path}/nested': {'url': str(backup), 'branch': 'main'}}
+        wiki = Wiki(self.f.root)
+        ready = sync.publish_only(wiki, self.f.state, target=sync.Target(bootstrap_map=mapping))
+        sync.manual_review(wiki, self.f.state, ready['operation_id'])
+        sync.accept(wiki, self.f.state, ready['operation_id'], ready['revision'])
+        original = sync_graph.required_publication
+        def rewind_before_final_pass(graph, destinations, bootstrap_map=None, **kwargs):
+            if kwargs.get('require_remote_pins'):
+                self.f.git(self.f.grandchild_remote, 'update-ref', 'refs/heads/main', old_nested)
+            return original(graph, destinations, bootstrap_map, **kwargs)
+        with patch.object(sync_graph, 'required_publication', rewind_before_final_pass):
+            with self.assertRaisesRegex(WikiError, 'final child pin.*publication destination'):
+                sync.publish(wiki, self.f.state, ready['operation_id'])
+        self.assertEqual(self.f.git(self.f.grandchild_remote, 'rev-parse', 'refs/heads/main'), old_nested)
+        self.assertEqual(self.f.git(self.f.root_remote, 'rev-parse', 'refs/heads/main'), root_baseline)
+        self.assertNotEqual(grandchild_pin, old_nested)
+
     def test_parent_publish_checks_and_observes_child_destinations_first(self):
         self.f.incoming_child_and_root_pin()
         from pisar import sync

@@ -98,8 +98,13 @@ def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, 
                 required_pins.add((parent_path, subpath, child_path, pin))
         for subpath, (_, pin) in _links(parent_repo, target.candidate).items():
             child_path = subpath if parent_path == '.' else f'{parent_path}/{subpath}'
-            if child_path not in targets:
+            child_target = targets.get(child_path)
+            if child_target is None:
                 raise WikiError(f'publication graph is missing registered child: {child_path}')
+            if not sync_git._ancestor(child_target.repo, pin, child_target.baseline):
+                child_commit = entries[child_path].get('commit', child_target.candidate)
+                if require_remote_pins or not sync_git._ancestor(child_target.repo, pin, child_commit):
+                    raise WikiError(f'final child pin is unavailable from publication destination: {child_path}')
             required_pins.add((parent_path, subpath, child_path, pin))
     ordered_pins = sorted(required_pins, key=lambda row: (row[0].count('/'), row[0], row[1], row[3]))
     for parent_path, subpath, child_path, pin in (ordered_pins if check_bootstrap else ()):
