@@ -207,6 +207,142 @@ class SyncSubmoduleTests(unittest.TestCase):
             sync.pull(Wiki(self.root), self.state)
         self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), initial_root)
 
+    def test_candidate_only_url_change_is_refused_on_reprepare(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state, merge=True)
+        candidate = Path(result['candidate_worktree'])
+        manifest = candidate / '.gitmodules'
+        manifest.write_text(manifest.read_text().replace(str(self.child_remote), str(self.base / 'wrong.git')))
+        self.git(candidate, 'add', '--', '.gitmodules')
+        self.git(candidate, 'commit', '-qm', 'manual URL correction')
+        with self.assertRaisesRegex(WikiError, 'topology|URL'):
+            sync.prepare(wiki, self.state, result['operation_id'], merge=True)
+
+    def test_candidate_nested_url_change_is_refused_on_reprepare(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state, merge=True)
+        candidate_child = Path(result['candidate_worktree']) / self.child_path
+        self.git(candidate_child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(candidate_child, 'config', 'user.email', 'synthetic@example.invalid')
+        manifest = candidate_child / '.gitmodules'
+        original = manifest.read_text()
+        self.assertIn(str(self.grandchild_remote), original)
+        manifest.write_text(original.replace(str(self.grandchild_remote),
+                                             str(self.base / 'wrong-nested.git')))
+        self.git(candidate_child, 'add', '--', '.gitmodules')
+        self.git(candidate_child, 'commit', '-qm', 'manual nested URL correction')
+        candidate_root = Path(result['candidate_worktree'])
+        self.git(candidate_root, 'add', '--', self.child_path)
+        self.git(candidate_root, 'commit', '-qm', 'pin manual nested URL correction')
+        with self.assertRaisesRegex(WikiError, 'topology|URL'):
+            sync.prepare(wiki, self.state, result['operation_id'], merge=True)
+
+    def test_committed_child_correction_survives_reprepare(self):
+        self.incoming_child_and_root_pin()
+        wiki = Wiki(self.root)
+        result = sync.pull(wiki, self.state, merge=True)
+        candidate = Path(result['candidate_worktree'])
+        child = candidate / self.child_path
+        self.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        correction = child / 'correction.txt'
+        correction.write_text('Owner correction.\n')
+        self.git(child, 'add', '--', 'correction.txt')
+        self.git(child, 'commit', '-qm', 'owner correction')
+        corrected = self.git(child, 'rev-parse', 'HEAD')
+        self.git(candidate, 'add', '--', self.child_path)
+        self.git(candidate, 'commit', '-qm', 'pin owner correction')
+        prepared = sync.prepare(wiki, self.state, result['operation_id'], merge=True)
+        self.assertEqual(prepared['status'], 'prepared')
+        self.assertEqual(self.git(child, 'rev-parse', 'HEAD'), corrected)
+        self.assertEqual((child / 'correction.txt').read_text(), 'Owner correction.\n')
+        self.assertNotEqual(prepared['revision'], result['revision'])
+
+    def test_nested_divergent_gitlinks_reconcile_before_parent_merge(self):
+        # Local and incoming grandchild commits touch separate files. Both nested
+        # gitlink histories diverge independently, so the correct result is a
+        # grandchild merge followed by child and root pin reconciliation.
+        self.incoming_child_and_root_pin()
+        local_gc = self.root / self.child_path / 'nested'
+        self.git(local_gc, 'config', 'user.name', 'Synthetic fixture')
+        self.git(local_gc, 'config', 'user.email', 'synthetic@example.invalid')
+        self.git(self.root / self.child_path, 'config', 'user.name', 'Synthetic fixture')
+        self.git(self.root / self.child_path, 'config', 'user.email', 'synthetic@example.invalid')
+        (local_gc / 'local-nested.txt').write_text('Local nested.\n')
+        self.git(local_gc, 'add', '--', 'local-nested.txt')
+        self.git(local_gc, 'commit', '-qm', 'local grandchild change')
+        self.git(self.root / self.child_path, 'add', '--', 'nested')
+        self.git(self.root / self.child_path, 'commit', '-qm', 'pin local grandchild')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local child')
+        writer = self.base / 'root-writer'
+        child = writer / self.child_path
+        grandchild = child / 'nested'
+        self.git(grandchild, 'config', 'user.name', 'Synthetic fixture')
+        self.git(grandchild, 'config', 'user.email', 'synthetic@example.invalid')
+        (grandchild / 'remote-nested.txt').write_text('Remote nested.\n')
+        self.git(grandchild, 'add', '--', 'remote-nested.txt')
+        self.git(grandchild, 'commit', '-qm', 'remote grandchild change')
+        self.git(grandchild, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(child, 'add', '--', 'nested')
+        self.git(child, 'commit', '-qm', 'pin remote grandchild')
+        self.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'pin remote child')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        result = sync.pull(Wiki(self.root), self.state, merge=True)
+        self.assertEqual(result['status'], 'needs-approval')
+        candidate = Path(result['candidate_worktree'])
+        candidate_gc = candidate / self.child_path / 'nested'
+        merged_gc = self.git(candidate_gc, 'rev-parse', 'HEAD')
+        self.assertEqual(set(self.git(candidate_gc, 'rev-list', '--parents', '-n', '1', merged_gc).split()[1:]),
+                         {self.git(local_gc, 'rev-parse', 'HEAD'), self.git(grandchild, 'rev-parse', 'HEAD')})
+        self.assertEqual(self.git(candidate / self.child_path, 'rev-parse', f'HEAD:nested'), merged_gc)
+        self.assertEqual(self.git(candidate, 'rev-parse', f'HEAD:{self.child_path}'),
+                         self.git(candidate / self.child_path, 'rev-parse', 'HEAD'))
+
+    def test_nested_text_conflict_is_handed_off_at_grandchild(self):
+        self.incoming_child_and_root_pin()
+        writer = self.base / 'root-writer'
+        remote_gc = writer / self.child_path / 'nested'
+        self.git(remote_gc, 'config', 'user.name', 'Synthetic fixture')
+        self.git(remote_gc, 'config', 'user.email', 'synthetic@example.invalid')
+        (remote_gc / 'grandchild.txt').write_text('Remote conflicting nested edit.\n')
+        self.git(remote_gc, 'add', '--', 'grandchild.txt')
+        self.git(remote_gc, 'commit', '-qm', 'remote nested conflict')
+        self.git(remote_gc, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        remote_child = writer / self.child_path
+        self.git(remote_child, 'add', '--', 'nested')
+        self.git(remote_child, 'commit', '-qm', 'pin remote nested conflict')
+        self.git(remote_child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(writer, 'add', '--', self.child_path)
+        self.git(writer, 'commit', '-qm', 'pin remote nested conflict in root')
+        self.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+        local_child = self.root / self.child_path
+        local_gc = local_child / 'nested'
+        self.git(local_gc, 'config', 'user.name', 'Synthetic fixture')
+        self.git(local_gc, 'config', 'user.email', 'synthetic@example.invalid')
+        (local_gc / 'grandchild.txt').write_text('Local conflicting nested edit.\n')
+        self.git(local_gc, 'add', '--', 'grandchild.txt')
+        self.git(local_gc, 'commit', '-qm', 'local nested conflict')
+        self.git(local_child, 'config', 'user.name', 'Synthetic fixture')
+        self.git(local_child, 'config', 'user.email', 'synthetic@example.invalid')
+        self.git(local_child, 'add', '--', 'nested')
+        self.git(local_child, 'commit', '-qm', 'pin local nested conflict')
+        self.git(self.root, 'add', '--', self.child_path)
+        self.git(self.root, 'commit', '-qm', 'pin local nested conflict')
+
+        result = sync.pull(Wiki(self.root), self.state, merge=True)
+        self.assertEqual(result['status'], 'conflict')
+        conflict = result['child_conflicts'][0]
+        self.assertEqual(conflict['path'], f'{self.child_path}/nested')
+        entries = [line for line in conflict['unmerged'] if line]
+        self.assertTrue(entries)
+        self.assertTrue(all(line.startswith('100644 ') for line in entries))
+
     def test_unrelated_parent_edit_after_child_application_is_preserved_and_blocks_retry(self):
         self.incoming_child_and_root_pin()
         wiki = Wiki(self.root)

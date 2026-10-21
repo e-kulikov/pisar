@@ -107,6 +107,8 @@ def prepare_graph(operation, root_candidate, *, message=None):
     live_by_path = {item['path']: item for item in live}
     incoming_commits = {'.': operation['theirs']}
     candidates_by_path = {}
+    deferred_gitlink_conflicts = set()
+    prior_graph = {entry['path']: entry for entry in operation.get('graph', [])}
     # Parent repositories precede descendants in `live`, so each incoming child pin
     # is read from its exact incoming parent commit while its result is staged upward.
     for item in live:
@@ -182,12 +184,26 @@ def prepare_graph(operation, root_candidate, *, message=None):
         sync_git.text(candidate_path, 'fetch', '--no-tags', '--no-recurse-submodules', '--',
                       str(source), item['ours'], incoming_pin)
         candidate_head = sync_git.head(candidate_path)
+        candidate_urls = {path: url for path, (url, _) in _links(candidate_path, candidate_head).items()}
+        if candidate_urls != original:
+            raise WikiError(f'candidate submodule topology or URL registration changed: {relative}')
         existing_merge = sync_git.text(candidate_path, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
-        if candidate_head != item['ours'] and sync_git.parents(candidate_path, candidate_head) == (item['ours'], incoming_pin):
+        prior_candidate = prior_graph.get(relative, {}).get('candidate')
+        if (candidate_head != item['ours'] and prior_candidate
+                and sync_git._ancestor(candidate_path, prior_candidate, candidate_head)
+                and not sync_git.text(candidate_path, 'status', '--porcelain=v1', '-z',
+                                       '--untracked-files=all', '--ignore-submodules=none')):
+            commit = candidate_head
+        elif candidate_head != item['ours'] and sync_git.parents(candidate_path, candidate_head) == (item['ours'], incoming_pin):
             commit = candidate_head
         elif commit is None and existing_merge == incoming_pin:
             unmerged = sync_git.run(candidate_path, 'ls-files', '--unmerged', '-z')
             if unmerged:
+                if _registered_gitlink_conflict(unmerged, relative, live_by_path):
+                    candidates_by_path[relative] = dict(path=relative, candidate=str(candidate_path),
+                        commit=candidate_head, branch=item['branch'], ours=item['ours'], theirs=incoming_pin)
+                    deferred_gitlink_conflicts.add(relative)
+                    continue
                 operation['_graph_conflicts'] = [dict(path=relative, candidate=str(candidate_path),
                     unmerged=unmerged.decode('utf-8', errors='surrogateescape').split('\0'))]
                 return CandidateGraph(root_candidate, ())
@@ -204,6 +220,11 @@ def prepare_graph(operation, root_candidate, *, message=None):
                 raise WikiError(f'could not merge incoming submodule history: {relative}: {merge.stderr.decode(errors="replace").strip()}; status={status_before}')
             if sync_git.run(candidate_path, 'ls-files', '--unmerged', '-z'):
                 unmerged = sync_git.run(candidate_path, 'ls-files', '--unmerged', '-z')
+                if _registered_gitlink_conflict(unmerged, relative, live_by_path):
+                    candidates_by_path[relative] = dict(path=relative, candidate=str(candidate_path),
+                        commit=candidate_head, branch=item['branch'], ours=item['ours'], theirs=incoming_pin)
+                    deferred_gitlink_conflicts.add(relative)
+                    continue
                 operation['_graph_conflicts'] = [dict(path=relative, candidate=str(candidate_path),
                     unmerged=unmerged.decode('utf-8', errors='surrogateescape').split('\0'))]
                 return CandidateGraph(root_candidate, ())
@@ -232,6 +253,32 @@ def prepare_graph(operation, root_candidate, *, message=None):
         candidates_by_path[relative] = dict(path=relative, candidate=str(candidate_path), commit=commit,
             branch=item['branch'], ours=item['ours'], theirs=incoming_pin)
 
+    # A descendant pin may have completed a deferred parent merge. Publish the
+    # reconciled parent pin upward only after its selected commit is known.
+    for relative in sorted(deferred_gitlink_conflicts, key=lambda value: value.count('/'), reverse=True):
+        item = candidates_by_path[relative]
+        parent_path = max((name for name in live_by_path if name == '.' or relative.startswith(name + '/')),
+                          key=len)
+        parent_candidate = root_candidate if parent_path == '.' else Path(candidates_by_path[parent_path]['candidate'])
+        remainder = relative if parent_path == '.' else relative[len(parent_path) + 1:]
+        sync_git.text(parent_candidate, 'add', '--', remainder)
+        if sync_git.run(parent_candidate, 'ls-files', '--unmerged', '-z'):
+            conflicts = sync_git.run(parent_candidate, 'ls-files', '--unmerged', '-z')
+            operation['_graph_conflicts'] = [dict(path=parent_path, candidate=str(parent_candidate),
+                unmerged=conflicts.decode('utf-8', errors='surrogateescape').split('\0'))]
+            return CandidateGraph(root_candidate, ())
+        merge_head = sync_git.text(parent_candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
+        if merge_head:
+            parent_commit = sync_git.commit_merge(parent_candidate, message=message)
+        else:
+            sync_git.text(parent_candidate, 'diff', '--cached', '--check')
+            sync_git.run(parent_candidate, 'commit', '--no-gpg-sign', '-F', '-',
+                         input=(message(parent_candidate) if callable(message) else 'wiki: sync pin fixup').encode())
+            parent_commit = sync_git.head(parent_candidate)
+        candidates_by_path[parent_path]['commit'] = parent_commit
+        if parent_path == '.':
+            operation['candidate'] = parent_commit
+
     if sync_git.run(root_candidate, 'ls-files', '--unmerged', '-z'):
         return CandidateGraph(root_candidate, ())
     candidates = []
@@ -241,6 +288,12 @@ def prepare_graph(operation, root_candidate, *, message=None):
         entry['tree'] = sync_git.text(candidate_path, 'rev-parse', f'{entry["commit"]}^{{tree}}').strip()
         candidates.append(entry)
     graph = CandidateGraph(root_candidate, tuple(candidates))
+    for item in candidates:
+        source = root if item['path'] == '.' else live_by_path[item['path']]['repo']
+        original_urls = {path: url for path, (url, _) in _links(source, item['ours']).items()}
+        candidate_urls = {path: url for path, (url, _) in _links(item['candidate'], item['commit']).items()}
+        if original_urls != candidate_urls:
+            raise WikiError(f'candidate submodule topology or URL registration changed: {item["path"]}')
     for item in candidates[1:]:
         child_candidate = Path(item['candidate'])
         sync._task_changes(child_candidate, item['ours'], item['theirs'], item['commit'])
@@ -255,6 +308,28 @@ def prepare_graph(operation, root_candidate, *, message=None):
         ('root', 'repo', 'branch', 'remote', 'target_branch', 'remote_fingerprint', 'kind', 'ours',
          'theirs', 'candidate', 'tree', 'graph')})
     return graph
+
+
+def _registered_gitlink_conflict(unmerged, relative, live_by_path):
+    rows = [row for row in unmerged.split(b'\0') if row]
+    if not rows:
+        return False
+    direct = {name[len(relative) + 1:] for name in live_by_path
+              if name != relative and name.startswith(relative + '/')
+              and max((parent for parent in live_by_path if parent == '.' or name.startswith(parent + '/')),
+                      key=len) == relative}
+    paths = set()
+    for row in rows:
+        try:
+            metadata, raw_path = row.split(b'\t', 1)
+            mode = metadata.split()[0]
+        except (ValueError, IndexError):
+            return False
+        path = raw_path.decode('utf-8', 'surrogateescape')
+        if mode != b'160000' or path not in direct:
+            return False
+        paths.add(path)
+    return bool(paths)
 
 
 def _pin_at(root, relative, commit='HEAD'):
