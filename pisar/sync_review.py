@@ -469,6 +469,71 @@ def review_candidate(wiki, operation, candidate, backend):
     return generated
 
 
+def review_prospective_tree(wiki, operation, candidate, tree, *, backend=None, runtime_base=None):
+    """Review an uncommitted tree without creating a commit object or moving a ref."""
+    projected = dict(operation)
+    projected['candidate'] = tree
+    projected['tree'] = tree
+    projected['revision'] = operations.fingerprint({'base_revision': operation.get('revision'),
+                                                      'prospective_tree': tree})
+    current_policy = policy()
+    review_requests = requests(wiki, projected, candidate)
+    for request in review_requests:
+        request['policy'] = current_policy.__dict__
+        if not request['context_complete']:
+            omitted = ', '.join(request['omitted_context'][:10])
+            raise WikiError(f'semantic review context is incomplete; inspect omitted files: {omitted}')
+    candidate_revision = _candidate_revision(projected, review_requests, current_policy)
+    for request in review_requests:
+        request['candidate_revision'] = candidate_revision
+    reports = []
+    if review_requests:
+        active_backend = backend or _configured_backend(wiki, runtime_base)
+        for request in review_requests:
+            checked = validate_review(request, active_backend(request))
+            if backend is None:
+                checked['model'] = current_policy.model
+            reports.append(checked)
+    if len(reports) != len(review_requests):
+        raise WikiError('prospective semantic review report count is incomplete')
+    return {'operation_id': operation['operation_id'], 'status': 'reviewed' if reports else 'no-change',
+            'candidate_revision': candidate_revision, 'reports': reports,
+            'policy': current_policy.__dict__, '_policy': current_policy,
+            '_requests': review_requests}
+
+
+def record_prospective_review(runtime, operation, reviewed):
+    """Bind already validated pre-commit reports to the commit and record them."""
+    current_policy = reviewed['_policy']
+    review_requests = reviewed['_requests']
+    candidate_revision = _candidate_revision(operation, review_requests, current_policy)
+    reports = []
+    for request, prior in zip(review_requests, reviewed['reports']):
+        bound = dict(prior, candidate_revision=candidate_revision)
+        request['candidate_revision'] = candidate_revision
+        reports.append(bound)
+    digest = report_digest(reports)
+    token = acceptance_revision(candidate_revision, digest)
+    report_dir = runtime.path / 'sync-reports' / operation['operation_id']
+    report_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    report_path = report_dir / f'{candidate_revision}.json'
+    operations.atomic_bytes(report_path, (json.dumps(reports, ensure_ascii=False, indent=2) + '\n').encode())
+    operation['semantic_review'] = {'coverage': 'all', 'revision': candidate_revision,
+                                    'git_revision': operation['revision'],
+                                    'acceptance_revision': token, 'report_digest': digest,
+                                    'policy': current_policy.__dict__, 'report_path': str(report_path),
+                                    'verdict': 'clear' if all(r['verdict'] == 'clear' for r in reports)
+                                    else 'needs_decision'}
+    operation['review'] = dict(kind='semantic', revision=candidate_revision,
+                               candidate_revision=candidate_revision, acceptance_revision=token,
+                               git_revision=operation['revision'], policy=current_policy.__dict__,
+                               report_path=str(report_path))
+    operation['status'] = 'reviewed'
+    return {'operation_id': operation['operation_id'], 'status': 'reviewed',
+            'revision': token, 'candidate_revision': candidate_revision,
+            'reports': reports, 'policy': current_policy.__dict__}
+
+
 def _candidate_revision(operation, requests, current_policy):
     context = [{key: request[key] for key in
                 ('domain', 'changed_paths', 'versions', 'context', 'context_complete', 'omitted_context')}

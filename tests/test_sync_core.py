@@ -386,7 +386,7 @@ class SyncLifecycleTests(unittest.TestCase):
                               if row['review_kind'] == 'resolver')
         self.assertEqual(resolver_group['correct'], 1)
 
-    def test_auto_resolver_commits_candidate_then_requires_fresh_clear_review_before_apply(self):
+    def test_auto_resolver_reviews_the_prospective_tree_before_commit_and_then_applies(self):
         from hashlib import sha256
         note_rel, other_rel = ('work/10-projects/alpha/note.md', 'work/10-projects/alpha/other.md')
         (self.root / note_rel).write_text(document('note', 'work/alpha', body='Status: active.'))
@@ -403,7 +403,10 @@ class SyncLifecycleTests(unittest.TestCase):
         self.git(self.clone, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
         wiki = Wiki(self.root)
         fetched = sync.fetch(wiki, self.state)
-        sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+        prepared_candidate = sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+        candidate = Path(prepared_candidate['candidate_worktree'])
+        original_candidate_head = sync_git.head(candidate)
+        original_candidate_commit_count = self._candidate_state_and_commits(candidate)[1]
         policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
 
         def contradictory_review(request):
@@ -434,8 +437,13 @@ class SyncLifecycleTests(unittest.TestCase):
                     'mappings': [{'path': path, 'sha256': value['sha256'], 'statement_ids': [ids[index]]}
                                  for index, (path, value) in enumerate(sorted(outputs.items()))]}
 
+        reviewed_versions = []
+
         def clear_review(request):
+            self.assertEqual(sync_git.head(candidate), original_candidate_head)
+            self.assertEqual(self._candidate_state_and_commits(candidate)[1], original_candidate_commit_count)
             paths = request['changed_paths']
+            reviewed_versions.extend(request['versions']['candidate'][path] for path in paths)
             statements = []
             for index, path in enumerate(paths):
                 content = request['versions']['candidate'][path]
@@ -458,6 +466,102 @@ class SyncLifecycleTests(unittest.TestCase):
                                   review_backend=clear_review)
         self.assertEqual(result['status'], 'applied-automatically')
         self.assertNotEqual(sync_git.head(self.root), before)
+        self.assertTrue(any('decision pending' in value for value in reviewed_versions))
+        self.assertTrue(any('under review' in value for value in reviewed_versions))
+
+    def _auto_resolver_failure_fixture(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming assertion.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        candidate = Path(prepared['candidate_worktree'])
+        return wiki, fetched, candidate
+
+    def _candidate_state_and_commits(self, candidate):
+        index = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
+        if not index.is_absolute():
+            index = candidate / index
+        files = tuple(sorted((path.relative_to(candidate).as_posix(), path.read_bytes())
+                             for path in candidate.rglob('*')
+                             if path.is_file() and '.git' not in path.relative_to(candidate).parts))
+        objects = subprocess.run(['git', '-C', str(candidate), 'cat-file', '--batch-all-objects',
+                                  '--batch-check=%(objecttype)'], env=self.env, text=True,
+                                 capture_output=True, check=True).stdout.splitlines()
+        return (sync_git.head(candidate), index.read_bytes(), files), objects.count('commit')
+
+    def test_auto_fresh_semantic_backend_failure_precedes_any_candidate_commit(self):
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        baseline = {}
+
+        def resolver(context, tools):
+            report = self._scoped_resolution(context, tools)
+            baseline['state'], baseline['commits'] = self._candidate_state_and_commits(candidate)
+            return report
+
+        def failing_review(request):
+            raise WikiError('synthetic fresh semantic gate failure')
+
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            with self.assertRaisesRegex(WikiError, 'fresh semantic gate failure'):
+                sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver,
+                             review_backend=failing_review)
+
+        self.assertEqual(self._candidate_state_and_commits(candidate),
+                         (baseline['state'], baseline['commits']))
+
+    def test_auto_fresh_needs_decision_precedes_any_candidate_commit(self):
+        policy = sync_review.SemanticPolicy(approval='auto', min_confidence=0.95)
+        wiki, fetched, candidate = self._auto_resolver_failure_fixture()
+        baseline = {}
+
+        def resolver(context, tools):
+            report = self._scoped_resolution(context, tools)
+            baseline['state'], baseline['commits'] = self._candidate_state_and_commits(candidate)
+            return report
+
+        def needs_decision(request):
+            path = request['changed_paths'][0]
+            quote = request['versions']['candidate'][path]
+            return {'schema_version': 1, 'candidate_revision': request['candidate_revision'],
+                    'domain': request['domain'], 'model': 'synthetic',
+                    'prompt_version': sync_review.PROMPT_VERSION, 'confidence': 0.99,
+                    'context_complete': True, 'verdict': 'needs_decision', 'statements': [],
+                    'findings': [{'id': 'fresh-finding', 'category': 'contradiction', 'paths': [path],
+                                  'evidence_quotes': [quote], 'explanation': 'Unresolved after resolution.',
+                                  'options': [], 'question': 'Which statement is current?'}],
+                    'summary': 'Fresh review still needs an owner decision.'}
+
+        with mock.patch.object(sync_review, 'policy', return_value=policy), \
+                mock.patch.object(settings, 'semantic_policy', return_value={'agent': 'claude', 'approval': 'auto'}):
+            sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+            result = sync.resolve(wiki, self.state, fetched['operation_id'], backend=resolver,
+                                  review_backend=needs_decision)
+
+        self.assertEqual(result['status'], 'needs-decision')
+        self.assertEqual(self._candidate_state_and_commits(candidate),
+                         (baseline['state'], baseline['commits']))
+
+    def test_detached_candidate_is_rejected_before_candidate_commit_object_creation(self):
+        rel = 'work/10-projects/alpha/note.md'
+        self.incoming(rel, document('note', 'work/alpha', body='Incoming assertion.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        prepared = sync.prepare(wiki, self.state, fetched['operation_id'])
+        sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=self._needs_decision)
+        proposal = sync.resolve(wiki, self.state, fetched['operation_id'], backend=self._scoped_resolution)
+        candidate = Path(prepared['candidate_worktree'])
+        self.git(candidate, 'switch', '--detach', 'HEAD')
+        before = self._candidate_state_and_commits(candidate)
+
+        with self.assertRaises(WikiError):
+            sync.resolve(wiki, self.state, fetched['operation_id'], revision=proposal['revision'],
+                         decision='Approve only on the attached candidate branch.')
+
+        self.assertEqual(self._candidate_state_and_commits(candidate), before)
 
     def test_candidate_change_while_reviewer_runs_discards_the_stale_report(self):
         self.incoming()
