@@ -189,10 +189,16 @@ def prepare_graph(operation, root_candidate, *, message=None):
             raise WikiError(f'candidate submodule topology or URL registration changed: {relative}')
         existing_merge = sync_git.text(candidate_path, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip()
         prior_candidate = prior_graph.get(relative, {}).get('candidate')
+        committed_merge = _has_recorded_merge_ancestor(candidate_path, candidate_head,
+                                                       item['ours'], incoming_pin)
         if (candidate_head != item['ours'] and prior_candidate
                 and sync_git._ancestor(candidate_path, prior_candidate, candidate_head)
                 and not sync_git.text(candidate_path, 'status', '--porcelain=v1', '-z',
                                        '--untracked-files=all', '--ignore-submodules=none')):
+            commit = candidate_head
+        elif (candidate_head != item['ours'] and committed_merge
+              and not sync_git.text(candidate_path, 'status', '--porcelain=v1', '-z',
+                                    '--untracked-files=all', '--ignore-submodules=none')):
             commit = candidate_head
         elif candidate_head != item['ours'] and sync_git.parents(candidate_path, candidate_head) == (item['ours'], incoming_pin):
             commit = candidate_head
@@ -344,6 +350,11 @@ def _registered_gitlink_conflict(unmerged, relative, live_by_path):
     return bool(paths)
 
 
+def _has_recorded_merge_ancestor(repo, tip, ours, theirs):
+    commits = sync_git.run(repo, 'rev-list', '--first-parent', tip).decode().splitlines()
+    return any(sync_git.parents(repo, commit) == (ours, theirs) for commit in commits)
+
+
 def _propagate_candidate_pin(operation, child_path, child_commit, candidates_by_path,
                              live_by_path, root_candidate, message):
     """Carry a finalized descendant pin through every already-materialized ancestor."""
@@ -473,7 +484,7 @@ def apply_graph(operation, revision, graph=None):
                 and by_path[name]['candidate'] != by_path[name]['ours']
                 and name.startswith(child_path + '/')
                 for name in by_path if name != '.')
-            if pin != heads[child_path] or applied_descendant:
+            if heads[path] == item['ours'] and (pin != heads[child_path] or applied_descendant):
                 expected.add(child_relative)
         status = _porcelain_paths(repo)
         actual = {path for _, path in status}

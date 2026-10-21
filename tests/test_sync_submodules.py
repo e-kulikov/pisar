@@ -342,6 +342,28 @@ class SyncSubmoduleTests(unittest.TestCase):
         entries = [line for line in conflict['unmerged'] if line]
         self.assertTrue(entries)
         self.assertTrue(all(line.startswith('100644 ') for line in entries))
+        candidate_gc = Path(conflict['candidate'])
+        self.git(candidate_gc, 'config', 'user.name', 'Synthetic fixture')
+        self.git(candidate_gc, 'config', 'user.email', 'synthetic@example.invalid')
+        (candidate_gc / 'grandchild.txt').write_text('Reviewed nested resolution.\n')
+        self.git(candidate_gc, 'add', '--', 'grandchild.txt')
+        self.git(candidate_gc, 'commit', '-qm', 'resolve nested conflict')
+        resolution = self.git(candidate_gc, 'rev-parse', 'HEAD')
+        (candidate_gc / 'followup.txt').write_text('Nested owner followup.\n')
+        self.git(candidate_gc, 'add', '--', 'followup.txt')
+        self.git(candidate_gc, 'commit', '-qm', 'nested followup correction')
+        followup = self.git(candidate_gc, 'rev-parse', 'HEAD')
+        prepared = sync.prepare(Wiki(self.root), self.state, result['operation_id'], merge=True)
+        self.assertEqual(prepared['status'], 'prepared')
+        candidate_root = Path(prepared['candidate_worktree'])
+        candidate_child = candidate_root / self.child_path
+        self.assertEqual(self.git(candidate_gc, 'rev-parse', 'HEAD'), followup)
+        self.assertEqual((candidate_gc / 'followup.txt').read_text(), 'Nested owner followup.\n')
+        self.assertEqual(self.git(candidate_child, 'rev-parse', 'HEAD:nested'), followup)
+        self.assertEqual(self.git(candidate_root, 'rev-parse', f'HEAD:{self.child_path}'),
+                         self.git(candidate_child, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.git(candidate_gc, 'rev-list', '--parents', '-n', '1', resolution).split()[1:],
+                         [self.git(local_gc, 'rev-parse', 'HEAD'), self.git(remote_gc, 'rev-parse', 'HEAD')])
 
     def test_unrelated_parent_edit_after_child_application_is_preserved_and_blocks_retry(self):
         self.incoming_child_and_root_pin()
@@ -478,12 +500,21 @@ class SyncSubmoduleTests(unittest.TestCase):
             document('alpha-note', 'work/alpha', body='Reviewed child resolution.'))
         self.git(candidate_child, 'add', '--', 'note.md')
         self.git(candidate_child, 'commit', '-qm', 'resolve child conflict')
+        resolution = self.git(candidate_child, 'rev-parse', 'HEAD')
+        (candidate_child / 'followup.txt').write_text('Followup candidate correction.\n')
+        self.git(candidate_child, 'add', '--', 'followup.txt')
+        self.git(candidate_child, 'commit', '-qm', 'followup child correction')
+        followup = self.git(candidate_child, 'rev-parse', 'HEAD')
         prepared = sync.prepare(Wiki(self.root), self.state, result['operation_id'], merge=True)
         self.assertEqual(prepared['status'], 'prepared')
         candidate_root = Path(prepared['candidate_worktree'])
         candidate_commit = self.git(candidate_child, 'rev-parse', 'HEAD')
+        self.assertEqual(candidate_commit, followup)
+        self.assertEqual((candidate_child / 'followup.txt').read_text(), 'Followup candidate correction.\n')
         self.assertEqual(self.git(candidate_root, 'rev-parse', f'HEAD:{self.child_path}'), candidate_commit)
         self.assertEqual(self.git(candidate_child, 'rev-list', '--parents', '-n', '1', candidate_commit).split()[1:],
+                         [resolution])
+        self.assertEqual(self.git(candidate_child, 'rev-list', '--parents', '-n', '1', resolution).split()[1:],
                          [local_child, incoming_child])
 
     def test_changed_grandchild_applies_child_first_and_finishes_clean(self):
@@ -555,9 +586,19 @@ class SyncSubmoduleTests(unittest.TestCase):
                                         'rev-parse', 'HEAD')
         self.assertEqual(self.git(self.root / self.child_path / 'nested', 'rev-parse', 'HEAD'),
                          grandchild_candidate)
-        applied = sync.apply(wiki, self.state, result['operation_id'])
-        self.assertEqual(applied['status'], 'applied')
+        original_save = sync._save
+        def interrupt_completed_save(runtime, operation):
+            if operation.get('status') == 'applied':
+                raise OSError('injected completed graph journal interruption')
+            return original_save(runtime, operation)
+        sync._save = interrupt_completed_save
+        try:
+            with self.assertRaisesRegex(OSError, 'completed graph journal interruption'):
+                sync.apply(wiki, self.state, result['operation_id'])
+        finally:
+            sync._save = original_save
         self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
+        self.assertEqual(sync.apply(wiki, self.state, result['operation_id'])['status'], 'applied')
 
     def test_space_submodule_path_applies_and_retries_exactly(self):
         old_path = self.child_path
