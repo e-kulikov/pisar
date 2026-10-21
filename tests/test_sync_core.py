@@ -304,6 +304,32 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(corrected['corrected_or_rejected_fraction'], 1.0)
         self.assertEqual(corrected['confidence_band'], '0.90-0.94')
 
+    def test_sync_prepare_refuses_mixed_domain_commit_message_model_request(self):
+        from pisar import commit_message
+        personal = space(self.root, 'personal/10-projects/alpha', 'alpha') / 'note.md'
+        personal.write_text(document('private-note', 'personal/alpha', body='Personal synthetic fact.'))
+        commit_all(self.root)
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.git(self.clone, 'pull', '--ff-only', '-q')
+        (self.root / 'local.txt').write_text('Local divergence.\n')
+        commit_all(self.root)
+        (self.clone / personal.relative_to(self.root)).write_text(
+            document('private-note', 'personal/alpha', body='Personal changed synthetic fact.'))
+        self.git(self.clone, 'add', '--', personal.relative_to(self.root).as_posix())
+        self.incoming('work/10-projects/alpha/note.md',
+                      document('note', 'work/alpha', body='Work changed synthetic fact.'))
+        wiki = Wiki(self.root)
+        fetched = sync.fetch(wiki, self.state)
+        before = self._candidate_state_and_commits(self.root)
+        options = {**settings.commit_message(), 'enabled': True, 'agent': 'claude'}
+        with mock.patch.object(settings, 'commit_message', return_value=options), \
+                mock.patch.dict(commit_message.BACKENDS, {'claude': mock.Mock(return_value='docs: reconcile notes')}), \
+                commit_message.request(what='Reconcile changes', why='Preserve both histories'):
+            with self.assertRaisesRegex(WikiError, 'mixed.domain.*commit message'):
+                sync.prepare(wiki, self.state, fetched['operation_id'], merge=True)
+            commit_message.BACKENDS['claude'].assert_not_called()
+        self.assertEqual(self._candidate_state_and_commits(self.root), before)
+
     def test_auto_pull_applies_only_after_clear_review_meets_threshold(self):
         incoming = self.incoming('work/10-projects/alpha/note.md', document('note', 'work/alpha',
                                                                           body='A supported update.'))

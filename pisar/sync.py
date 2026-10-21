@@ -346,6 +346,21 @@ def _validate_acceptance(runtime, operation):
 def _candidate_message(wiki, runtime, candidate, operation_id):
     paths = [p.decode('utf-8', errors='surrogateescape') for p in
              sync_git.run(candidate, 'diff', '--cached', '--name-only', '-z').split(b'\0') if p]
+    options = settings.commit_message()
+    if options['enabled']:
+        domains = set()
+        for path in paths:
+            top = Path(path).parts[0]
+            marker = f'{top}/.domain.toml'
+            marked = any(sync_git.text(candidate, 'cat-file', '-t', f'{ref}:{marker}', check=False).strip() == 'blob'
+                         for ref in ('', 'HEAD', 'MERGE_HEAD'))
+            # Whole-domain submodules own their markers in the child checkout.
+            if marked or (candidate / marker).is_file():
+                domains.add(top)
+            else:
+                domains.add('workspace')
+        if len(domains) > 1:
+            raise WikiError('mixed-domain sync commit message model request is refused')
     candidate_wiki = Wiki(candidate)
     spaces = sorted({space.address for path in paths
                      if (space := candidate_wiki.owner(candidate / path)) is not None})
@@ -353,7 +368,7 @@ def _candidate_message(wiki, runtime, candidate, operation_id):
                    tree=sync_git.text(candidate, 'write-tree').strip(),
                    diff=sync_git.run(candidate, 'diff', '--cached', '--no-color').decode('utf-8', errors='replace'))
     return commit_message.compose(changes, f'sync-{operation_id}', commit_message.current(),
-                                  settings.commit_message(), wiki.root, runtime.base)
+                                  options, wiki.root, runtime.base)
 
 
 def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration'):
