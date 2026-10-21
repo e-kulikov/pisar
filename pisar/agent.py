@@ -33,7 +33,8 @@ CLAUDE_ALLOWED = (
     'Bash(pisar save *)', 'Bash(pisar triage *)',
     'Bash(pisar domain *)', 'Bash(pisar space *)', 'Bash(pisar guard *)',
     'Bash(pisar config *)', 'Bash(pisar research *)',
-    # Sync review/preparation are bounded CLI actions; owner decisions and live mutations ask first.
+    # Sync pull/publish are bounded CLI actions governed by the user's configured
+    # approval policy. Resolve, accept with an owner decision, and lesson accept ask first.
     'Bash(pisar sync fetch *)', 'Bash(pisar sync pull *)', 'Bash(pisar sync prepare *)',
     'Bash(pisar sync status *)', 'Bash(pisar sync review *)', 'Bash(pisar sync close *)',
     'Bash(pisar sync feedback *)', 'Bash(pisar sync feedback-summary*)',

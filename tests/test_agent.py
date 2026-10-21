@@ -61,6 +61,39 @@ class AgentTests(Fixture):
         self.assertIn('invalid sync state', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
 
+    def test_claude_hook_fails_closed_for_non_object_sync_state(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        for value in ([], None):
+            with self.subTest(value=value):
+                operations.write_json(folder / 'broken.json', value)
+                result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': 'Write'}),
+                                        text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('sync reservation guard failed', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+
+    def test_claude_hook_fails_closed_for_directory_sync_state(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        (folder / 'broken.json').mkdir()
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': 'Write'}),
+                                text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('sync reservation guard failed', result.stderr)
+        self.assertIn('broken.json', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
     def test_claude_hook_allows_tools_without_reservation_while_writer_busy(self):
         from pisar import operations
         runtime = operations.Runtime(self.state, self.root)

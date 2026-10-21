@@ -3,7 +3,6 @@ import json
 import shlex
 import sys
 from .operations import Runtime
-from .safety import WikiError
 
 
 def run(root, state):
@@ -40,7 +39,7 @@ def run(root, state):
                             runtime.require_unreserved(ident)
                             return 0
         runtime.require_unreserved()
-    except (WikiError, ValueError, TypeError, KeyError, IndexError) as error:
-        print(str(error), file=sys.stderr)
+    except Exception as error:
+        print(f'sync reservation guard failed: {error}', file=sys.stderr)
         return 2
     return 0
