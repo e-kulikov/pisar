@@ -806,6 +806,51 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
         self.assertEqual((candidate / work_rel).read_bytes(), original_work)
 
+        manual_index_content = b'Concurrent staged-only manual edit.\n'
+        manual_index_oid = sync_git.run(candidate, 'hash-object', '-w', '--stdin',
+                                        input=manual_index_content).decode().strip()
+
+        def index_edit_then_fail(context, tools):
+            if context['domain'] == 'personal':
+                sync_git.text(candidate, 'update-index', '--cacheinfo',
+                              f'100644,{manual_index_oid},{personal_rel}')
+                current = context['files'][personal_rel]
+                tools.candidate_write(personal_rel, sha256(current.encode()).hexdigest(),
+                                      current + '\nResolver output beside staged user edit.\n')
+                raise WikiError('synthetic resolver interruption after staged user edit')
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'staged user edit'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=index_edit_then_fail)
+        self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
+        self.assertEqual(sync_git.text(candidate, 'ls-files', '-s', '--', personal_rel).split()[1],
+                         manual_index_oid)
+        self.assertEqual(sync_git.run(candidate, 'cat-file', 'blob', manual_index_oid), manual_index_content)
+        sync_git.text(candidate, 'reset', '--quiet', 'HEAD', '--', personal_rel)
+
+        unrelated_index_content = b'Concurrent staged-only unrelated edit.\n'
+        unrelated_index_oid = sync_git.run(candidate, 'hash-object', '-w', '--stdin',
+                                            input=unrelated_index_content).decode().strip()
+
+        def unrelated_index_edit_then_fail(context, tools):
+            if context['domain'] == 'personal':
+                sync_git.text(candidate, 'update-index', '--cacheinfo',
+                              f'100644,{unrelated_index_oid},{work_rel}')
+                current = context['files'][personal_rel]
+                tools.candidate_write(personal_rel, sha256(current.encode()).hexdigest(),
+                                      current + '\nResolver output beside unrelated staged edit.\n')
+                raise WikiError('synthetic resolver interruption after unrelated staged user edit')
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'unrelated staged user edit'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=unrelated_index_edit_then_fail)
+        self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
+        self.assertEqual(sync_git.text(candidate, 'ls-files', '-s', '--', work_rel).split()[1],
+                         unrelated_index_oid)
+        self.assertEqual(sync_git.run(candidate, 'cat-file', 'blob', unrelated_index_oid),
+                         unrelated_index_content)
+        sync_git.text(candidate, 'reset', '--quiet', 'HEAD', '--', work_rel)
+
         def interrupted_after_stage(context, tools):
             if context['domain'] == 'personal':
                 current = context['files'][personal_rel]

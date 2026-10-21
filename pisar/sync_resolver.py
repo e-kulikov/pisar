@@ -44,20 +44,20 @@ def _candidate_transaction(candidate, paths):
     try:
         yield transaction
     except BaseException:
+        for name, value in original_files.items():
+            target = root.joinpath(*PurePosixPath(name).parts)
+            current = _digest(target.read_bytes()) if target.is_file() and not target.is_symlink() else None
+            if current != transaction['expected_files'][name]:
+                continue
+            if value is None:
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            else:
+                data, mode = value
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                target.chmod(mode)
         if index.read_bytes() == transaction['expected_index']:
-            for name, value in original_files.items():
-                target = root.joinpath(*PurePosixPath(name).parts)
-                current = _digest(target.read_bytes()) if target.is_file() and not target.is_symlink() else None
-                if current != transaction['expected_files'][name]:
-                    continue
-                if value is None:
-                    if target.is_file() or target.is_symlink():
-                        target.unlink()
-                else:
-                    data, mode = value
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(data)
-                    target.chmod(mode)
             index.write_bytes(original_index)
         raise
 
@@ -238,9 +238,9 @@ class CandidateTools:
         if staged != self._initial_staged | set(paths):
             raise WikiError('candidate stage contains paths outside the resolver write set')
         self._staged = set(paths)
+        self._verify_index()
         if self._transaction_checkpoint:
             self._transaction_checkpoint(self, paths)
-        self._verify_index()
         self._authorized_report = None
         return {'staged': sorted(self._staged)}
 
@@ -605,6 +605,8 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             def checkpoint(tools, paths):
                 transaction['expected_files'].update({name: tools._written.get(name)
                                                       for name in paths})
+                if not tools._staged:
+                    return
                 index_path = Path(sync_git.text(candidate, 'rev-parse', '--git-path', 'index').strip())
                 if not index_path.is_absolute():
                     index_path = candidate / index_path
