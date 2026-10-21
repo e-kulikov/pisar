@@ -199,10 +199,14 @@ def _candidate_message(wiki, runtime, candidate, operation_id):
 
 def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration'):
     repo = _repo(wiki, relative)
+    bootstrap_map_fingerprint = _bootstrap_map_fingerprint(target.bootstrap_map or {})
     runtime = operations.Runtime(state_dir, wiki.root)
     with runtime.lock():
         snapshot = sync_git.observe(repo)
         initial_graph = sync_graph.discover(repo, snapshot.head)
+        registered_paths = {item['path'] for item in initial_graph if item['path'] != '.'}
+        if set(target.bootstrap_map or {}) - registered_paths:
+            raise WikiError('bootstrap map names a path outside the registered candidate graph')
         tracking = _target_ref(repo, target)
         remote_fp = _remote_fingerprint(repo, target.remote)
         theirs = sync_git.fetch_tip(repo, target.remote, target.branch)
@@ -214,7 +218,9 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
                           and item.get('kind') == kind and item.get('branch') == snapshot.branch
                           and item.get('ours') == snapshot.head and item.get('remote') == target.remote
                           and item.get('target_branch') == target.branch
-                          and item.get('remote_fingerprint') == remote_fp and item.get('theirs') == theirs), None)
+                          and item.get('remote_fingerprint') == remote_fp and item.get('theirs') == theirs
+                          and item.get('bootstrap_map_fingerprint', _bootstrap_map_fingerprint({}))
+                          == bootstrap_map_fingerprint), None)
             if exact:
                 return dict(operation_id=exact['operation_id'], status=exact['status'], ours=exact['ours'],
                             theirs=exact['theirs'], branch=exact['branch'], remote=target.remote,
@@ -232,7 +238,7 @@ def fetch(wiki, state_dir, relative='.', target=Target(), *, kind='integration')
                          candidate=None, revision=None, review=None, accepted=None, applied=None,
                          created_at=datetime.now(timezone.utc).isoformat(),
                          bootstrap_map=target.bootstrap_map or {},
-                         bootstrap_map_fingerprint=_bootstrap_map_fingerprint(target.bootstrap_map or {}))
+                         bootstrap_map_fingerprint=bootstrap_map_fingerprint)
         operation['live_graph'] = [dict(path=item['path'], branch=item['branch'], ours=item['ours'])
                                    for item in initial_graph]
         _save(runtime, operation)

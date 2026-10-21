@@ -27,7 +27,8 @@ class PublishTarget:
     fingerprint: str
 
 
-def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, *, check_bootstrap=True):
+def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, *, check_bootstrap=True,
+                         require_remote_pins=False):
     """Freeze per-repository destinations and prove every new gitlink is available.
 
     ``observed_remotes`` is a host-owned mapping from registered repo path to
@@ -78,8 +79,13 @@ def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, 
         else:
             commits = sync_git.text(parent_repo, 'rev-list', '--reverse',
                                     f'{target.baseline}..{target.candidate}').splitlines()
+        previous_topology = {path: url for path, (url, _) in _links(parent_repo, target.baseline).items()}
         for commit in commits:
             parent_links = _links(parent_repo, commit)
+            topology = {path: url for path, (url, _) in parent_links.items()}
+            if topology != previous_topology:
+                raise WikiError(f'submodule topology or URL changes in published history require setup: {parent_path}')
+            previous_topology = topology
             for subpath, (_, pin) in parent_links.items():
                 child_path = subpath if parent_path == '.' else f'{parent_path}/{subpath}'
                 child_target = targets.get(child_path)
@@ -87,7 +93,7 @@ def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, 
                     raise WikiError(f'publication graph is missing registered child: {child_path}')
                 if not sync_git._ancestor(child_target.repo, pin, child_target.baseline):
                     child_commit = entries[child_path].get('commit', child_target.candidate)
-                    if not sync_git._ancestor(child_target.repo, pin, child_commit):
+                    if require_remote_pins or not sync_git._ancestor(child_target.repo, pin, child_commit):
                         raise WikiError(f'required child pin is unavailable from publication destination: {child_path}')
                 required_pins.add((parent_path, subpath, child_path, pin))
         for subpath, (_, pin) in _links(parent_repo, target.candidate).items():
@@ -95,7 +101,8 @@ def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, 
             if child_path not in targets:
                 raise WikiError(f'publication graph is missing registered child: {child_path}')
             required_pins.add((parent_path, subpath, child_path, pin))
-    for parent_path, subpath, child_path, pin in (required_pins if check_bootstrap else ()):
+    ordered_pins = sorted(required_pins, key=lambda row: (row[0].count('/'), row[0], row[1], row[3]))
+    for parent_path, subpath, child_path, pin in (ordered_pins if check_bootstrap else ()):
         parent_repo = entries[parent_path].get('candidate')
         parent_repo = Path(parent_repo) if parent_repo else candidate_graph.root
         if parent_path != '.' and parent_repo == candidate_graph.root:
@@ -111,6 +118,8 @@ def required_publication(candidate_graph, observed_remotes, bootstrap_map=None, 
         source_tip = sync_git.text(child_repo, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}').strip()
         if not sync_git._ancestor(child_repo, pin, source_tip):
             raise WikiError(f'required child pin is unavailable from bootstrap source: {child_path}')
+        child_candidate = Path(entries[child_path].get('candidate') or child_repo)
+        sync_git.run(child_candidate, 'remote', 'set-url', 'origin', url)
     return sorted(targets.values(), key=lambda target: (target.path.count('/'), target.path != '.'), reverse=True)
 
 
@@ -190,7 +199,7 @@ def publish_children(operation, graph, save, bootstrap_map=None):
     for target in targets:
         if target.path == '.':
             continue
-        if target.path in completed or sync_git._ancestor(target.repo, target.candidate, target.baseline):
+        if sync_git._ancestor(target.repo, target.candidate, target.baseline):
             if target.path not in completed:
                 completed.append(target.path)
                 save(operation)
@@ -211,7 +220,8 @@ def publish_children(operation, graph, save, bootstrap_map=None):
             raise WikiError(f'child publication was not reachable at destination: {target.path}')
         completed.append(target.path)
         save(operation)
-    required_publication(publication_graph, frozen, bootstrap_map, check_bootstrap=True)
+    required_publication(publication_graph, frozen, bootstrap_map, check_bootstrap=True,
+                         require_remote_pins=True)
     return completed
 
 

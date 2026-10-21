@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from pisar import sync_graph
 from pisar.safety import WikiError
@@ -124,8 +125,121 @@ class SyncGraphPublishTests(unittest.TestCase):
             dict(path='.', candidate=str(root), commit=root_candidate, repo=root),
             dict(path='child', candidate=str(child), commit=final, repo=child),
         ))
-        with self.assertRaisesRegex(WikiError, 'historical|unavailable|publication'):
+        with self.assertRaisesRegex(WikiError, 'historical|unavailable|publication|topology'):
             sync_graph.required_publication(graph, {'.': ('origin', 'main'), 'child': ('origin', 'main')})
+
+    def test_reverted_historical_submodule_url_change_is_refused(self):
+        graph, op = self._candidate_graph()
+        root = self.f.root
+        manifest = root / '.gitmodules'
+        original = manifest.read_bytes()
+        changed = original.replace(str(self.f.child_remote).encode(),
+                                   str(self.f.base / 'missing-history.git').encode())
+        manifest.write_bytes(changed)
+        self.f.git(root, 'add', '--', '.gitmodules')
+        self.f.git(root, 'commit', '-qm', 'historical broken child URL')
+        manifest.write_bytes(original)
+        self.f.git(root, 'add', '--', '.gitmodules')
+        self.f.git(root, 'commit', '-qm', 'restore child URL')
+        candidate = self.f.git(root, 'rev-parse', 'HEAD')
+        root_entry = next(item for item in graph.repositories if item['path'] == '.')
+        root_entry['commit'] = candidate
+        with self.assertRaisesRegex(WikiError, 'topology|URL|bootstrap|historical'):
+            sync_graph.required_publication(graph, {
+                '.': (op['remote'], op['target_branch']),
+                self.f.child_path: ('origin', 'main'),
+                f'{self.f.child_path}/nested': ('origin', 'main'),
+            })
+
+    def test_fetch_with_changed_bootstrap_map_does_not_reuse_old_operation(self):
+        from pisar import sync
+        from pisar.operations import Runtime
+        from pisar.spaces import Wiki
+        first = {'work/10-projects/alpha': {'url': str(self.f.child_remote), 'branch': 'main'}}
+        second = {'work/10-projects/alpha': {'url': str(self.f.base / 'other-child.git'), 'branch': 'main'}}
+        wiki = Wiki(self.f.root)
+        one = sync.fetch(wiki, self.f.state, target=sync.Target(bootstrap_map=first))
+        with self.assertRaisesRegex(WikiError, 'unfinished|map|operation'):
+            sync.fetch(wiki, self.f.state, target=sync.Target(bootstrap_map=second))
+        stored = sync._load(Runtime(self.f.state, self.f.root), one['operation_id'])
+        self.assertEqual(stored['bootstrap_map'], first)
+
+    def test_nested_relative_bootstrap_url_uses_mapped_parent_endpoint(self):
+        from pisar import sync
+        from pisar.spaces import Wiki
+        child = self.f.root / self.f.child_path
+        self.f.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        manifest = child / '.gitmodules'
+        manifest.write_text(manifest.read_text().replace(str(self.f.grandchild_remote), '../grandchild.git'))
+        self.f.git(child, 'add', '--', '.gitmodules')
+        self.f.git(child, 'commit', '-qm', 'use relative nested URL')
+        self.f.git(child, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.f.git(self.f.root, 'add', '--', self.f.child_path)
+        self.f.git(self.f.root, 'commit', '-qm', 'pin relative nested URL')
+        self.f.git(self.f.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        mirror = self.f.base / 'mirror' / 'child.git'
+        mirror.parent.mkdir()
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.f.child_remote), str(mirror)],
+                       env=self.f.env, check=True)
+        (self.f.root / 'outgoing.md').write_text('outgoing\n')
+        self.f.git(self.f.root, 'add', '--', 'outgoing.md')
+        self.f.git(self.f.root, 'commit', '-qm', 'outgoing root')
+        mapping = {self.f.child_path: {'url': str(mirror), 'branch': 'main'}}
+        wiki = Wiki(self.f.root)
+        ready = sync.publish_only(wiki, self.f.state, target=sync.Target(bootstrap_map=mapping))
+        sync.manual_review(wiki, self.f.state, ready['operation_id'])
+        sync.accept(wiki, self.f.state, ready['operation_id'], ready['revision'])
+        with self.assertRaisesRegex(WikiError, 'bootstrap|unavailable'):
+            sync.publish(wiki, self.f.state, ready['operation_id'])
+
+    def test_rewritten_child_destination_invalidates_partial_publication_receipt(self):
+        from pisar import sync
+        from pisar.spaces import Wiki
+        child = self.f.root / self.f.child_path
+        old = self.f.git(child, 'rev-parse', 'HEAD')
+        self.f.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'local-published.md').write_text('child C\n')
+        self.f.git(child, 'add', '--', 'local-published.md')
+        self.f.git(child, 'commit', '-qm', 'child C')
+        child_c = self.f.git(child, 'rev-parse', 'HEAD')
+        backup = self.f.base / 'bootstrap-child.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.f.child_remote), str(backup)],
+                       env=self.f.env, check=True)
+        self.f.git(child, 'remote', 'add', 'backup', str(backup))
+        self.f.git(child, 'push', '-q', 'backup', 'HEAD:refs/heads/main')
+        self.f.git(child, 'fetch', '-q', 'backup', 'main')
+        self.f.git(self.f.root, 'add', '--', self.f.child_path)
+        self.f.git(self.f.root, 'commit', '-qm', 'root pin C')
+        mapping = {self.f.child_path: {'url': str(backup), 'branch': 'main'}}
+        wiki = Wiki(self.f.root)
+        ready = sync.publish_only(wiki, self.f.state, target=sync.Target(bootstrap_map=mapping))
+        sync.manual_review(wiki, self.f.state, ready['operation_id'])
+        sync.accept(wiki, self.f.state, ready['operation_id'], ready['revision'])
+        real_run = subprocess.run
+        def reject_root_push(argv, *args, **kwargs):
+            if isinstance(argv, (list, tuple)) and 'push' in argv and '--porcelain' in argv and str(self.f.root) in argv:
+                return subprocess.CompletedProcess(argv, 1, b'', b'synthetic root rejection')
+            return real_run(argv, *args, **kwargs)
+        with patch('pisar.sync_graph.subprocess.run', reject_root_push):
+            with self.assertRaises(WikiError):
+                sync.publish(wiki, self.f.state, ready['operation_id'])
+        self.assertEqual(self.f.git(self.f.child_remote, 'rev-parse', 'refs/heads/main'), child_c)
+        child_pushes = []
+        def reject_root_and_count_child(argv, *args, **kwargs):
+            if isinstance(argv, (list, tuple)) and 'push' in argv and str(child) in argv:
+                child_pushes.append(argv)
+            return reject_root_push(argv, *args, **kwargs)
+        with patch('pisar.sync_graph.subprocess.run', reject_root_and_count_child):
+            with self.assertRaises(WikiError):
+                sync.publish(wiki, self.f.state, ready['operation_id'])
+        self.assertEqual(child_pushes, [])
+        self.f.git(self.f.child_remote, 'update-ref', 'refs/heads/main', old)
+        result = sync.publish(wiki, self.f.state, ready['operation_id'])
+        self.assertEqual(result['status'], 'published')
+        self.assertEqual(self.f.git(self.f.child_remote, 'rev-parse', 'refs/heads/main'), child_c)
+        self.assertEqual(self.f.git(self.f.root_remote, 'rev-parse', 'refs/heads/main'), ready['candidate'])
 
     def test_parent_publish_checks_and_observes_child_destinations_first(self):
         self.f.incoming_child_and_root_pin()
