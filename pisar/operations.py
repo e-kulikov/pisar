@@ -464,12 +464,24 @@ def capture_operation(space, ident):
 
 def verify_capture(wiki, runtime, space, ident, source, digest):
     operation = capture_operation(space, ident)
-    payload = dict(space=space.address, id=ident, source=str(external_path(source)), sha256=digest)
-    journal = existing(runtime, operation, payload)
+    if source is None:
+        reject_legacy(runtime, operation)
+        journal = runtime.load(operation)
+        if journal is not None and (journal.get('operation_id') != operation
+                                    or journal.get('root') != str(wiki.root)):
+            raise WikiError('capture journal identity/root conflict')
+    else:
+        payload = dict(space=space.address, id=ident, source=str(external_path(source)), sha256=digest)
+        journal = existing(runtime, operation, payload)
     if journal is None or journal['status'] != 'complete':
         raise WikiError('capture is not durably complete')
     raw = safe_path(space.path, f'sources/captures/{ident}/original')
     descriptor = safe_path(space.path, f'inbox/{ident}.md')
+    if source is None:
+        raw_relative = raw.relative_to(wiki.root).as_posix()
+        if not any(item.get('path') == raw_relative and item.get('after') == digest
+                   for item in journal.get('artifacts', [])):
+            raise WikiError('capture journal does not verify the selected original')
     if not raw.is_file() or sha256(raw.read_bytes()) != digest:
         raise WikiError('captured original changed or is missing')
     meta = metadata(descriptor.read_text(encoding='utf-8'))
@@ -712,7 +724,13 @@ def save(wiki, directory, plan_path, binary='ruwana'):
                 valid_pending = (source == raw and raw.is_file() and sha256(raw.read_bytes()) == digest
                                  and meta is not None and meta.get('id') == capture_id
                                  and meta.get('source_sha256') == digest and meta.get('ingest_status') == 'pending')
-                pending_id = capture_id if valid_pending else None
+                pending_id = None
+                if valid_pending:
+                    try:
+                        verify_capture(wiki, runtime, owner, capture_id, None, digest)
+                        pending_id = capture_id
+                    except WikiError:
+                        pass
             else:
                 pending_descriptors = []
                 for descriptor in wiki.files():
@@ -763,6 +781,7 @@ def save(wiki, directory, plan_path, binary='ruwana'):
                 meta = metadata(descriptor.read_text(encoding='utf-8'))
                 if source != raw or not meta or meta.get('source_sha256') != digest or meta.get('ingest_status') != 'pending':
                     raise WikiError('capture_id must identify a pending descriptor with the selected captured original')
+                verify_capture(wiki, runtime, owner, capture_id, None, digest)
                 validate_meta(meta, owner, wiki)
                 captured = descriptor.read_bytes()
                 artifacts.append(artifact(wiki, owner, descriptor.relative_to(owner.path).as_posix(), captured, sha256(captured)))

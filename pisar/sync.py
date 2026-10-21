@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -90,7 +91,7 @@ def _target_ref(repo, target):
     return tracking
 
 
-def _task_changes(candidate, ours, theirs, result):
+def _task_changes(candidate, ours, theirs, result, *, wiki_root=None, relative=None):
     changed = set()
     for before, after in ((ours, result), (theirs, result)):
         raw = sync_git.run(candidate, 'diff', '--name-only', '-z', before, after)
@@ -104,20 +105,47 @@ def _task_changes(candidate, ours, theirs, result):
     if any('.ruwana' in Path(name).parts for name in changed):
         from .ruwana import Ruwana
         binary = settings.ruwana()
-        fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path')
+        fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path',
+                  'created', 'modified', 'related', 'tags', 'tasks')
 
         def snapshot(commit):
             with tempfile.TemporaryDirectory(prefix='pisar-task-snapshot-') as directory:
-                checkout = Path(directory) / 'repo'
-                sync_git.run(candidate, 'clone', '--no-local', '--no-checkout', str(candidate), str(checkout))
-                sync_git.run(checkout, 'checkout', '--detach', commit)
+                if wiki_root is None:
+                    checkout = Path(directory) / 'repo'
+                    sync_git.run(candidate, 'clone', '--no-local', '--no-checkout', str(candidate), str(checkout))
+                    sync_git.run(checkout, 'checkout', '--detach', commit)
+                    task_root = checkout
+                    selected_spaces = None
+                else:
+                    checkout = Path(directory) / 'wiki'
+                    shutil.copytree(wiki_root, checkout, ignore=shutil.ignore_patterns('.git'))
+                    task_repo = checkout / relative
+                    if task_repo.is_symlink() or not task_repo.is_dir():
+                        raise WikiError('task-validation-unavailable: owning submodule path is missing/unsafe')
+                    shutil.rmtree(task_repo)
+                    sync_git.run(candidate, 'clone', '--no-local', '--no-checkout', str(candidate), str(task_repo))
+                    sync_git.run(task_repo, 'checkout', '--detach', commit)
+                    task_root = checkout
                 try:
                     from .spaces import Wiki
-                    tasks = Ruwana(Wiki(checkout), binary).snapshot().tasks
+                    wiki = Wiki(checkout)
+                    if wiki_root is None:
+                        addresses = None
+                    else:
+                        addresses = [space.address for space in wiki.spaces
+                                     if space.path.is_relative_to(checkout / relative)]
+                        if not addresses:
+                            raise WikiError('task-validation-unavailable: no owning space in candidate wiki graph')
+                    tasks = Ruwana(wiki, binary).snapshot(addresses).tasks
                 except WikiError as error:
                     raise WikiError(f'task-validation-unavailable: {error}') from None
-                return {(task.space_address, task.id): {field: getattr(task, field) for field in fields}
-                        for task in tasks}
+                result_tasks = {}
+                for task in tasks:
+                    value = {field: getattr(task, field) for field in fields}
+                    if wiki_root is not None:
+                        value['path'] = Path(value['path']).relative_to(Path(relative)).as_posix()
+                    result_tasks[(task.space_address, task.id)] = value
+                return result_tasks
 
         try:
             base_commits = sync_git.text(candidate, 'merge-base', '--all', ours, theirs).splitlines()
@@ -142,7 +170,8 @@ def _task_changes(candidate, ours, theirs, result):
 
 def _merge_task_snapshots(base_tasks, ours_tasks, theirs_tasks):
     """Compute the only task state a clean three-way candidate may contain."""
-    fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path')
+    fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path',
+              'created', 'modified', 'related', 'tags', 'tasks')
     expected = {}
     for identity in base_tasks.keys() | ours_tasks.keys() | theirs_tasks.keys():
         base, ours, theirs = base_tasks.get(identity), ours_tasks.get(identity), theirs_tasks.get(identity)

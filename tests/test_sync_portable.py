@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from .support import Fixture, commit_all, clean_environ, init_repo
+from .support import Fixture, RUWANA, RUWANA_AVAILABLE, commit_all, clean_environ, git, init_repo
 from pisar.safety import WikiError
 from pisar import sync
 from pisar.sync import _merge_task_snapshots, _validate_processing
@@ -56,7 +56,8 @@ class SyncPortableTests(Fixture):
             state = records[head]
             return TaskSnapshot((TaskRecord('one', 'work/alpha', 'work/alpha',
                                             ('wiki:work/alpha:meeting#task-one',), 'Task', None, None,
-                                            state, '.ruwana/tasks/one.md', '0' * 64),))
+                                            state, '.ruwana/tasks/one.md', '0' * 64, 'created', 'modified',
+                                            (), (), ()),))
         return snapshot
 
     def test_sync_accepts_one_sided_task_status_change_after_snapshot_validation(self):
@@ -83,13 +84,115 @@ class SyncPortableTests(Fixture):
         identity = ('work/alpha', 'taskone')
         base_task = dict(id='taskone', space_address='work/alpha', project='work/alpha',
                          source=('wiki:work/alpha:meeting#task-one',), title='Task',
-                         description=None, due=None, status='open', path='.ruwana/taskone.toml')
+                         description=None, due=None, status='open', path='.ruwana/taskone.toml',
+                         created='created', modified='modified', related=(), tags=(), tasks=())
         updated = {**base_task, 'status': 'done'}
         self.assertEqual(_merge_task_snapshots({identity: base_task}, {identity: base_task},
                                                {identity: updated}), {identity: updated})
         other = {**base_task, 'status': 'in-progress'}
         with self.assertRaisesRegex(WikiError, 'status'):
             _merge_task_snapshots({identity: base_task}, {identity: updated}, {identity: other})
+
+    def test_task_snapshot_merge_refuses_divergent_creation_history(self):
+        identity = ('work/alpha', 'taskone')
+        base = dict(id='taskone', space_address='work/alpha', project='work/alpha',
+                    source=('wiki:work/alpha:meeting#task-one',), title='Task', description=None,
+                    due=None, status='open', path='.ruwana/taskone.toml', created='2026-01-01',
+                    modified='2026-01-01', related=(), tags=(), tasks=())
+        incoming = {**base, 'status': 'done', 'modified': '2026-01-02'}
+        candidate = {**incoming, 'created': '2000-01-01'}
+        expected = _merge_task_snapshots({identity: base}, {identity: base}, {identity: incoming})
+        self.assertNotEqual(expected[identity], candidate)
+
+    @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
+    def test_same_stable_task_source_under_two_ids_is_refused(self):
+        from pisar.ruwana import Ruwana
+        from pisar.spaces import Wiki
+        adapter = Ruwana(Wiki(self.root), str(RUWANA))
+        project = 'work/team/alpha'
+        marker = 'wiki:work/alpha:meeting#task-one'
+        for title in ('Same task copy one', 'Same task copy two'):
+            adapter.run('add', f'--project={project}', f'--source=wiki:work/alpha:meeting',
+                        f'--source={marker}', '--', title)
+        with self.assertRaisesRegex(WikiError, 'duplicate stable ruwana task source identity'):
+            adapter.snapshot(['work/alpha'])
+
+    @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
+    def test_clean_merge_of_independent_ids_for_one_task_marker_is_refused(self):
+        from pisar.ruwana import Ruwana
+        from pisar.spaces import Wiki
+        adapter = Ruwana(Wiki(self.root), str(RUWANA))
+        base = git(self.root, 'rev-parse', 'HEAD')
+        marker = 'wiki:work/alpha:call-one#task-one'
+        adapter.run('add', '--project=work/team/alpha', '--source=wiki:work/alpha:call-one',
+                    f'--source={marker}', '--', 'Same agreed task')
+        commit_all(self.root)
+        ours = git(self.root, 'rev-parse', 'HEAD')
+        git(self.root, 'switch', '-c', 'other-task-copy', base)
+        adapter = Ruwana(Wiki(self.root), str(RUWANA))
+        adapter.run('add', '--project=work/team/alpha', '--source=wiki:work/alpha:call-one',
+                    f'--source={marker}', '--', 'Same agreed task')
+        commit_all(self.root)
+        theirs = git(self.root, 'rev-parse', 'HEAD')
+        git(self.root, 'merge', '--no-ff', '-m', 'merge independent task copies', ours)
+        result = git(self.root, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(WikiError, 'duplicate stable ruwana task source identity'):
+            sync._task_changes(self.root, ours, theirs, result)
+
+    @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
+    def test_candidate_only_task_creation_history_edit_is_refused(self):
+        import re
+        from pisar.ruwana import Ruwana
+        from pisar.spaces import Wiki
+        adapter = Ruwana(Wiki(self.root), str(RUWANA))
+        task = adapter.ensure(Wiki(self.root).space('work/alpha'),
+                              dict(id='one', title='Agreed task', agreed=True),
+                              'wiki:work/alpha:call-one')
+        commit_all(self.root)
+        base = git(self.root, 'rev-parse', 'HEAD')
+        adapter.run('done', task['id'], '--project', task['project'])
+        commit_all(self.root)
+        theirs = git(self.root, 'rev-parse', 'HEAD')
+        task_file = self.root / task['path']
+        original = task_file.read_text()
+        changed, count = re.subn(r'^created = .*$', 'created = "2000-01-01T00:00:00+00:00"',
+                                 original, count=1, flags=re.MULTILINE)
+        self.assertEqual(count, 1)
+        task_file.write_text(changed)
+        commit_all(self.root)
+        result = git(self.root, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(WikiError, 'coherent three-way result'):
+            sync._task_changes(self.root, base, base, result)
+
+    @unittest.skipUnless(RUWANA_AVAILABLE, 'local Ruwana binary is required')
+    def test_space_root_submodule_task_update_uses_full_wiki_context(self):
+        from pisar.ruwana import Ruwana
+        from pisar.spaces import Wiki
+        remote = self.base / 'module-origin'
+        init_repo(remote)
+        (remote / '.wiki.toml').write_text(
+            'schema_version = 1\nid = "module"\nkind = "project"\nstatus = "active"\n')
+        commit_all(remote)
+        git(self.root, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(remote),
+            'work/team/module')
+        child = self.root / 'work/team/module'
+        git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        git(child, 'config', 'user.name', 'Synthetic fixture')
+        wiki = Wiki(self.root)
+        adapter = Ruwana(wiki, str(RUWANA))
+        record = adapter.ensure(wiki.space('work/module'),
+                                dict(id='one', title='Agreed task', agreed=True),
+                                'wiki:work/module:meeting')
+        git(child, 'add', '.ruwana')
+        git(child, 'commit', '-qm', 'base task')
+        base = git(child, 'rev-parse', 'HEAD')
+        git(self.root, 'add', 'work/team/module')
+        git(self.root, 'commit', '-qm', 'pin task base')
+        adapter.run('done', record['id'], '--project', 'work/team/module')
+        git(child, 'add', '.ruwana')
+        git(child, 'commit', '-qm', 'complete task')
+        tip = git(child, 'rev-parse', 'HEAD')
+        sync._task_changes(child, base, tip, tip, wiki_root=self.root, relative='work/team/module')
 
     def test_candidate_with_two_offline_results_for_one_hash_requires_decision(self):
         source = b'the same source saved independently\r\n'

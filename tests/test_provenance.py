@@ -67,6 +67,25 @@ class ProvenanceTests(Fixture):
         self.assertEqual(found[0].meeting_reference, 'wiki:work/alpha:legacy')
         self.assertEqual(found[0].source_path, transcript)
 
+    def test_interrupted_pending_meeting_is_incomplete_not_processed(self):
+        from pisar.provenance import committed_processing, find_processed
+        source = b'committed transcript before task creation\n'
+        digest = hashlib.sha256(source).hexdigest()
+        transcript = 'sources/meetings/interrupted/transcript.md'
+        (self.alpha / transcript).parent.mkdir(parents=True)
+        (self.alpha / transcript).write_bytes(source)
+        (self.alpha / 'meetings').mkdir()
+        pending = meeting('work/alpha', 'interrupted', transcript).replace(
+            'Synthetic meeting record.',
+            '## Ruwana references\n\nPending: operation `save-interrupted` is incomplete. No task IDs claimed.')
+        (self.alpha / 'meetings/interrupted.md').write_text(pending)
+        commit_all(self.root)
+
+        inventory = committed_processing(Wiki(self.root))
+        self.assertFalse(inventory.processed)
+        with self.assertRaisesRegex(WikiError, 'incomplete'):
+            find_processed(inventory, 'work/alpha', digest)
+
     def test_two_independent_capture_ids_for_one_original_remain_two_decisions(self):
         from pisar.provenance import committed_processing, find_processed
         source = b'independently processed same original\n'

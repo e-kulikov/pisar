@@ -27,6 +27,11 @@ class TaskRecord:
     status: str
     path: str
     sha256: str
+    created: str
+    modified: str
+    related: tuple[str, ...]
+    tags: tuple[str, ...]
+    tasks: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -156,12 +161,23 @@ class Ruwana:
                 if not isinstance(source, list) or not all(isinstance(value, str) and value for value in source):
                     raise WikiError(f'ruwana task source conflict: {space.address}/{ident}')
                 record = json.loads(self._snapshot_run('show', ident, '--project', project, '--format', 'json'))
-                if (not isinstance(record, dict) or record.get('id') != ident
+                expected_fields = {'created', 'description', 'due', 'file_path', 'id', 'modified',
+                                   'project', 'related', 'source', 'status', 'tags', 'tasks', 'title'}
+                if (not isinstance(record, dict) or set(record) != expected_fields or record.get('id') != ident
                         or record.get('project') != project or record.get('source') != source):
                     raise WikiError(f'ruwana task identity conflict: {space.address}/{ident}')
                 title, description = task_content(record)
                 if not isinstance(record.get('status'), str) or not record['status']:
                     raise WikiError(f'ruwana task status conflict: {space.address}/{ident}')
+                for field in ('created', 'modified'):
+                    if not isinstance(record.get(field), str) or not record[field]:
+                        raise WikiError(f'ruwana task {field} history conflict: {space.address}/{ident}')
+                lists = {}
+                for field in ('related', 'tags', 'tasks'):
+                    value = record.get(field)
+                    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                        raise WikiError(f'ruwana task {field} history conflict: {space.address}/{ident}')
+                    lists[field] = tuple(value)
                 raw_due = record.get('due')
                 due = None
                 if raw_due:
@@ -177,7 +193,17 @@ class Ruwana:
                     raise WikiError(f'ruwana returned unexpected/missing task file: {space.address}/{ident}')
                 found.append(TaskRecord(ident, space.address, project, tuple(source), title, description,
                                         due, record['status'], path.relative_to(self.wiki.root).as_posix(),
-                                        sha256(path.read_bytes())))
+                                        sha256(path.read_bytes()), record['created'], record['modified'],
+                                        lists['related'], lists['tags'], lists['tasks']))
+        stable_sources = {}
+        for task in found:
+            for source in task.source:
+                if '#task-' not in source:
+                    continue
+                key = (task.space_address, source)
+                prior = stable_sources.setdefault(key, task.id)
+                if prior != task.id:
+                    raise WikiError(f'duplicate stable ruwana task source identity: {source}')
         return TaskSnapshot(tuple(found))
 
     def ensure(self, space, task, reference):

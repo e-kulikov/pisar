@@ -98,6 +98,9 @@ class SaveTests(Fixture):
         self.assertEqual(journal['tasks'], {})
         self.assertTrue((self.alpha / 'meetings/launch-meeting.md').exists())
         self.assertFalse(list(self.root.rglob('.ruwana/*.toml')))
+        replay = self.cli('--ruwana', self.base / 'does-not-exist', 'save', '--plan', path,
+                          state=self.base / 'fresh-pending-runtime', ok=False)
+        self.assertIn('committed processing is incomplete', replay.stderr)
         if RUWANA_AVAILABLE:
             self.assertEqual(json.loads(self.save(path).stdout)['status'], 'complete')
 
@@ -245,6 +248,21 @@ class SaveTests(Fixture):
             self.assertEqual(raw.read_bytes(), source.read_bytes())
             self.cli('capture', '--space', 'work/alpha', '--id', 'pending-call', '--source', source)
             self.assertEqual(self.data('read', 'wiki:work/alpha:pending-call')['metadata']['ingest_status'], 'processed')
+
+    def test_save_does_not_suppress_pending_provenance_without_completed_capture_journal(self):
+        from pisar.operations import capture, save
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source = self.external('captured but journal unavailable\n')
+        capture(Wiki(self.root), self.state, 'work/alpha', 'pending-journal', source)
+        original = self.alpha / 'sources/captures/pending-journal/original'
+        path, plan = self.plan('pending-journal-save', tasks=[])
+        plan['capture_id'] = 'pending-journal'
+        plan['source'] = dict(path=str(original), sha256=hashlib.sha256(original.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        with patch('pisar.operations.verify_capture', side_effect=WikiError('capture is not durably complete')):
+            with self.assertRaisesRegex(WikiError, 'incomplete'):
+                save(Wiki(self.root), self.base / 'fresh-runtime', path, self.base / 'no-ruwana')
 
     def test_plan_cross_domain_body_and_missing_evidence_rejected_before_write(self):
         for bad_body in ('See wiki:personal/home:private-note.', 'See wiki:work/alpha:absent.'):

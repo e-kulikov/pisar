@@ -560,7 +560,8 @@ def prepare_graph(operation, root_candidate, *, message=None):
             raise WikiError(f'candidate submodule topology or URL registration changed: {item["path"]}')
     for item in candidates[1:]:
         child_candidate = Path(item['candidate'])
-        sync._task_changes(child_candidate, item['ours'], item['theirs'], item['commit'])
+        sync._task_changes(child_candidate, item['ours'], item['theirs'], item['commit'],
+                           wiki_root=root_candidate, relative=item['path'])
         sync._validate_originals(child_candidate, item['ours'], item['theirs'], item['commit'])
     result = verify_graph(graph)
     if not result['ok']:

@@ -67,10 +67,15 @@ def committed_processing(wiki):
     incomplete = []
     processed_meetings = set()
     meeting_originals = {}
+    pending_meetings = set()
     for meeting_path, meeting_space, meeting_meta in documents:
         if meeting_meta.get('type') != 'meeting':
             continue
         meeting_ref = f'wiki:{meeting_space.address}:{meeting_meta.get("id", "")}'
+        meeting_blob = _committed_blob(wiki, meeting_path)
+        if meeting_blob is not None and re.search(
+                rb'Pending: operation `[a-z0-9][a-z0-9-]*` is incomplete\. No task IDs claimed\.', meeting_blob):
+            pending_meetings.add((meeting_space.address, meeting_ref))
         sources = meeting_meta.get('sources', [])
         for source in sources if isinstance(sources, list) else ():
             if not isinstance(source, str) or not source.startswith('sources/meetings/'):
@@ -119,6 +124,7 @@ def committed_processing(wiki):
         reference = f'wiki:{space.address}:{meta.get("id", "")}'
         if (space.address, reference) in processed_meetings:
             continue
+        pending = (space.address, reference) in pending_meetings
         sources = meta.get('sources', [])
         for source in sources if isinstance(sources, list) else ():
             if not isinstance(source, str) or not source.startswith('sources/meetings/'):
@@ -128,7 +134,11 @@ def committed_processing(wiki):
             if blob is None:
                 incomplete.append((space.address, '', 'committed meeting source link is missing'))
                 continue
-            processed.append(ProcessedSource(space.address, sha256(blob), source, reference, None))
+            digest = sha256(blob)
+            if pending:
+                incomplete.append((space.address, digest, 'committed meeting save is pending/incomplete'))
+            else:
+                processed.append(ProcessedSource(space.address, digest, source, reference, None))
     return ProcessingInventory(tuple(processed), tuple(incomplete))
 
 

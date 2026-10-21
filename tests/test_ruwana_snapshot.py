@@ -43,6 +43,11 @@ class RuwanaSnapshotTests(Fixture):
             'description': ' \u00a0\t\n',
             'due': None,
             'status': 'open',
+            'created': '2026-01-01T00:00:00Z',
+            'modified': '2026-01-01T00:00:00Z',
+            'related': [],
+            'tags': [],
+            'tasks': [],
             'file_path': str(task_path),
         }]
         calls = []
@@ -76,6 +81,8 @@ class RuwanaSnapshotTests(Fixture):
         binary.chmod(0o700)
         base_record = {'id': 'taskone', 'project': 'work/team/alpha', 'source': ['wiki:work/alpha:meeting#task-one'],
                        'title': 'A title', 'description': None, 'due': None, 'status': 'open',
+                       'created': '2026-01-01T00:00:00Z', 'modified': '2026-01-01T00:00:00Z',
+                       'related': [], 'tags': [], 'tasks': [],
                        'file_path': str(task_path)}
         adapter = Ruwana(Wiki(self.root), binary)
         with patch.object(Ruwana, '_snapshot_run', return_value=json.dumps([base_record, base_record])):
