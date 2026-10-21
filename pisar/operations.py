@@ -130,7 +130,7 @@ class Runtime:
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
     def pending_sync(self):
-        """Return unfinished reservations; callers hold the shared writer lock."""
+        """Return unfinished reservations from atomically replaced state files."""
         folder = safe_path(self.path, 'sync')
         if not folder.is_dir():
             return []

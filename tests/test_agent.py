@@ -42,6 +42,21 @@ class AgentTests(Fixture):
                            *args, env=env or self.agent_env, ok=ok)
         return p, (json.loads(self.out.read_text()) if self.out.exists() else None)
 
+    def test_claude_hook_allows_tools_without_reservation_while_writer_busy(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        with runtime.lock():
+            for name, payload in [('Write', {'file_path': 'note.md'}),
+                                  ('Edit', {'file_path': 'note.md'}),
+                                  ('Bash', {'command': 'git status --short'})]:
+                result = subprocess.run(hook, shell=True,
+                                        input=json.dumps({'tool_name': name, 'tool_input': payload}),
+                                        text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_claude_mutation_hook_blocks_pending_sync_and_preserves_reads(self):
         from pisar import operations
         runtime = operations.Runtime(self.state, self.root)
