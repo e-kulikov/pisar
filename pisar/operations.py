@@ -697,6 +697,53 @@ def save(wiki, directory, plan_path, binary='ruwana'):
                 raise WikiError(f'{operation}: completed history retained; current verification failed: {error}') from None
         fresh = journal is None
         if fresh:
+            from .provenance import committed_processing, find_processed, ProcessingInventory
+            inventory = committed_processing(wiki)
+            incomplete = inventory.incomplete
+            pending_id = plan.get('capture_id')
+            if 'capture_id' in plan:
+                capture_id = plan['capture_id']
+                descriptor = safe_path(owner.path, f'inbox/{capture_id}.md')
+                raw = safe_path(owner.path, f'sources/captures/{capture_id}/original')
+                try:
+                    meta = metadata(descriptor.read_text(encoding='utf-8'))
+                except (OSError, UnicodeError):
+                    meta = None
+                valid_pending = (source == raw and raw.is_file() and sha256(raw.read_bytes()) == digest
+                                 and meta is not None and meta.get('id') == capture_id
+                                 and meta.get('source_sha256') == digest and meta.get('ingest_status') == 'pending')
+                pending_id = capture_id if valid_pending else None
+            else:
+                pending_descriptors = []
+                for descriptor in wiki.files():
+                    if descriptor.parent.name != 'inbox' or wiki.owner(descriptor) != owner:
+                        continue
+                    try:
+                        meta = metadata(descriptor.read_text(encoding='utf-8'))
+                    except (OSError, UnicodeError):
+                        continue
+                    if (meta and meta.get('type') == 'source' and meta.get('ingest_status') == 'pending'
+                            and meta.get('source_sha256') == digest):
+                        pending_descriptors.append(meta.get('id'))
+                if len(pending_descriptors) == 1 and isinstance(pending_descriptors[0], str):
+                    try:
+                        verify_capture(wiki, runtime, owner, pending_descriptors[0], source, digest)
+                        pending_id = pending_descriptors[0]
+                    except WikiError:
+                        pass
+            if pending_id is not None:
+                incomplete = tuple(item for item in incomplete
+                                   if not (item[0] == owner.address and item[1] == digest
+                                           and item[2] == 'committed capture processing is pending/incomplete'))
+            matches = find_processed(ProcessingInventory(inventory.processed, incomplete), owner.address, digest)
+            if matches:
+                if len(matches) > 1:
+                    raise WikiError('duplicate-source-decision-required: exact source was processed more than once')
+                if matches[0].meeting_reference != reference:
+                    raise WikiError(f'possible-duplicate-source-decision-required: exact source was processed as '
+                                    f'{matches[0].meeting_reference}')
+                return dict(operation_id=operation, status='already-processed',
+                            reference=matches[0].meeting_reference)
             docs, errors = scan(wiki)
             if errors:
                 raise WikiError('; '.join(errors))

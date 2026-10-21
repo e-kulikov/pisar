@@ -32,6 +32,12 @@ Synthetic fixture; source has no reliable timestamp.
 
 
 class SaveTests(Fixture):
+    def unique_source(self, value, label):
+        source = Path(value['source']['path'])
+        data = f'synthetic source for {label}\r\n'.encode()
+        source.write_bytes(data)
+        value['source']['sha256'] = hashlib.sha256(data).hexdigest()
+
     def plan(self, ident='save-one', tasks=None):
         source = self.external()
         value = dict(schema_version=1, operation_id=ident, space_id='work/alpha',
@@ -126,6 +132,54 @@ class SaveTests(Fixture):
         path.write_text(json.dumps(value))
         self.save(path, ok=False)
 
+    def test_fresh_runtime_replay_of_committed_capture_save_never_recreates_tasks(self):
+        from pisar.operations import capture, save
+        from pisar.ruwana import Ruwana
+        from pisar.safety import WikiError
+        from pisar.spaces import Wiki
+        source = self.external('portable original bytes\r\n')
+        captured = capture(Wiki(self.root), self.state, 'work/alpha', 'capture-portable', source)
+        original = self.alpha / 'sources/captures/capture-portable/original'
+        task_path = self.alpha / '.ruwana/taskone.toml'
+        plan_path, plan = self.plan('portable-save', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['capture_id'] = 'capture-portable'
+        plan['source'] = dict(path=str(original), sha256=hashlib.sha256(original.read_bytes()).hexdigest())
+        plan_path.write_text(json.dumps(plan))
+        task = dict(id='taskone', space_id='work/alpha', project='work/team/alpha',
+                    source='wiki:work/alpha:launch-meeting#task-prepare-launch',
+                    path='work/team/alpha/.ruwana/taskone.toml',
+                    sha256=hashlib.sha256(b'fake committed task state\n').hexdigest())
+        binary = self.base / 'fake-ruwana'
+        binary.write_text('#!/bin/sh\nexit 99\n')
+        binary.chmod(0o700)
+        def create_task(*args, **kwargs):
+            task_path.parent.mkdir(exist_ok=True)
+            task_path.write_text('fake committed task state\n')
+            task['sha256'] = hashlib.sha256(task_path.read_bytes()).hexdigest()
+            return task
+        with patch.object(Ruwana, 'find', return_value=None), patch.object(Ruwana, 'ensure', side_effect=create_task) as ensure:
+            result = save(Wiki(self.root), self.state, plan_path, binary)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(ensure.call_count, 1)
+        self.assertEqual(captured['status'], 'complete')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        fresh_runtime = self.base / 'empty-runtime'
+        with patch.object(Ruwana, 'find', side_effect=AssertionError('must not query or mutate tasks')), \
+                patch.object(Ruwana, 'ensure', side_effect=AssertionError('must not recreate task')):
+            replay = save(Wiki(self.root), fresh_runtime, plan_path, binary)
+        self.assertEqual(replay['status'], 'already-processed')
+        self.assertEqual(replay['reference'], 'wiki:work/alpha:launch-meeting')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertFalse(list(fresh_runtime.rglob('operations/*.json')))
+        plan['operation_id'] = 'portable-save-second-interpretation'
+        plan.pop('capture_id')
+        plan['meeting']['id'] = 'second-interpretation'
+        plan_path.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(WikiError, 'possible-duplicate-source-decision-required'):
+            save(Wiki(self.root), self.base / 'second-runtime', plan_path, binary)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
     def test_save_rejects_unagreed_tasks_and_cross_domain(self):
         for tasks in ([dict(id='idea', space_id='work/alpha', title='Maybe launch', agreed=False)],
                       [dict(id='private', space_id='personal/home', title='Copy work', agreed=True)]):
@@ -219,6 +273,7 @@ class SaveTests(Fixture):
                 ident = f'due-{index}'
                 path, value = self.plan(ident, tasks=[dict(id='scheduled', space_id='work/alpha',
                                                          title='Scheduled task', agreed=True, due=due)])
+                self.unique_source(value, ident)
                 value['meeting']['id'] = ident
                 path.write_text(json.dumps(value))
                 result = json.loads(self.save(path).stdout)
@@ -348,6 +403,7 @@ class SaveTests(Fixture):
                 if description is not None:
                     task['description'] = description
                 path, value = self.plan(operation, tasks=[task])
+                self.unique_source(value, operation)
                 value['meeting']['id'] = operation
                 path.write_text(json.dumps(value))
                 plan_bytes = path.read_bytes()

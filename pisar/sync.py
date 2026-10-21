@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import uuid
 from urllib.parse import urlsplit
 
@@ -101,7 +102,75 @@ def _task_changes(candidate, ours, theirs, result):
                                '-m', commit)
             changed.update(p.decode('utf-8', errors='surrogateescape') for p in raw.split(b'\0') if p)
     if any('.ruwana' in Path(name).parts for name in changed):
-        raise WikiError('task-validation-unavailable')
+        from .ruwana import Ruwana
+        binary = settings.ruwana()
+        fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path')
+
+        def snapshot(commit):
+            with tempfile.TemporaryDirectory(prefix='pisar-task-snapshot-') as directory:
+                checkout = Path(directory) / 'repo'
+                sync_git.run(candidate, 'clone', '--no-local', '--no-checkout', str(candidate), str(checkout))
+                sync_git.run(checkout, 'checkout', '--detach', commit)
+                try:
+                    from .spaces import Wiki
+                    tasks = Ruwana(Wiki(checkout), binary).snapshot().tasks
+                except WikiError as error:
+                    raise WikiError(f'task-validation-unavailable: {error}') from None
+                return {(task.space_address, task.id): {field: getattr(task, field) for field in fields}
+                        for task in tasks}
+
+        try:
+            base_commits = sync_git.text(candidate, 'merge-base', '--all', ours, theirs).splitlines()
+            if not base_commits:
+                raise WikiError('task-validation-unavailable: no common task history')
+            versions = {commit: snapshot(commit) for commit in set([*base_commits, ours, theirs, result])}
+            known_paths = {task['path'] for tasks in versions.values() for task in tasks.values()}
+            changed_task_paths = {name for name in changed if '.ruwana' in Path(name).parts}
+            if not changed_task_paths <= known_paths:
+                raise WikiError('task-validation-unavailable: changed task file has no Ruwana task identity')
+            for base in base_commits:
+                base_tasks, ours_tasks = versions[base], versions[ours]
+                theirs_tasks, candidate_tasks = versions[theirs], versions[result]
+                expected = _merge_task_snapshots(base_tasks, ours_tasks, theirs_tasks)
+                if expected != candidate_tasks:
+                    raise WikiError('candidate task state is not the coherent three-way result')
+        except WikiError as error:
+            if 'task-validation-unavailable' in str(error) or 'task ' in str(error):
+                raise
+            raise WikiError(f'task-validation-unavailable: {error}') from None
+
+
+def _merge_task_snapshots(base_tasks, ours_tasks, theirs_tasks):
+    """Compute the only task state a clean three-way candidate may contain."""
+    fields = ('id', 'space_address', 'project', 'source', 'title', 'description', 'due', 'status', 'path')
+    expected = {}
+    for identity in base_tasks.keys() | ours_tasks.keys() | theirs_tasks.keys():
+        base, ours, theirs = base_tasks.get(identity), ours_tasks.get(identity), theirs_tasks.get(identity)
+        if ours == theirs:
+            merged = ours
+        elif ours == base:
+            merged = theirs
+        elif theirs == base:
+            merged = ours
+        elif ours is None or theirs is None:
+            raise WikiError(f'task identity conflict requires manual resolution: {identity[0]}/{identity[1]}')
+        else:
+            merged = {}
+            for field in fields:
+                base_value = base.get(field) if base else None
+                ours_value, theirs_value = ours.get(field), theirs.get(field)
+                if ours_value == theirs_value:
+                    merged[field] = ours_value
+                elif ours_value == base_value:
+                    merged[field] = theirs_value
+                elif theirs_value == base_value:
+                    merged[field] = ours_value
+                else:
+                    raise WikiError(f'task field conflict requires manual resolution: '
+                                    f'{identity[0]}/{identity[1]} ({field})')
+        if merged is not None:
+            expected[identity] = merged
+    return expected
 
 
 def _validate_originals(candidate, ours, theirs, result):
@@ -125,6 +194,23 @@ def _validate_originals(candidate, ours, theirs, result):
         expected = old if old is not None else incoming
         if final.get(path) != expected:
             raise WikiError(f'original source was changed or removed: {path.decode("utf-8", errors="replace")}')
+
+
+def _validate_processing(candidate):
+    from .provenance import committed_processing
+    from .spaces import Wiki
+    inventory = committed_processing(Wiki(candidate))
+    if inventory.incomplete:
+        reasons = sorted({reason for _, _, reason in inventory.incomplete})
+        raise WikiError('processing provenance incomplete: ' + '; '.join(reasons))
+    counts = {}
+    for item in inventory.processed:
+        key = (item.space_address, item.source_sha256)
+        counts.setdefault(key, []).append(item)
+    duplicates = [items for items in counts.values() if len(items) > 1]
+    if duplicates:
+        scopes = sorted({f'{items[0].space_address}/{items[0].source_sha256}' for items in duplicates})
+        raise WikiError('duplicate-source-decision-required: ' + ', '.join(scopes))
 
 
 def _revision(operation):
@@ -333,6 +419,7 @@ def prepare(wiki, state_dir, ident, *, merge=False):
                                        branch=operation['branch'], ours=operation['ours'])]
         _task_changes(candidate, operation['ours'], operation['theirs'], result)
         _validate_originals(candidate, operation['ours'], operation['theirs'], result)
+        _validate_processing(candidate)
         if sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'):
             raise WikiError('candidate is not clean')
         report = sync_graph.verify_graph(sync_graph.CandidateGraph(Path(candidate), tuple(
