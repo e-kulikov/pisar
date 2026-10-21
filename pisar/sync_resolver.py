@@ -1,10 +1,12 @@
 """Host-enforced tools and approval gates for candidate-only semantic resolution."""
 from pathlib import Path, PurePosixPath
+from contextlib import contextmanager
 from importlib.resources import files
 import hashlib
 import json
 import math
 import shutil
+import stat
 import tempfile
 
 from . import codex_agent, operations, research, settings, sync_git
@@ -19,6 +21,38 @@ MAX_CONTEXT = 1_000_000
 MAX_REPORT = 200_000
 HARD_DISPOSITIONS = {'lost', 'uncertain', 'superseded'}
 HARD_FINDINGS = {'omission', 'distortion', 'contradiction', 'provenance', 'task', 'context'}
+
+
+@contextmanager
+def _candidate_transaction(candidate, paths):
+    """Restore candidate files and the exact Git index if a proposal fails midway."""
+    root = Path(candidate)
+    index = Path(sync_git.text(root, 'rev-parse', '--git-path', 'index').strip())
+    if not index.is_absolute():
+        index = root / index
+    original_index = index.read_bytes()
+    original_files = {}
+    for name in paths:
+        target = root.joinpath(*PurePosixPath(name).parts)
+        if target.is_symlink():
+            raise WikiError(f'resolver refuses symlink candidate path: {name}')
+        original_files[name] = ((target.read_bytes(), stat.S_IMODE(target.stat().st_mode))
+                                if target.is_file() else None)
+    try:
+        yield
+    except BaseException:
+        for name, value in original_files.items():
+            target = root.joinpath(*PurePosixPath(name).parts)
+            if value is None:
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            else:
+                data, mode = value
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                target.chmod(mode)
+        index.write_bytes(original_index)
+        raise
 
 
 def resolver_identity():
@@ -550,55 +584,62 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             domain = path_domains[path]
             groups.setdefault(domain, set()).add(path)
         resolver = backend or _configured_backend(wiki, runtime.base)
-        reports, written = [], {}
-        session_staged = set(initial_staged)
-        session_index = initial_index
-        for domain, paths in sorted(groups.items()):
-            supplementary = (next((item for item in requests if item['domain'] == domain), None) if not unmerged
-                             else _conflict_context(wiki, candidate, operation, domain, paths))
-            result = resolve_proposal(candidate, domain, paths, resolver, expected_head=head,
-                                      supplemental_context=supplementary,
-                                      initial_staged=session_staged, initial_index=session_index)
-            result_tools = result['tools']
-            result_tools._fresh()
-            result_tools._verify_index()
-            report = result['report']
-            reports.append(report)
-            for mapping in report['mappings']:
-                written[mapping['path']] = mapping['sha256']
-            session_staged.update(result_tools._written)
-            indexed = session_staged
-            session_index = {name: [list(entry) for entry in entries]
-                             for name, entries in result_tools._index_entries(indexed).items()}
-        if not written:
-            raise WikiError('resolver did not produce any candidate writes')
-        merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}', check=False).strip() or None
-        revision_value = {'candidate_head': head, 'merge_head': merge_head, 'reports': reports,
-                          'written': written, 'policy': policy, 'allowed_paths': sorted(allowed),
-                          'resolver_identity': resolver_identity(), 'initial_staged': initial_staged,
-                          'initial_index': initial_index}
-        proposal = {**revision_value, 'initial_staged': initial_staged,
-                    'revision': operations.fingerprint(revision_value),
-                    'recorded_at': datetime.now(timezone.utc).isoformat()}
-        proposal_dir = runtime.path / 'sync-resolver-reports' / ident
-        proposal_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        proposal_path = proposal_dir / f'{proposal["revision"]}.json'
-        if proposal_path.is_symlink():
-            raise WikiError('stored resolver proposal path is unsafe')
-        operations.atomic_bytes(proposal_path, (json.dumps(proposal, ensure_ascii=False, indent=2) + '\n').encode())
-        operation['candidate'] = head
-        operation['resolver_proposal'] = proposal
-        revisions = operation.setdefault('resolver_proposal_revisions', [])
-        if proposal['revision'] not in revisions:
-            revisions.append(proposal['revision'])
-        operation['status'] = 'resolution-pending'
-        operation['review'] = None
-        operation['accepted'] = None
-        operation['semantic_review'] = None
-        sync._save(runtime, operation)
-        response = {'operation_id': ident, 'status': 'resolution-pending', 'revision': proposal['revision'],
-                    'domains': sorted(groups), 'written_paths': sorted(written), 'reports': reports,
-                    'approval': policy['approval']}
+        def make_proposal():
+            reports, written = [], {}
+            session_staged = set(initial_staged)
+            session_index = initial_index
+            for domain, paths in sorted(groups.items()):
+                supplementary = (next((item for item in requests if item['domain'] == domain), None)
+                                 if not unmerged else _conflict_context(wiki, candidate, operation, domain, paths))
+                result = resolve_proposal(candidate, domain, paths, resolver, expected_head=head,
+                                          supplemental_context=supplementary,
+                                          initial_staged=session_staged, initial_index=session_index)
+                result_tools = result['tools']
+                result_tools._fresh()
+                result_tools._verify_index()
+                report = result['report']
+                reports.append(report)
+                for mapping in report['mappings']:
+                    written[mapping['path']] = mapping['sha256']
+                session_staged.update(result_tools._written)
+                session_index = {name: [list(entry) for entry in entries]
+                                 for name, entries in result_tools._index_entries(session_staged).items()}
+            if not written:
+                raise WikiError('resolver did not produce any candidate writes')
+            merge_head = sync_git.text(candidate, 'rev-parse', '--verify', 'MERGE_HEAD^{commit}',
+                                       check=False).strip() or None
+            revision_value = {'candidate_head': head, 'merge_head': merge_head, 'reports': reports,
+                              'written': written, 'policy': policy, 'allowed_paths': sorted(allowed),
+                              'resolver_identity': resolver_identity(), 'initial_staged': initial_staged,
+                              'initial_index': initial_index}
+            proposal_value = {**revision_value, 'initial_staged': initial_staged,
+                              'revision': operations.fingerprint(revision_value),
+                              'recorded_at': datetime.now(timezone.utc).isoformat()}
+            proposal_dir = runtime.path / 'sync-resolver-reports' / ident
+            proposal_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            proposal_path = proposal_dir / f'{proposal_value["revision"]}.json'
+            if proposal_path.is_symlink():
+                raise WikiError('stored resolver proposal path is unsafe')
+            operations.atomic_bytes(proposal_path,
+                                    (json.dumps(proposal_value, ensure_ascii=False, indent=2) + '\n').encode())
+            operation['candidate'] = head
+            operation['resolver_proposal'] = proposal_value
+            revisions = operation.setdefault('resolver_proposal_revisions', [])
+            if proposal_value['revision'] not in revisions:
+                revisions.append(proposal_value['revision'])
+            operation['status'] = 'resolution-pending'
+            operation['review'] = None
+            operation['accepted'] = None
+            operation['semantic_review'] = None
+            sync._save(runtime, operation)
+            response_value = {'operation_id': ident, 'status': 'resolution-pending',
+                              'revision': proposal_value['revision'], 'domains': sorted(groups),
+                              'written_paths': sorted(written), 'reports': reports,
+                              'approval': policy['approval']}
+            return proposal_value, response_value
+
+        with _candidate_transaction(candidate, allowed):
+            proposal, response = make_proposal()
     if policy['approval'] == 'auto':
         return resolve_operation(wiki, state_dir, ident, backend=backend, revision=proposal['revision'],
                                  review_backend=review_backend)

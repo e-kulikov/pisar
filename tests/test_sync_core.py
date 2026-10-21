@@ -787,6 +787,20 @@ class SyncLifecycleTests(unittest.TestCase):
 
         sync.semantic_review(wiki, self.state, fetched['operation_id'], backend=reviewer)
         resolver_contexts = []
+        candidate = Path(prepared['candidate_worktree'])
+        original_personal = (candidate / personal_rel).read_bytes()
+        original_work = (candidate / work_rel).read_bytes()
+
+        def fail_late(context, tools):
+            if context['domain'] == 'work':
+                raise WikiError('synthetic later-domain failure')
+            return self._scoped_resolution(context, tools)
+
+        with self.assertRaisesRegex(WikiError, 'later-domain failure'):
+            sync.resolve(wiki, self.state, fetched['operation_id'], backend=fail_late)
+        self.assertEqual(sync_git.text(candidate, 'status', '--porcelain=v1', '-z', '--untracked-files=all'), '')
+        self.assertEqual((candidate / personal_rel).read_bytes(), original_personal)
+        self.assertEqual((candidate / work_rel).read_bytes(), original_work)
 
         def resolver(context, tools):
             resolver_contexts.append(context)
