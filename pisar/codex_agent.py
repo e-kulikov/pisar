@@ -48,7 +48,8 @@ PROFILE = 'pisar'
 SERVER_TOOL_TIMEOUT = 3600
 SERVER_TOOLS = ('pisar', 'git', 'lesson_accept', 'lesson_review', 'lesson_draft_read', 'lesson_draft_write',
                 'sync_fetch', 'sync_prepare', 'sync_status', 'sync_review', 'sync_semantic_review',
-                'sync_publish_prepare', 'sync_accept', 'sync_apply', 'sync_publish')
+                'sync_publish_prepare', 'sync_accept', 'sync_apply', 'sync_publish',
+                'sync_resolve', 'sync_feedback_summary')
 
 
 # Codex-specific wording appended to the shared agent prompt: the tools that stand in for Bash.

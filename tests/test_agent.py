@@ -100,6 +100,19 @@ class AgentTests(Fixture):
             self.assertFalse(rule.startswith('Bash(mv'), rule)
         self.assertFalse([r for r in allowed if 'pisar --' in r], 'global flags would allow --ruwana')
 
+    def test_codex_resolver_tools_cannot_gain_arbitrary_command_arguments(self):
+        import io
+        from pisar import mcp
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        for command in ('git *', 'pisar *', 'mv', 'python', 'sh'):
+            with self.subTest(command=command):
+                result = server.tool('sync_resolve', {'operation': 'synthetic', 'command': command})
+                self.assertTrue(result.get('isError'))
+                self.assertIn('accepts operation', result['content'][0]['text'])
+                result = server.tool('sync_feedback_summary', {'command': command})
+                self.assertTrue(result.get('isError'))
+                self.assertIn('takes no arguments', result['content'][0]['text'])
+
     def test_domain_space_guard_config_lesson_and_research_commands_are_allowed(self):
         _, call = self.launch()
         allowed = values(call['argv'], '--allowedTools')
