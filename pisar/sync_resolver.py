@@ -272,7 +272,7 @@ class CandidateTools:
         self._verify_index()
         changed = set(p.decode('utf-8', errors='surrogateescape') for p in
                       sync_git.run(self.repo, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
-        if changed - self.allowed_paths:
+        if changed - self.allowed_paths - self._initial_staged:
             raise WikiError('candidate has changes outside the resolver scope')
         for name, digest in self._written.items():
             target = self._path(name)
@@ -617,7 +617,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
                               sync_git.run(candidate, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
                 untracked = set(p.decode('utf-8', errors='surrogateescape') for p in
                                 sync_git.run(candidate, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0') if p)
-                if (changed | untracked) - set(proposal['allowed_paths']):
+                if (changed | untracked) - set(proposal['allowed_paths']) - set(proposal['initial_staged']):
                     raise WikiError('candidate has changes outside the resolver proposal scope')
                 policy = sync_review.policy().__dict__
                 if policy['approval'] == 'manual' and (not isinstance(decision, str) or not decision.strip()):
@@ -742,9 +742,7 @@ def resolve_operation(wiki, state_dir, ident, *, backend=None, revision=None, de
             for record in unmerged.decode('utf-8', errors='surrogateescape').split('\0'):
                 if record:
                     paths.add(record.split('\t', 1)[-1])
-            changed = set(p.decode('utf-8', errors='surrogateescape') for p in
-                          sync_git.run(candidate, 'diff', '--name-only', '-z', 'HEAD').split(b'\0') if p)
-            allowed = paths | changed
+            allowed = paths
             if any('.ruwana' in Path(path).parts or 'sources' in Path(path).parts for path in allowed):
                 raise WikiError('resolver refuses source or task conflicts')
             path_domains = sync_review.pinned_domains(candidate, operation, allowed)

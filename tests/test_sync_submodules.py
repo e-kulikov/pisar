@@ -184,6 +184,34 @@ class SyncSubmoduleTests(unittest.TestCase):
             self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), self.git(candidate, 'rev-parse', 'HEAD'))
             self.assertEqual(self.git(self.root, 'status', '--porcelain=v1', '--ignore-submodules=none'), '')
 
+    def test_resolver_preserves_incoming_source_and_child_pin_outside_write_scope(self):
+        from unittest import mock
+        from pisar import operations, sync_review
+        incoming_child, _ = self.incoming_child_and_root_pin()
+        writer = self.base / 'root-writer'
+        source = 'work/10-projects/sources/incoming.txt'
+        (writer / source).parent.mkdir(parents=True)
+        (writer / source).write_bytes(b'Incoming source bytes.\n')
+        self.git(writer, 'add', '--', source)
+        self.git(writer, 'commit', '-qm', 'incoming source')
+        self.git(writer, 'push', '-q', 'origin', 'main')
+        wiki, ident, candidate, relative = self._root_resolver_fixture()
+        before = self.git(candidate, 'ls-files', '--stage', '--', source, self.child_path)
+        def resolver(context, tools):
+            self.assertEqual(tools.allowed_paths, {relative})
+            with self.assertRaisesRegex(WikiError, 'outside'):
+                tools.candidate_write(source, 'unused', 'changed')
+            return self._root_resolution(context, tools)
+        with mock.patch.object(sync_review, 'policy', return_value=sync_review.SemanticPolicy()):
+            proposal = sync.resolve(wiki, self.state, ident, backend=resolver)
+            completed = sync.resolve(wiki, self.state, ident, revision=proposal['revision'],
+                                     decision='Preserve both root assertions.')
+        self.assertEqual(completed['status'], 'prepared')
+        self.assertEqual(self.git(candidate, 'ls-files', '--stage', '--', source, self.child_path), before)
+        self.assertEqual((candidate / source).read_bytes(), b'Incoming source bytes.\n')
+        self.assertEqual(self.git(candidate, 'rev-parse', f'HEAD:{self.child_path}'), incoming_child)
+        self.assertEqual(sync._load(operations.Runtime(self.state, self.root), ident)['status'], 'prepared')
+
     def test_manual_root_conflict_resolver_preserves_complete_nested_graph(self):
         self._root_resolver_success('manual')
 
