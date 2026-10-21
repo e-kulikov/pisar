@@ -270,7 +270,7 @@ def freeze_publication(operation, graph):
         fingerprint = sync._remote_fingerprint(repo, remote)
         if sync._remote_fingerprint(repo, remote, push=True) != fingerprint:
             raise WikiError(f'sync push destination differs from fetch destination: {path}')
-        baseline = sync_git.fetch_tip(repo, remote, branch)
+        baseline = operation['theirs'] if path == '.' else sync_git.fetch_tip(repo, remote, branch)
         frozen.append(dict(path=path, remote=remote, branch=branch, baseline=baseline,
                            fingerprint=fingerprint, candidate=item['commit']))
     operation['publication_graph'] = frozen

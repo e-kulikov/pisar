@@ -828,6 +828,14 @@ def publish(wiki, state_dir, ident, *, dry_run=False, bootstrap_map=None):
         if _remote_fingerprint(repo, operation['remote'], push=True) != operation['remote_fingerprint']:
             raise WikiError('sync push destination differs from the reviewed remote')
         commit_to_publish = operation['candidate'] if publish_only else operation['applied']
+        # Check the recorded root baseline before any child publication. Recheck
+        # below as well, since the root may advance while children are pushed.
+        current = sync_git.fetch_tip(repo, operation['remote'], operation['target_branch'])
+        if not sync_git._ancestor(repo, commit_to_publish, current):
+            if not sync_git._ancestor(repo, current, commit_to_publish):
+                raise WikiError('remote-advanced; integrate and review the new remote tip first')
+            if current != operation['theirs']:
+                raise WikiError('remote baseline changed after review')
         if operation.get('graph') and len(operation['graph']) > 1:
             candidate_root = _candidate(runtime, ident)
             graph = sync_graph.CandidateGraph(candidate_root, tuple(

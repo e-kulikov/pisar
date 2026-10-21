@@ -386,6 +386,38 @@ class SyncGraphPublishTests(unittest.TestCase):
             'work/10-projects/alpha/nested', 'work/10-projects/alpha'])
         self.assertEqual(self.f.git(self.f.root_remote, 'rev-parse', 'refs/heads/main'), operation['candidate'])
 
+    def test_root_advance_before_prepare_does_not_publish_children(self):
+        from pisar import sync
+        from pisar.spaces import Wiki
+        child = self.f.root / self.f.child_path
+        self.f.git(child, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(child, 'config', 'user.email', 'synthetic@example.invalid')
+        (child / 'outgoing.md').write_text('Unpublished child.\n')
+        self.f.git(child, 'add', '--', 'outgoing.md')
+        self.f.git(child, 'commit', '-qm', 'outgoing child')
+        self.f.git(self.f.root, 'add', '--', self.f.child_path)
+        self.f.git(self.f.root, 'commit', '-qm', 'pin outgoing child')
+        wiki = Wiki(self.f.root)
+        fetched = sync.fetch(wiki, self.f.state)
+        writer = self.f.base / 'advanced-root'
+        subprocess.run(['git', 'clone', '-q', str(self.f.root_remote), str(writer)],
+                       env=self.f.env, check=True)
+        self.f.git(writer, 'config', 'user.name', 'Synthetic fixture')
+        self.f.git(writer, 'config', 'user.email', 'synthetic@example.invalid')
+        (writer / 'incoming.md').write_text('Concurrent root.\n')
+        self.f.git(writer, 'add', '--', 'incoming.md')
+        self.f.git(writer, 'commit', '-qm', 'advance root before prepare')
+        self.f.git(writer, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        remotes = (self.f.child_remote, self.f.grandchild_remote)
+        before = [self.f.git(repo, 'show-ref') for repo in remotes]
+        prepared = sync.prepare(wiki, self.f.state, fetched['operation_id'])
+        sync.manual_review(wiki, self.f.state, fetched['operation_id'])
+        sync.accept(wiki, self.f.state, fetched['operation_id'], prepared['revision'])
+        sync.apply(wiki, self.f.state, fetched['operation_id'])
+        with self.assertRaisesRegex(WikiError, 'remote-advanced|remote baseline changed'):
+            sync.publish(wiki, self.f.state, fetched['operation_id'])
+        self.assertEqual([self.f.git(repo, 'show-ref') for repo in remotes], before)
+
     def test_child_push_survives_root_rejection_after_remote_advance(self):
         child = self.f.root / self.f.child_path
         self.f.git(child, 'config', 'user.name', 'Synthetic fixture')
