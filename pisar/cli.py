@@ -3,7 +3,7 @@ import json
 import sys
 from types import SimpleNamespace
 from . import (__version__, agent, commit_message, config_command, guard, lesson_command, mcp, research_command,
-               settings, spacecmd)
+               settings, spacecmd, sync_command)
 from .documents import check, resolve
 from .safety import WikiError, sha256
 from .spaces import Wiki
@@ -77,11 +77,13 @@ def parser():
     spacecmd.add_parser(commands)
     lesson_command.add_parser(commands)
     research_command.add_parser(commands)
+    sync_command.add_parser(commands)
     for path in commit_message.COMMITTING:
         leaf = commands.choices[path[0]]
         for name in (n for n in path[1:] if n is not None):
             leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[name]
         commit_message.add_flags(leaf)
+    p.add_argument('--_agent-guard', action='store_true', help=argparse.SUPPRESS)
     mcp.add_parser(commands)
     return p
 
@@ -98,7 +100,7 @@ def main(argv=None):
         p.error(f'argument --agent: invalid choice: {args.agent!r}')
     if args.agent and args.command:
         p.error('--agent cannot be combined with a command')
-    if not args.agent and not args.command:
+    if not args.agent and not args.command and not args._agent_guard:
         p.error('a command is required (or --agent)')
     token = None
     try:
@@ -106,6 +108,9 @@ def main(argv=None):
         if args.agent:
             agent.launch(agent.selected(args.agent), settings.root(args.root),
                          settings.state_dir(args.state_dir), settings.ruwana(args.ruwana), extra)
+        if args._agent_guard:
+            from .agent_guard import run
+            return run(settings.root(args.root), settings.state_dir(args.state_dir))
         if args.command == 'config':
             ctx = SimpleNamespace(flags=dict(root=args.root, state_dir=args.state_dir, ruwana=args.ruwana))
             print(json.dumps(config_command.run(args, ctx), ensure_ascii=False, indent=2))
@@ -115,6 +120,10 @@ def main(argv=None):
         args.ruwana = settings.ruwana(args.ruwana)
         if args.command == 'mcp-serve':
             return mcp.run(args)
+        if args.command == 'sync' and args.action == 'status':
+            result = sync_command.run(args, Wiki(args.root), args.state_dir)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command == 'guard':
             result = guard.run(args, args)
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -131,6 +140,11 @@ def main(argv=None):
             else:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == 'sync':
+            result = sync_command.run(args, wiki, args.state_dir)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2 if result.get('status') in ('conflict', 'diverged', 'pending', 'needs-approval',
+                                                                'needs-decision', 'resolution-pending') else 0
         domains = None
         if getattr(args, 'include', None) or getattr(args, 'exclude', None):
             domains = wiki.select(args.include, args.exclude)

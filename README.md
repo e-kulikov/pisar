@@ -5,9 +5,10 @@ repository kept in Git and split into domains (for example personal and one per
 employer or client). It discovers domains and spaces, validates and searches
 Markdown documents with TOML front matter, captures sources without changing
 their bytes, applies externally prepared meeting plans, and routes a global inbox
-only after explicit acceptance. Apart from two explicit exceptions everything is
-offline and model-free: no daemon, index service or cloud account is used, all Git
-activity is local and nothing is pushed. The only network uses are
+only after explicit acceptance. Apart from explicit sync publication and two
+existing exceptions, everything is offline and model-free: no daemon, index
+service or cloud account is used. Sync publication pushes only a reviewed
+operation to its named remote and branch. The other network uses are
 `pisar domain add --repo` (asks `git` to clone a repository; see
 [Creating and organising domains and spaces](#creating-and-organising-domains-and-spaces))
 and `pisar research` (an isolated `claude` subprocess with web tools; the question
@@ -124,6 +125,16 @@ effort = "high"
 [agents.claude.researcher]      # research subagent (default sonnet, medium)
 model = "sonnet"
 effort = "medium"
+
+[agents.claude.resolver]        # candidate-only sync resolver (default opus, high)
+model = "opus"
+effort = "high"
+
+[sync.semantic]
+review = "all"                 # or "conflicts" for explicitly reduced coverage
+approval = "manual"            # manual | auto; manual always requires owner acceptance
+agent = "claude"               # read-only semantic reviewer: claude or codex
+min_confidence = 0.95
 ```
 
 A missing file is fine. Unknown keys, wrong types, empty strings, a relative
@@ -153,7 +164,7 @@ pisar --root /tmp/other config show   # root now reports "source": "flag"
 
 The example is shortened; the output lists `root`, `state_dir`, `ruwana`,
 `default_agent` and `model`/`effort` for the main session, `reviewer` and
-`researcher`.
+`researcher` and `resolver`.
 The runtime directory must be outside every Git repository, must not be inside
 the root, and must not contain the root; overlapping combinations are refused
 before any runtime file is written. Read-only commands do not touch the runtime.
@@ -302,7 +313,8 @@ CODEX_HOME=~/.local/share/pisar/agents/codex HOME=~/.local/share/pisar/agents/co
 
 Alternatively set `OPENAI_API_KEY` or `CODEX_API_KEY`; both are passed through.
 Codex's own shell is disabled, so it reaches the knowledge only through the
-`pisar`, `git`, `lesson_accept` and `lesson_review` tools.
+`pisar`, `git`, lesson tools and the read-only sync review tools. Sync acceptance,
+application and publication remain separate owner-confirmed actions.
 
 - `default_agent = "codex"` and `agents.codex.model|effort` (main session) and
   `agents.codex.reviewer|researcher.model|effort` in the config file, shown by
@@ -312,6 +324,12 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
   your account does not have them.
 - `research_agent = "claude"` (default) or `"codex"` selects the researcher behind
   `pisar research`. It is independent of `default_agent`.
+- `[sync.semantic]` selects the read-only sync reviewer independently; its default
+  backend is Claude. All changed candidates are reviewed by default. Manual approval
+  remains required at every confidence value. `approval = "auto"` enables constrained
+  candidate resolution and automatic application only after the configured threshold,
+  complete fresh review, structural checks and all hard semantic gates pass. Manual is
+  the default and always requires owner acceptance.
 - The bundled skills `pisar`, `lessons` and `research` are written to
   `<state-dir>/agents/codex/skills` on every launch, with the tools section that
   explains the MCP tools.
@@ -334,6 +352,7 @@ Codex's own shell is disabled, so it reaches the knowledge only through the
 | 12 environment isolation | explicit allowlist for every Codex process | `test_codex_agent.test_child_gets_an_explicit_environment...`; `test_research_codex.test_environment_is_an_allowlist...` |
 | 13 fake-executable tests | `codex` fake for argv, environment and files; real checks with `PISAR_TEST_CODEX=1` (configuration only, no model call) | `test_codex_*.py`, `test_codex_smoke.py` |
 | 14 commit-message writer | `[commit_message] agent = "codex"`: `codex exec` with no tools (read-only, web search, shell, MCP, plugins, hooks and subagents off), `--ignore-user-config --ignore-rules --ephemeral`, the login of the main session in a private HOME, the same bounds, validation and fail-closed behaviour; a Claude model name is never passed to Codex | `test_commit_message_codex.*` |
+| 15 sync reviewer and lifecycle | `sync_semantic_review` is read-only; `sync_publish_prepare` only prepares; `sync_accept`, `sync_apply` and `sync_publish` are separate tools with user confirmation | `test_sync_permissions.*`; `test_codex_mcp.*` |
 
 **Differences in mechanism.** Codex's `.rules` execpolicy is not default-deny (an
 unmatched command is not refused), so the restriction is the MCP server's
@@ -613,6 +632,77 @@ legacy journals are always refused, even if ignored.
 Lesson acceptance writes a `note` into its target space, so that space must
 declare `note` too. Existing documents keep their content; only the declarations
 change.
+
+## Synchronize a wiki
+
+Sync prepares a complete disposable candidate graph, checks the wiki before
+changing any live branch, and keeps publication separate. It supports the
+existing initialized submodule graph, including nested repositories, when each
+repository is clean, attached to its owner-selected branch, and pinned by its
+parent at its checked-out commit. Each incoming child pin is reconciled with
+the live child history; divergent histories merge in the child candidate before
+the parent candidate records that exact commit. Topology and URL changes, and
+uninitialized children, are refused. Task-file changes are blocked until task
+validation is available.
+
+```sh
+pisar sync pull --repo .
+pisar sync status --operation OPERATION_ID
+pisar sync close --operation OPERATION_ID
+pisar sync review --operation OPERATION_ID
+pisar sync resolve --operation OPERATION_ID
+pisar sync resolve-accept --operation OPERATION_ID --revision PROPOSAL_DIGEST --decision 'owner decision'
+pisar sync manual-review --operation OPERATION_ID
+pisar sync feedback-summary
+pisar sync accept --operation OPERATION_ID --revision REVISION
+pisar sync feedback --operation OPERATION_ID --rating correct|corrected|rejected
+pisar sync apply --operation OPERATION_ID
+pisar sync publish --operation OPERATION_ID
+```
+
+Inspect the reported candidate worktree and its full diff, including child
+repositories, before recording semantic review. Apply advances child branches
+before their parents and can resume the same exact candidate after an interruption.
+`manual-review` explicitly records a human-review alternative
+when no semantic reviewer is available. A conflicting merge stays in that worktree; resolve only the
+reported paths, stage those exact paths, then repeat `sync prepare` with the
+same operation ID. `close` releases an unfinished operation reservation while
+retaining its journal and candidate for inspection. `accept` records only the owner decision. `apply` advances
+the recorded local branch. `publish` is a separate explicit push to the frozen
+remote and branch. For an initialized graph, the reviewed operation also freezes
+each child repository's configured upstream. Publication checks every gitlink
+introduced by the commits being published at that exact destination, then pushes
+children from deepest to root. A successful child push remains published if a
+later parent push is rejected. An optional JSON bootstrap map may be supplied
+with `--bootstrap-map PATH`; it maps registered child paths to `{"url": "...",
+"branch": "..."}` and must not contain credentials. The map identity is bound
+into review, while Git and Pisar verify both destination and bootstrap-source
+reachability. To review local-only commits for publication, use
+`pisar sync publish --repo .`, then review and accept its returned operation ID
+before publishing it. `--dry-run` uses cached facts and never fetches.
+`feedback` stores only the outcome, reviewer/policy identity and optional category
+outside Git; it never stores document excerpts or prompts.
+`resolve` creates a proposal in the disposable candidate. Inspect its report and
+candidate; in manual mode, commit that proposal only by confirming its exact
+digest and supplying the owner's decision. Every resolver commit receives a new
+read-only semantic review before it can be applied. `approval = "auto"` may
+resolve and apply only when resolver and fresh reviewer confidence meet the
+configured threshold, context is complete, structural checks pass and no hard
+finding or unexplained loss remains. `feedback-summary` groups local labels by
+model, prompt version, reviewer/resolver role, operation kind and confidence band; it reports missing labels
+and never adjusts the threshold.
+
+To reconstruct a published snapshot on a fresh machine, clone the root with
+`--no-recurse-submodules`, select the published root commit if exact historical
+reconstruction is needed, and initialize each registered child one level at a
+time with `git submodule init -- PATH` followed by
+`git submodule update --init --checkout -- PATH`. Repeat inside each child for
+nested children, then verify every child HEAD matches its parent's gitlink and
+run `pisar check`. Git resolves relative `.gitmodules` URLs. If a default child
+URL is stale, supply the operator's nonsecret bootstrap map by setting the
+registered `submodule.NAME.url` in that fresh clone before updating it; do not
+rewrite `.gitmodules` or copy publisher runtime/configuration. Configure attached
+working branches and their upstreams explicitly before syncing or publishing.
 
 ## Known-space inbox capture
 

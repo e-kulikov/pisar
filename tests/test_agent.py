@@ -42,6 +42,102 @@ class AgentTests(Fixture):
                            *args, env=env or self.agent_env, ok=ok)
         return p, (json.loads(self.out.read_text()) if self.out.exists() else None)
 
+    def test_corrupt_sync_state_reports_wiki_error_without_traceback(self):
+        from pisar import operations
+        from pisar.safety import WikiError
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        (folder / 'broken.json').write_text('{broken')
+        with self.assertRaisesRegex(WikiError, 'invalid sync state.*broken.json'):
+            with runtime.writer():
+                self.fail('corrupt reservation allowed a writer')
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': 'Write'}),
+                                text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('invalid sync state', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_claude_hook_fails_closed_for_non_object_sync_state(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        for value in ([], None):
+            with self.subTest(value=value):
+                operations.write_json(folder / 'broken.json', value)
+                result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': 'Write'}),
+                                        text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('sync reservation guard failed', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+
+    def test_claude_hook_fails_closed_for_directory_sync_state(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        (folder / 'broken.json').mkdir()
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': 'Write'}),
+                                text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('sync reservation guard failed', result.stderr)
+        self.assertIn('broken.json', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_claude_hook_allows_tools_without_reservation_while_writer_busy(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        with runtime.lock():
+            for name, payload in [('Write', {'file_path': 'note.md'}),
+                                  ('Edit', {'file_path': 'note.md'}),
+                                  ('Bash', {'command': 'git status --short'})]:
+                result = subprocess.run(hook, shell=True,
+                                        input=json.dumps({'tool_name': name, 'tool_input': payload}),
+                                        text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_claude_mutation_hook_blocks_pending_sync_and_preserves_reads(self):
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir()
+        operations.write_json(folder / 'sync-test.json',
+                              {'operation_id': 'sync-test', 'root': str(self.root.resolve()), 'status': 'prepared'})
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        target = self.root / 'untouched.md'
+        target.write_text('original')
+        for name, payload in [('Write', {'file_path': str(target), 'content': 'changed'}),
+                              ('Edit', {'file_path': str(target)}),
+                              ('Bash', {'command': 'git add untouched.md'})]:
+            result = subprocess.run(hook, shell=True, input=json.dumps({'tool_name': name, 'tool_input': payload}),
+                                    text=True, capture_output=True, env=call['env'], cwd=self.root)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('sync-test', result.stderr)
+        for command in ('git status --short', 'pisar sync close --operation sync-test',
+                        'pisar sync apply --operation sync-test'):
+            result = subprocess.run(hook, shell=True,
+                                    input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': command}}),
+                                    text=True, capture_output=True, env=call['env'], cwd=self.root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(), 'original')
+        self.assertEqual(subprocess.run(['git', '-C', str(self.root), 'diff', '--cached', '--name-only'],
+                                       env=self.env, text=True, capture_output=True).stdout, '')
+
     def test_starts_claude_in_the_root_with_an_isolated_config_in_the_state_dir(self):
         _, call = self.launch()
         self.assertEqual(Path(call['cwd']).resolve(), self.root.resolve())
@@ -100,6 +196,19 @@ class AgentTests(Fixture):
             self.assertFalse(rule.startswith('Bash(mv'), rule)
         self.assertFalse([r for r in allowed if 'pisar --' in r], 'global flags would allow --ruwana')
 
+    def test_codex_resolver_tools_cannot_gain_arbitrary_command_arguments(self):
+        import io
+        from pisar import mcp
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        for command in ('git *', 'pisar *', 'mv', 'python', 'sh'):
+            with self.subTest(command=command):
+                result = server.tool('sync_resolve', {'operation': 'synthetic', 'command': command})
+                self.assertTrue(result.get('isError'))
+                self.assertIn('accepts operation', result['content'][0]['text'])
+                result = server.tool('sync_feedback_summary', {'command': command})
+                self.assertTrue(result.get('isError'))
+                self.assertIn('takes no arguments', result['content'][0]['text'])
+
     def test_domain_space_guard_config_lesson_and_research_commands_are_allowed(self):
         _, call = self.launch()
         allowed = values(call['argv'], '--allowedTools')
@@ -116,7 +225,42 @@ class AgentTests(Fixture):
         _, call = self.launch()
         argv = call['argv']
         settings = json.loads(argv[argv.index('--settings') + 1])
-        self.assertEqual(settings, {'permissions': {'ask': ['Bash(pisar lesson accept *)']}})
+        self.assertEqual(settings['permissions'], {'ask': [
+            'Bash(pisar lesson accept *)', 'Bash(pisar sync accept *)',
+            'Bash(pisar sync apply *)', 'Bash(pisar sync manual-review *)',
+            'Bash(pisar sync resolve-accept *)',
+            'Bash(pisar sync resolve --operation *)',
+            'Bash(pisar sync publish --operation *)',
+        ]})
+
+    def test_sync_cli_actions_are_narrow_and_owner_decisions_ask(self):
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        for rule in ('Bash(pisar sync fetch *)', 'Bash(pisar sync pull *)',
+                     'Bash(pisar sync prepare *)', 'Bash(pisar sync status *)',
+                     'Bash(pisar sync review *)', 'Bash(pisar sync close *)',
+                     'Bash(pisar sync feedback *)', 'Bash(pisar sync publish --repo *)'):
+            self.assertIn(rule, allowed)
+        self.assertNotIn('Bash(pisar sync manual-review *)', allowed)
+        self.assertNotIn('Bash(pisar sync resolve-accept *)', allowed)
+        self.assertNotIn('Bash(pisar sync *)', allowed)
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        self.assertEqual(settings['permissions']['ask'], ['Bash(pisar lesson accept *)',
+                         'Bash(pisar sync accept *)', 'Bash(pisar sync apply *)',
+                         'Bash(pisar sync manual-review *)',
+                         'Bash(pisar sync resolve-accept *)',
+                         'Bash(pisar sync resolve --operation *)', 'Bash(pisar sync publish --operation *)'])
+
+    def test_sync_resolve_requires_confirmation_without_expanding_commands(self):
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        self.assertNotIn('Bash(pisar sync resolve --operation *)', allowed)
+        self.assertIn('Bash(pisar sync resolve --operation *)', settings['permissions']['ask'])
+        for rule in ('Bash(git *)', 'Bash(pisar *)', 'Bash(mv *)',
+                     'Bash(python *)', 'Bash(sh *)', 'Bash(bash *)'):
+            self.assertNotIn(rule, allowed)
+            self.assertNotIn(rule, settings['permissions']['ask'])
 
     def test_only_the_lesson_workspace_is_writable_by_absolute_path(self):
         _, call = self.launch()

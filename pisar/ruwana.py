@@ -1,5 +1,6 @@
 """Public CLI adapter; all task state remains authoritative in ruwana."""
 from datetime import datetime, time
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,30 @@ from .safety import WikiError, safe_path, sha256
 # Rust str::trim uses Unicode White_Space; Python's default strip also removes
 # U+001C..U+001F, which ruwana preserves. Match the public CLI's text contract.
 RUWANA_WHITESPACE = '\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000'
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    id: str
+    space_address: str
+    project: str
+    source: tuple[str, ...]
+    title: str
+    description: str | None
+    due: str | None
+    status: str
+    path: str
+    sha256: str
+    created: str
+    modified: str
+    related: tuple[str, ...]
+    tags: tuple[str, ...]
+    tasks: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TaskSnapshot:
+    tasks: tuple[TaskRecord, ...]
 
 
 def task_content(task):
@@ -41,11 +66,22 @@ class Ruwana:
         self.binary = os.path.abspath(found)
 
     def run(self, *args):
+        return self._run(args, isolated=False)
+
+    def _snapshot_run(self, *args):
+        return self._run(args, isolated=True)
+
+    def _run(self, args, *, isolated):
         try:
-            # Compatibility exception: ruwana's public interface still reads the
-            # legacy WIKI_ROOT. It is set only for this child; pisar never reads it.
+            # Snapshots run against disposable candidates, so they use a small
+            # environment. Existing write commands keep their established
+            # adapter environment and always override the legacy root.
+            child_env = ({key: os.environ[key] for key in
+                          ('PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ') if key in os.environ}
+                         if isolated else dict(os.environ))
+            child_env['WIKI_ROOT'] = str(self.wiki.root)
             p = subprocess.run([self.binary, *args], cwd=self.wiki.root,
-                               env={**os.environ, 'WIKI_ROOT': str(self.wiki.root)},
+                               env=child_env,
                                capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise WikiError(f'ruwana failed: {error}') from None
@@ -98,6 +134,77 @@ class Ruwana:
             raise WikiError('ruwana returned unexpected/missing task file')
         return dict(id=ident, space_id=space.address, project=project, source=marker,
                     path=path.relative_to(self.wiki.root).as_posix(), sha256=sha256(path.read_bytes()))
+
+    def snapshot(self, spaces=None):
+        """Read and normalize every selected space's task state without writes."""
+        selected = [self.wiki.space(address) for address in spaces] if spaces is not None else self.wiki.spaces
+        found = []
+        seen = set()
+        for space in sorted(selected, key=lambda item: item.address):
+            project = self.project(space)
+            records = json.loads(self._snapshot_run('list', '--project', project, '--all', '--format', 'json'))
+            if not isinstance(records, list):
+                raise WikiError('ruwana list returned invalid JSON shape')
+            for listed in records:
+                if not isinstance(listed, dict):
+                    raise WikiError('ruwana list returned invalid task record')
+                ident = listed.get('id')
+                if not isinstance(ident, str) or not re.fullmatch('[a-z0-9]+', ident):
+                    raise WikiError('ruwana returned invalid task id')
+                key = (space.address, ident)
+                if key in seen:
+                    raise WikiError(f'duplicate ruwana task identity: {space.address}/{ident}')
+                seen.add(key)
+                if listed.get('project') != project:
+                    raise WikiError(f'ruwana task project conflict: {space.address}/{ident}')
+                source = listed.get('source')
+                if not isinstance(source, list) or not all(isinstance(value, str) and value for value in source):
+                    raise WikiError(f'ruwana task source conflict: {space.address}/{ident}')
+                record = json.loads(self._snapshot_run('show', ident, '--project', project, '--format', 'json'))
+                expected_fields = {'created', 'description', 'due', 'file_path', 'id', 'modified',
+                                   'project', 'related', 'source', 'status', 'tags', 'tasks', 'title'}
+                if (not isinstance(record, dict) or set(record) != expected_fields or record.get('id') != ident
+                        or record.get('project') != project or record.get('source') != source):
+                    raise WikiError(f'ruwana task identity conflict: {space.address}/{ident}')
+                title, description = task_content(record)
+                if not isinstance(record.get('status'), str) or not record['status']:
+                    raise WikiError(f'ruwana task status conflict: {space.address}/{ident}')
+                for field in ('created', 'modified'):
+                    if not isinstance(record.get(field), str) or not record[field]:
+                        raise WikiError(f'ruwana task {field} history conflict: {space.address}/{ident}')
+                lists = {}
+                for field in ('related', 'tags', 'tasks'):
+                    value = record.get(field)
+                    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                        raise WikiError(f'ruwana task {field} history conflict: {space.address}/{ident}')
+                    lists[field] = tuple(value)
+                raw_due = record.get('due')
+                due = None
+                if raw_due:
+                    try:
+                        due = datetime.fromisoformat(raw_due.replace('Z', '+00:00')).isoformat()
+                    except (AttributeError, ValueError):
+                        raise WikiError(f'ruwana task due conflict: {space.address}/{ident}') from None
+                path = safe_path(space.path, f'.ruwana/{ident}.toml')
+                returned = Path(record.get('file_path', ''))
+                if not returned.is_absolute():
+                    returned = self.wiki.root / returned
+                if returned.resolve() != path or not path.is_file():
+                    raise WikiError(f'ruwana returned unexpected/missing task file: {space.address}/{ident}')
+                found.append(TaskRecord(ident, space.address, project, tuple(source), title, description,
+                                        due, record['status'], path.relative_to(self.wiki.root).as_posix(),
+                                        sha256(path.read_bytes()), record['created'], record['modified'],
+                                        lists['related'], lists['tags'], lists['tasks']))
+        stable_sources = {}
+        for task in found:
+            for source in task.source:
+                if '#task-' not in source:
+                    continue
+                key = (task.space_address, source)
+                prior = stable_sources.setdefault(key, task.id)
+                if prior != task.id:
+                    raise WikiError(f'duplicate stable ruwana task source identity: {source}')
+        return TaskSnapshot(tuple(found))
 
     def ensure(self, space, task, reference):
         found = self.find(space, task, reference)

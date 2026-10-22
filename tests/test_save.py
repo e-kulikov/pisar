@@ -32,6 +32,12 @@ Synthetic fixture; source has no reliable timestamp.
 
 
 class SaveTests(Fixture):
+    def unique_source(self, value, label):
+        source = Path(value['source']['path'])
+        data = f'synthetic source for {label}\r\n'.encode()
+        source.write_bytes(data)
+        value['source']['sha256'] = hashlib.sha256(data).hexdigest()
+
     def plan(self, ident='save-one', tasks=None):
         source = self.external()
         value = dict(schema_version=1, operation_id=ident, space_id='work/alpha',
@@ -92,6 +98,9 @@ class SaveTests(Fixture):
         self.assertEqual(journal['tasks'], {})
         self.assertTrue((self.alpha / 'meetings/launch-meeting.md').exists())
         self.assertFalse(list(self.root.rglob('.ruwana/*.toml')))
+        replay = self.cli('--ruwana', self.base / 'does-not-exist', 'save', '--plan', path,
+                          state=self.base / 'fresh-pending-runtime', ok=False)
+        self.assertIn('committed processing is incomplete', replay.stderr)
         if RUWANA_AVAILABLE:
             self.assertEqual(json.loads(self.save(path).stdout)['status'], 'complete')
 
@@ -125,6 +134,145 @@ class SaveTests(Fixture):
         value['meeting']['body'] += 'Different content'
         path.write_text(json.dumps(value))
         self.save(path, ok=False)
+
+    def test_fresh_runtime_replay_of_committed_capture_save_never_recreates_tasks(self):
+        from pisar.operations import capture, save
+        from pisar.ruwana import Ruwana
+        from pisar.safety import WikiError
+        from pisar.spaces import Wiki
+        source = self.external('portable original bytes\r\n')
+        captured = capture(Wiki(self.root), self.state, 'work/alpha', 'capture-portable', source)
+        original = self.alpha / 'sources/captures/capture-portable/original'
+        task_path = self.alpha / '.ruwana/taskone.toml'
+        plan_path, plan = self.plan('portable-save', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['capture_id'] = 'capture-portable'
+        plan['source'] = dict(path=str(original), sha256=hashlib.sha256(original.read_bytes()).hexdigest())
+        plan_path.write_text(json.dumps(plan))
+        task = dict(id='taskone', space_id='work/alpha', project='work/team/alpha',
+                    source='wiki:work/alpha:launch-meeting#task-prepare-launch',
+                    path='work/team/alpha/.ruwana/taskone.toml',
+                    sha256=hashlib.sha256(b'fake committed task state\n').hexdigest())
+        binary = self.base / 'fake-ruwana'
+        binary.write_text('#!/bin/sh\nexit 99\n')
+        binary.chmod(0o700)
+        def create_task(*args, **kwargs):
+            task_path.parent.mkdir(exist_ok=True)
+            task_path.write_text('fake committed task state\n')
+            task['sha256'] = hashlib.sha256(task_path.read_bytes()).hexdigest()
+            return task
+        with patch.object(Ruwana, 'find', return_value=None), patch.object(Ruwana, 'ensure', side_effect=create_task) as ensure:
+            result = save(Wiki(self.root), self.state, plan_path, binary)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(ensure.call_count, 1)
+        self.assertEqual(captured['status'], 'complete')
+        head = git(self.root, 'rev-parse', 'HEAD')
+        fresh_runtime = self.base / 'empty-runtime'
+        with patch.object(Ruwana, 'find', side_effect=AssertionError('must not query or mutate tasks')), \
+                patch.object(Ruwana, 'ensure', side_effect=AssertionError('must not recreate task')):
+            replay = save(Wiki(self.root), fresh_runtime, plan_path, binary)
+        self.assertEqual(replay['status'], 'already-processed')
+        self.assertEqual(replay['reference'], 'wiki:work/alpha:launch-meeting')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertFalse(list(fresh_runtime.rglob('operations/*.json')))
+        plan['operation_id'] = 'portable-save-second-interpretation'
+        plan.pop('capture_id')
+        plan['meeting']['id'] = 'second-interpretation'
+        plan_path.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(WikiError, 'possible-duplicate-source-decision-required'):
+            save(Wiki(self.root), self.base / 'second-runtime', plan_path, binary)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_processed_capture_cannot_override_pending_meeting_on_fresh_replay(self):
+        from pisar.operations import capture, save
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source = self.external('committed capture with interrupted save\n')
+        capture(Wiki(self.root), self.state, 'work/alpha', 'capture-interrupted', source)
+        path, plan = self.plan('save-interrupted', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, self.base / 'missing-ruwana')
+
+        descriptor = self.alpha / 'inbox/capture-interrupted.md'
+        value = descriptor.read_text()
+        value = value.replace('ingest_status = "pending"\n',
+                              'ingest_status = "processed"\nprocessed_by = "save-interrupted"\n'
+                              'meeting_reference = "wiki:work/alpha:launch-meeting"\n')
+        descriptor.write_text(value)
+        commit_all(self.root)
+        head = git(self.root, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(WikiError, 'committed processing is incomplete'):
+            save(Wiki(self.root), self.base / 'fresh-interrupted-runtime', path,
+                 self.base / 'missing-ruwana')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+
+    def test_interrupted_save_stays_incomplete_after_trailing_blank_line(self):
+        from pisar.operations import save
+        from pisar.provenance import committed_processing, find_processed
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source = self.external('unfinished save with harmless formatting\n')
+        path, plan = self.plan('pending-newline', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        binary = self.base / 'missing-ruwana'
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, binary)
+        meeting_path = self.alpha / 'meetings/launch-meeting.md'
+        meeting_path.write_bytes(meeting_path.read_bytes() + b'\n')
+        commit_all(self.root)
+        inventory = committed_processing(Wiki(self.root))
+        self.assertFalse(inventory.processed)
+        with self.assertRaisesRegex(WikiError, 'incomplete'):
+            find_processed(inventory, 'work/alpha', plan['source']['sha256'])
+        with self.assertRaisesRegex(WikiError, 'committed processing is incomplete'):
+            save(Wiki(self.root), self.base / 'fresh-pending-newline', path, binary)
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, binary)
+
+    def test_pending_status_survives_notes_whitespace_and_crlf(self):
+        from pisar.operations import save
+        from pisar.provenance import committed_processing, find_processed
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        binary = self.base / 'missing-ruwana'
+        source = self.external('unfinished source with status formatting variants\n')
+        path, plan = self.plan('pending-format-variants', tasks=[dict(
+            id='prepare-launch', space_id='work/alpha', title='Prepare launch', agreed=True)])
+        plan['meeting']['id'] = 'pending-format-variants'
+        plan['source'] = dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(WikiError, 'unavailable'):
+            save(Wiki(self.root), self.state, path, binary)
+        meeting_path = self.alpha / 'meetings/pending-format-variants.md'
+        for index, transform in enumerate((lambda content: content + b'\nRecovery note: retry after reboot.\n',
+                                           lambda content: content + b'  \n',
+                                           lambda content: content.replace(b'\n', b'\r\n'))):
+            with self.subTest(format=index):
+                meeting_path.write_bytes(transform(meeting_path.read_bytes()))
+                commit_all(self.root)
+                inventory = committed_processing(Wiki(self.root))
+                with self.assertRaisesRegex(WikiError, 'incomplete'):
+                    find_processed(inventory, 'work/alpha', plan['source']['sha256'])
+                with self.assertRaisesRegex(WikiError, 'committed processing is incomplete'):
+                    save(Wiki(self.root), self.base / f'fresh-format-{index}', path, binary)
+
+    def test_completed_result_with_quoted_pending_footer_replays(self):
+        from pisar.operations import save
+        from pisar.spaces import Wiki
+        path, plan = self.plan('quoted-pending', tasks=[])
+        plan['meeting']['body'] = ('Historical quoted log: Pending: operation `save-old` is incomplete. '
+                                   'No task IDs claimed.')
+        path.write_text(json.dumps(plan))
+        first = save(Wiki(self.root), self.state, path, self.base / 'missing-ruwana')
+        self.assertEqual(first['status'], 'complete')
+        replay = save(Wiki(self.root), self.base / 'fresh-quoted-runtime', path,
+                      self.base / 'missing-ruwana')
+        self.assertEqual(replay['status'], 'already-processed')
 
     def test_save_rejects_unagreed_tasks_and_cross_domain(self):
         for tasks in ([dict(id='idea', space_id='work/alpha', title='Maybe launch', agreed=False)],
@@ -192,6 +340,21 @@ class SaveTests(Fixture):
             self.cli('capture', '--space', 'work/alpha', '--id', 'pending-call', '--source', source)
             self.assertEqual(self.data('read', 'wiki:work/alpha:pending-call')['metadata']['ingest_status'], 'processed')
 
+    def test_save_does_not_suppress_pending_provenance_without_completed_capture_journal(self):
+        from pisar.operations import capture, save
+        from pisar.spaces import Wiki
+        from pisar.safety import WikiError
+        source = self.external('captured but journal unavailable\n')
+        capture(Wiki(self.root), self.state, 'work/alpha', 'pending-journal', source)
+        original = self.alpha / 'sources/captures/pending-journal/original'
+        path, plan = self.plan('pending-journal-save', tasks=[])
+        plan['capture_id'] = 'pending-journal'
+        plan['source'] = dict(path=str(original), sha256=hashlib.sha256(original.read_bytes()).hexdigest())
+        path.write_text(json.dumps(plan))
+        with patch('pisar.operations.verify_capture', side_effect=WikiError('capture is not durably complete')):
+            with self.assertRaisesRegex(WikiError, 'incomplete'):
+                save(Wiki(self.root), self.base / 'fresh-runtime', path, self.base / 'no-ruwana')
+
     def test_plan_cross_domain_body_and_missing_evidence_rejected_before_write(self):
         for bad_body in ('See wiki:personal/home:private-note.', 'See wiki:work/alpha:absent.'):
             path, value = self.plan(tasks=[])
@@ -219,6 +382,7 @@ class SaveTests(Fixture):
                 ident = f'due-{index}'
                 path, value = self.plan(ident, tasks=[dict(id='scheduled', space_id='work/alpha',
                                                          title='Scheduled task', agreed=True, due=due)])
+                self.unique_source(value, ident)
                 value['meeting']['id'] = ident
                 path.write_text(json.dumps(value))
                 result = json.loads(self.save(path).stdout)
@@ -348,6 +512,7 @@ class SaveTests(Fixture):
                 if description is not None:
                     task['description'] = description
                 path, value = self.plan(operation, tasks=[task])
+                self.unique_source(value, operation)
                 value['meeting']['id'] = operation
                 path.write_text(json.dumps(value))
                 plan_bytes = path.read_bytes()

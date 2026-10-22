@@ -15,6 +15,8 @@ ROLE_DEFAULTS = {'claude': {'reviewer': {'model': 'opus', 'effort': 'high'},
                             'researcher': {'model': 'sonnet', 'effort': 'medium'}},
                  'codex': {'reviewer': {'model': 'gpt-6.1-sol', 'effort': 'high'},
                            'researcher': {'model': 'gpt-5.5', 'effort': 'medium'}}}
+for _agent in ROLE_DEFAULTS:
+    ROLE_DEFAULTS[_agent]['resolver'] = dict(ROLE_DEFAULTS[_agent]['reviewer'])
 
 
 def _environment(name):
@@ -106,6 +108,22 @@ def agent_options(agent, role=None):
     return {key: agent_option(agent, key, role)[0] for key in config.AGENT_KEYS}
 
 
+def semantic_policy():
+    """Effective sync semantic policy, including Stage-IV automatic approval when explicitly selected."""
+    table = config.load().get('sync', {}).get('semantic', {})
+    return {'review': table.get('review', 'all'), 'approval': table.get('approval', 'manual'),
+            'agent': table.get('agent', 'claude'),
+            'min_confidence': table.get('min_confidence', 0.95)}
+
+
+def semantic_review_policy():
+    """Semantic policy plus the effective reviewer identity used for report binding."""
+    result = semantic_policy()
+    model = agent_option(result['agent'], 'model', 'reviewer')[0]
+    effort = agent_option(result['agent'], 'effort', 'reviewer')[0]
+    return {**result, 'model': model or 'default', 'effort': effort or 'default'}
+
+
 def show(flags):
     """Every effective setting with its source; FLAGS maps setting names to raw flag values."""
     result = {}
@@ -116,6 +134,9 @@ def show(flags):
     result['default_agent'] = dict(value=value, source=source)
     value, source = research_agent()
     result['research_agent'] = dict(value=value, source=source)
+    configured_semantic = config.load().get('sync', {}).get('semantic', {})
+    for key, value in semantic_policy().items():
+        result[f'sync.semantic.{key}'] = dict(value=value, source='config' if key in configured_semantic else 'default')
     for agent in config.AGENTS:
         for role in (None, *config.ROLES):
             prefix = '.'.join(filter(None, ('agents', agent, role)))

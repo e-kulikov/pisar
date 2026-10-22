@@ -24,6 +24,14 @@ Run git with the `git` tool: `args` starts with the subcommand, for example
 `lesson_draft_write` (pass the sha256 you last read), not by editing draft.md.
 Accept a lesson only with the `lesson_accept` tool; it asks the user to confirm.
 Review a lesson revision with the `lesson_review` tool.
+For a sync candidate, call `sync_semantic_review` first for the configured read-only reviewer. If a Git or
+semantic conflict needs an autonomous proposal, use `sync_resolve` without a revision, inspect its proposal and
+candidate, then obtain the owner's confirmation and call it again with the exact returned revision. If that reviewer is
+unavailable, use `sync_review` only after the user has personally inspected the full candidate. Then get the user's
+separate acceptance with `sync_accept` under manual policy. Under explicitly configured auto policy, apply may
+proceed only after the confidence threshold, fresh clear review and all hard gates pass. Publishing always needs
+the user's separate `sync_publish` confirmation; review output never authorizes publication.
+For local-only outgoing commits, start with `sync_publish_prepare` and continue with the returned operation ID.
 '''
 REVIEW_STEP = '''5. Review is mandatory: call the `lesson_review` tool with `["--batch", "ID"]`.
    It sends the current revision (its text and sha256) to the senior reviewer,

@@ -129,6 +129,33 @@ class Runtime:
                 _HELD_LOCKS.reset(token)
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
+    def pending_sync(self):
+        """Return unfinished reservations from atomically replaced state files."""
+        folder = safe_path(self.path, 'sync')
+        if not folder.is_dir():
+            return []
+        pending = []
+        for path in sorted(folder.glob('*.json')):
+            try:
+                value = json.loads(safe_path(folder, path.name).read_text(encoding='utf-8'))
+            except (json.JSONDecodeError, UnicodeError) as error:
+                raise WikiError(f'invalid sync state {path.name}: {error}') from None
+            if value.get('status') not in ('published', 'closed', 'applied'):
+                pending.append(value)
+        return pending
+
+    def require_unreserved(self, operation_id=None):
+        for operation in self.pending_sync():
+            if operation.get('operation_id') != operation_id:
+                raise WikiError(f"unfinished sync operation {operation['operation_id']} reserves this wiki; "
+                                'finish or explicitly close it first')
+
+    @contextmanager
+    def writer(self, operation_id=None):
+        with self.lock():
+            self.require_unreserved(operation_id)
+            yield
+
     def journal_path(self, ident):
         concrete_id(ident, 'operation_id')
         return safe_path(self.path, f'operations/{ident}.json')
@@ -464,12 +491,24 @@ def capture_operation(space, ident):
 
 def verify_capture(wiki, runtime, space, ident, source, digest):
     operation = capture_operation(space, ident)
-    payload = dict(space=space.address, id=ident, source=str(external_path(source)), sha256=digest)
-    journal = existing(runtime, operation, payload)
+    if source is None:
+        reject_legacy(runtime, operation)
+        journal = runtime.load(operation)
+        if journal is not None and (journal.get('operation_id') != operation
+                                    or journal.get('root') != str(wiki.root)):
+            raise WikiError('capture journal identity/root conflict')
+    else:
+        payload = dict(space=space.address, id=ident, source=str(external_path(source)), sha256=digest)
+        journal = existing(runtime, operation, payload)
     if journal is None or journal['status'] != 'complete':
         raise WikiError('capture is not durably complete')
     raw = safe_path(space.path, f'sources/captures/{ident}/original')
     descriptor = safe_path(space.path, f'inbox/{ident}.md')
+    if source is None:
+        raw_relative = raw.relative_to(wiki.root).as_posix()
+        if not any(item.get('path') == raw_relative and item.get('after') == digest
+                   for item in journal.get('artifacts', [])):
+            raise WikiError('capture journal does not verify the selected original')
     if not raw.is_file() or sha256(raw.read_bytes()) != digest:
         raise WikiError('captured original changed or is missing')
     meta = metadata(descriptor.read_text(encoding='utf-8'))
@@ -487,7 +526,7 @@ def capture(wiki, directory, space_address, ident, source, expected=None):
     operation = capture_operation(space, ident)
     payload = dict(space=space.address, id=ident, source=str(source), sha256=digest)
     runtime = Runtime(directory, wiki.root)
-    with runtime.lock():
+    with runtime.writer():
         # 0.3 named captures capture-<space id>-<id>; a retry must not be reported as a duplicate document.
         reject_legacy(runtime, f'capture-{space.id}-{ident}', space.path.relative_to(wiki.root).as_posix())
         journal = existing(runtime, operation, payload)
@@ -688,7 +727,7 @@ def save(wiki, directory, plan_path, binary='ruwana'):
     runtime = Runtime(directory, wiki.root)
     operation = plan['operation_id']
     reference = f'wiki:{owner.address}:{plan["meeting"]["id"]}'
-    with runtime.lock():
+    with runtime.writer():
         journal = existing(runtime, operation, plan)
         if journal is not None and journal['status'] == 'complete':
             try:
@@ -697,6 +736,59 @@ def save(wiki, directory, plan_path, binary='ruwana'):
                 raise WikiError(f'{operation}: completed history retained; current verification failed: {error}') from None
         fresh = journal is None
         if fresh:
+            from .provenance import committed_processing, find_processed, ProcessingInventory
+            inventory = committed_processing(wiki)
+            incomplete = inventory.incomplete
+            pending_id = plan.get('capture_id')
+            if 'capture_id' in plan:
+                capture_id = plan['capture_id']
+                descriptor = safe_path(owner.path, f'inbox/{capture_id}.md')
+                raw = safe_path(owner.path, f'sources/captures/{capture_id}/original')
+                try:
+                    meta = metadata(descriptor.read_text(encoding='utf-8'))
+                except (OSError, UnicodeError):
+                    meta = None
+                valid_pending = (source == raw and raw.is_file() and sha256(raw.read_bytes()) == digest
+                                 and meta is not None and meta.get('id') == capture_id
+                                 and meta.get('source_sha256') == digest and meta.get('ingest_status') == 'pending')
+                pending_id = None
+                if valid_pending:
+                    try:
+                        verify_capture(wiki, runtime, owner, capture_id, None, digest)
+                        pending_id = capture_id
+                    except WikiError:
+                        pass
+            else:
+                pending_descriptors = []
+                for descriptor in wiki.files():
+                    if descriptor.parent.name != 'inbox' or wiki.owner(descriptor) != owner:
+                        continue
+                    try:
+                        meta = metadata(descriptor.read_text(encoding='utf-8'))
+                    except (OSError, UnicodeError):
+                        continue
+                    if (meta and meta.get('type') == 'source' and meta.get('ingest_status') == 'pending'
+                            and meta.get('source_sha256') == digest):
+                        pending_descriptors.append(meta.get('id'))
+                if len(pending_descriptors) == 1 and isinstance(pending_descriptors[0], str):
+                    try:
+                        verify_capture(wiki, runtime, owner, pending_descriptors[0], source, digest)
+                        pending_id = pending_descriptors[0]
+                    except WikiError:
+                        pass
+            if pending_id is not None:
+                incomplete = tuple(item for item in incomplete
+                                   if not (item[0] == owner.address and item[1] == digest
+                                           and item[2] == 'committed capture processing is pending/incomplete'))
+            matches = find_processed(ProcessingInventory(inventory.processed, incomplete), owner.address, digest)
+            if matches:
+                if len(matches) > 1:
+                    raise WikiError('duplicate-source-decision-required: exact source was processed more than once')
+                if matches[0].meeting_reference != reference:
+                    raise WikiError(f'possible-duplicate-source-decision-required: exact source was processed as '
+                                    f'{matches[0].meeting_reference}')
+                return dict(operation_id=operation, status='already-processed',
+                            reference=matches[0].meeting_reference)
             docs, errors = scan(wiki)
             if errors:
                 raise WikiError('; '.join(errors))
@@ -716,6 +808,7 @@ def save(wiki, directory, plan_path, binary='ruwana'):
                 meta = metadata(descriptor.read_text(encoding='utf-8'))
                 if source != raw or not meta or meta.get('source_sha256') != digest or meta.get('ingest_status') != 'pending':
                     raise WikiError('capture_id must identify a pending descriptor with the selected captured original')
+                verify_capture(wiki, runtime, owner, capture_id, None, digest)
                 validate_meta(meta, owner, wiki)
                 captured = descriptor.read_bytes()
                 artifacts.append(artifact(wiki, owner, descriptor.relative_to(owner.path).as_posix(), captured, sha256(captured)))

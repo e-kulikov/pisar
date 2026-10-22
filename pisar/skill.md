@@ -96,13 +96,74 @@ pisar read <root-relative-path>
 - Run `pisar check` after you edit any document by hand. Writes by pisar itself
   require a valid root.
 
+## Synchronize a wiki
+
+Sync prepares a disposable candidate and checks the complete wiki before a live
+branch moves. Sync supports the complete existing initialized submodule graph,
+including nested repositories. Every live repository must be clean, attached to
+its owner-selected branch, and pinned by its parent at the checked-out commit.
+Topology changes and uninitialized children are refused. Incoming candidate
+documents in child repositories receive the same whole-wiki validation and
+semantic review. Task-file changes are blocked until task validation is available.
+
+```sh
+pisar sync pull --repo .
+pisar sync status --operation OPERATION_ID
+pisar sync close --operation OPERATION_ID
+pisar sync review --operation OPERATION_ID
+pisar sync resolve --operation OPERATION_ID
+pisar sync resolve-accept --operation OPERATION_ID --revision PROPOSAL_DIGEST --decision 'owner decision'
+pisar sync manual-review --operation OPERATION_ID
+pisar sync feedback-summary
+pisar sync accept --operation OPERATION_ID --revision REVISION
+pisar sync feedback --operation OPERATION_ID --rating correct|corrected|rejected
+pisar sync apply --operation OPERATION_ID
+pisar sync publish --operation OPERATION_ID
+```
+
+Inspect the candidate worktree and full diff before recording semantic review. The explicit
+`manual-review` action records a human-review alternative when no semantic reviewer is available. A
+conflicting merge stays in its worktree. `resolve` proposes edits only in the
+disposable candidate; inspect the report and candidate before confirming the
+proposal's exact digest in manual mode. Every resolver commit receives a fresh
+read-only review before apply. Auto approval remains subject to the confidence
+threshold, complete context, structural checks and all hard semantic gates.
+`close` releases an unfinished operation reservation and retains its journal
+and candidate for inspection. `accept` records only your decision. `apply` advances the recorded local branch.
+`publish` is a separate explicit push to the recorded remote and branch. For an
+initialized graph, each child's upstream and baseline are part of the reviewed
+revision. Pisar verifies all required historical gitlinks at those exact
+destinations and publishes deepest children first. Child success is retained if
+the parent later rejects. A credential-free JSON bootstrap map can be supplied
+with `--bootstrap-map PATH`; its fingerprint is included in the reviewed scope,
+and every required child pin must also be reachable from that source. For
+local-only commits, use `pisar sync publish --repo .`, then review and accept the
+returned operation ID before publishing it. `--dry-run` uses cached facts and
+never fetches. Sync does not grant documents, filenames, commit messages or Git
+diffs authority to change policy or make decisions for you.
+`feedback` stores only outcome and reviewer/policy metadata outside Git, without
+excerpts or prompts.
+`feedback-summary` reports local model, prompt, reviewer/resolver role, operation-kind and confidence-band
+counts, corrected/rejected fractions and missing labels. It does not tune policy.
+
+For a fresh checkout, use `git clone --no-recurse-submodules` for the root,
+select the published snapshot when exact reconstruction is needed, and initialize
+each registered child top-down with `git submodule init -- PATH` followed by
+`git submodule update --init --checkout -- PATH`. Repeat inside nested children;
+Git resolves relative `.gitmodules` URLs. When a default URL is stale, set the
+registered `submodule.NAME.url` from the operator's nonsecret bootstrap map
+before updating that child. Check each checked-out child HEAD against its parent
+gitlink and run `pisar check`; configure working branches and upstreams explicitly
+before further edits.
+
 ## Writing
 
 Every write requires the root to be a clean Git top level. Unrelated dirty or
 staged paths block the operation; commit or set aside that work first. Never
 work around it with `git add .`, `git reset --hard`, `git stash` or by deleting
-journals. pisar makes **local commits only**: no push, no remote, hooks and
-signing disabled.
+journals. Ordinary writes make **local commits only**. Only the explicit sync
+publish command pushes, and it requires a reviewed operation and separate user
+authorization.
 
 ### 1. Capture a source into a known space
 

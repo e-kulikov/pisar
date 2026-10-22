@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import io
 import subprocess
 import unittest
+from unittest import mock
 
 from pisar import mcp
 from . import support
@@ -72,6 +74,10 @@ class McpClient:
         result = self.call(name, args)
         return result['content'][0]['text'], bool(result.get('isError'))
 
+    def text_with(self, name, arguments):
+        result = self.call_with(name, arguments)
+        return result['content'][0]['text'], bool(result.get('isError'))
+
     def initialize(self):
         capabilities = {'elicitation': {}} if self.elicit is not None else {}
         return self.request('initialize', {'protocolVersion': mcp.PROTOCOL, 'capabilities': capabilities,
@@ -131,7 +137,7 @@ class McpTests(Fixture):
         client.initialize()
         return client
 
-    def test_handshake_and_exactly_the_three_tools(self):
+    def test_handshake_and_declared_tools(self):
         client = McpClient(self, ['--root', str(self.root), '--state-dir', str(self.state),
                                   '--ruwana', 'ruwana', 'mcp-serve'])
         init = client.initialize()
@@ -139,6 +145,63 @@ class McpTests(Fixture):
         self.assertEqual(init['result']['capabilities'], {'tools': {}})
         tools = client.request('tools/list')['result']['tools']
         self.assertEqual(sorted(t['name'] for t in tools), sorted(mcp.TOOL_NAMES))
+        self.assertIn('sync_accept', mcp.TOOL_NAMES)
+        self.assertIn('sync_apply', mcp.TOOL_NAMES)
+        self.assertIn('sync_publish', mcp.TOOL_NAMES)
+        self.assertIn('sync_semantic_review', mcp.TOOL_NAMES)
+        self.assertIn('sync_resolve', mcp.TOOL_NAMES)
+        self.assertIn('sync_publish_prepare', mcp.TOOL_NAMES)
+        self.assertIn('sync_feedback_summary', mcp.TOOL_NAMES)
+
+    def test_semantic_review_tool_is_read_only_and_does_not_elicit_acceptance(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        with mock.patch('pisar.sync.semantic_review', return_value={'status': 'reviewed'}):
+            result = server.tool('sync_semantic_review', {'operation': 'sync-fixture'})
+        self.assertEqual(json.loads(result['content'][0]['text']), {'status': 'reviewed'})
+
+    def test_resolver_without_revision_requires_confirmation_before_auto_apply(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        with mock.patch('pisar.sync.resolve', return_value={'status': 'applied-automatically'}) as resolve:
+            result = server.tool('sync_resolve', {'operation': 'op-1'})
+        self.assertTrue(result.get('isError'))
+        self.assertIn('cannot ask for confirmation', result['content'][0]['text'])
+        resolve.assert_not_called()
+        with mock.patch.object(server, '_confirm_sync') as confirm, \
+                mock.patch('pisar.sync.resolve', return_value={'status': 'applied-automatically'}) as resolve:
+            server.tool('sync_resolve', {'operation': 'op-1'})
+        self.assertIn('apply', confirm.call_args.args[1])
+        self.assertIn('local branch', confirm.call_args.args[1])
+        resolve.assert_called_once()
+
+    def test_resolver_commit_requires_confirmation_bound_to_current_proposal(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        details = {'resolver_proposal': {'revision': 'proposal-1', 'written': {'work/note.md': 'hash'},
+                                         'policy': {'approval': 'manual'},
+                                         'reports': [{'summary': 'Keep both sourced statements.'}]}}
+        with mock.patch('pisar.sync.inspect', return_value=details), \
+                mock.patch.object(server, '_confirm_sync') as confirm, \
+                mock.patch('pisar.sync.resolve', return_value={'status': 'prepared'}) as resolve:
+            result = server.tool('sync_resolve', {'operation': 'op-1', 'revision': 'proposal-1',
+                                                  'decision': 'Preserve both.'})
+        self.assertIn('apply', confirm.call_args.args[1])
+        self.assertIn('local branch', confirm.call_args.args[1])
+        self.assertIn('candidate paths: work/note.md', confirm.call_args.args[1])
+        self.assertIn('Keep both sourced statements.', confirm.call_args.args[1])
+        resolve.assert_called_once()
+        self.assertEqual(json.loads(result['content'][0]['text']), {'status': 'prepared'})
+        with mock.patch('pisar.sync.inspect', return_value=details), \
+                mock.patch.object(server, '_confirm_sync') as stale_confirm:
+            stale = server.tool('sync_resolve', {'operation': 'op-1', 'revision': 'stale'})
+        self.assertTrue(stale.get('isError'))
+        stale_confirm.assert_not_called()
+
+    def test_publish_only_prepare_tool_never_publishes(self):
+        server = mcp.Server(self.root, self.state, 'ruwana', io.StringIO(), io.StringIO(), self.env)
+        result = {'status': 'prepared', 'kind': 'publish-only'}
+        with mock.patch('pisar.sync.publish_only', return_value=result) as prepare:
+            response = server.tool('sync_publish_prepare', {})
+        prepare.assert_called_once()
+        self.assertEqual(json.loads(response['content'][0]['text']), result)
 
     def test_unknown_method_is_a_json_rpc_error(self):
         client = self.server()
@@ -167,6 +230,23 @@ class McpTests(Fixture):
             with self.subTest(args=args):
                 _, error = client.text('pisar', args)
                 self.assertTrue(error)
+
+    def test_sync_owner_decisions_are_not_available_through_generic_pisar(self):
+        from pisar import mcp
+        for args in (['sync', 'accept', '--operation', 'x', '--revision', 'y'],
+                     ['sync', 'apply', '--operation', 'x'], ['sync', 'publish', '--operation', 'x']):
+            with self.subTest(args=args), self.assertRaises(mcp.Refused):
+                mcp.check_pisar(args)
+        with self.assertRaises(mcp.Refused):
+            mcp.check_pisar(['sync', 'resolve', '--operation', 'x', '--revision', 'digest'])
+
+    def test_sync_accept_decline_never_writes_a_decision(self):
+        client = self.server(elicit='decline')
+        text, error = client.text_with('sync_accept', {'operation': 'sync-example', 'revision': 'digest'})
+        self.assertTrue(error)
+        self.assertIn('not confirmed by the user', text)
+        self.assertEqual(len(client.asked), 1)
+        self.assertFalse(self.state.exists())
 
     def test_pisar_never_runs_lesson_accept_itself(self):
         client = self.server(elicit='accept')
