@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/e-kulikov/pisar/compare/v0.5.0...v0.6.0) (2026-10-22)
+
+
+### Features
+
+* **sync:** add reviewed Git sync with semantic review and submodule graphs ([#21](https://github.com/e-kulikov/pisar/issues/21)) ([f0205ca](https://github.com/e-kulikov/pisar/commit/f0205ca59de481eb41ab43aada016462d6f71162)), closes [#13](https://github.com/e-kulikov/pisar/issues/13)
+
 ## [0.5.0](https://github.com/e-kulikov/pisar/compare/v0.4.0...v0.5.0) (2026-10-11)
 
 
