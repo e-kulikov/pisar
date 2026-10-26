@@ -72,6 +72,10 @@ def parser():
             sub.add_argument('--reason', help='Short note stored in the manifest and report, never in the wiki')
         if name == 'reroute':
             sub.add_argument('--space', required=True, help='New destination space address (domain/id)')
+    inbox_cmd = commands.add_parser('inbox', help='External global inbox inspection')
+    inbox_actions = inbox_cmd.add_subparsers(dest='action', required=True)
+    inbox_read = inbox_actions.add_parser('read', help='Read or list items in the global inbox')
+    inbox_read.add_argument('--id', help='Immediate filename in the global inbox')
     config_command.add_parser(commands)
     guard.add_parser(commands)
     spacecmd.add_parser(commands)
@@ -117,6 +121,9 @@ def main(argv=None):
             return 0
         args.root = settings.root(args.root)
         args.state_dir = settings.state_dir(args.state_dir)
+        if args.command == 'inbox' and args.action == 'read':
+            from . import inbox
+            return inbox.read(args.state_dir, getattr(args, 'id', None))
         args.ruwana = settings.ruwana(args.ruwana)
         if args.command == 'mcp-serve':
             return mcp.run(args)

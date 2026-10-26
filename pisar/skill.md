@@ -77,6 +77,7 @@ pisar inventory [--include ...] [--exclude ...] [--space DOMAIN/ID]
 pisar search "text" [--include ...] [--exclude ...] [--space DOMAIN/ID]
 pisar read wiki:<domain>/<space>:<document> [--include ...] [--exclude ...]
 pisar read <root-relative-path>
+pisar inbox read [--id ID]
 ```
 
 - Run `pisar spaces` first; use the real addresses it reports, never guessed ones.
@@ -93,6 +94,10 @@ pisar read <root-relative-path>
   Use it, not search, whenever you must be exhaustive. Pending items in a space's
   `inbox/` show up here too.
 - `pisar read` returns UTF-8 text only; it cannot show PDF or audio originals.
+- `pisar inbox read` lists available files in the global inbox (`<state-dir>/inbox/`),
+  sorted one per line. With `--id ID`, it outputs the raw UTF-8 text of that inbox
+  file directly to stdout up to a 64 KiB (65,536 bytes) cap. Files exceeding the cap
+  are cleanly truncated at a character boundary with a trailing truncation marker.
 - Run `pisar check` after you edit any document by hand. Writes by pisar itself
   require a valid root.
 
