@@ -272,6 +272,150 @@ class ReadGuardTests(unittest.TestCase):
         self.assertEqual(err.strip(),
                          'pisar data must be read through pisar: use pisar read <root-relative-path>, pisar search <query>, or pisar inventory.')
 
+    def test_plugin_symlink_escape_into_state_emits_state_hint(self):
+        # Finding 4: symlink inside plugin pointing into state must emit state hint
+        inbox_file = self.state / 'inbox' / 'item.txt'
+        inbox_file.parent.mkdir(parents=True, exist_ok=True)
+        inbox_file.write_text('item')
+        link = self.plugin / 'escape_to_state.txt'
+        link.symlink_to(inbox_file)
+        code, out, err = self.run_guard({
+            'tool_name': 'Read', 'cwd': str(self.plugin),
+            'tool_input': {'file_path': str(link)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_plugin_symlink_escape_outside_state_and_wiki_exits_2(self):
+        # Finding 4 / policy: symlink inside plugin pointing outside state & wiki is denied
+        outside_file = self.base / 'outside_secret.txt'
+        outside_file.write_text('secret')
+        link = self.plugin / 'escape_outside.txt'
+        link.symlink_to(outside_file)
+        code, out, err = self.run_guard({
+            'tool_name': 'Read', 'cwd': str(self.plugin),
+            'tool_input': {'file_path': str(link)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('escapes plugin directory', err)
+
+    def test_plugin_traversal_via_dot_dot_to_outside_exits_2(self):
+        # SPEC A.4: traversal out of plugin generation directory is denied
+        code, out, err = self.run_guard({
+            'tool_name': 'Read', 'cwd': str(self.plugin),
+            'tool_input': {'file_path': '../../../../../outside.txt'}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('traversal out of plugin directory', err)
+
+    def test_symlinked_plugin_dir_fails_closed(self):
+        # Finding 2: symlinked plugin generation is rejected
+        sym_plugin = self.base / 'sym_plugin'
+        sym_plugin.symlink_to(self.state)
+        stdin = io.StringIO(json.dumps({'tool_name': 'Read', 'cwd': str(self.root), 'tool_input': {'file_path': 'doc.md'}}))
+        old_stdin = sys.stdin
+        try:
+            sys.stdin = stdin
+            code = read_guard.run(self.root, self.state, sym_plugin)
+        finally:
+            sys.stdin = old_stdin
+        self.assertEqual(code, 2)
+
+    def test_symlinked_lessons_dir_fails_closed_or_denies_access_to_destination(self):
+        # Finding 2: symlink at <state>/lessons -> <state>/inbox must not allow reading inbox items
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'item.txt').write_text('secret inbox')
+        lessons_link = self.state / 'lessons_symlink'
+        lessons_link.symlink_to(inbox_dir)
+        # Even if someone replaces lessons with symlink to inbox
+        import shutil
+        shutil.rmtree(self.lessons.parent)
+        (self.state / 'lessons').symlink_to(inbox_dir)
+        code, out, err = self.run_guard({
+            'tool_name': 'Read', 'cwd': str(self.root),
+            'tool_input': {'file_path': str(self.state / 'inbox' / 'item.txt')}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_lessons_symlink_to_sync_denied(self):
+        # Finding 2: symlink inside lessons pointing to sync state is denied
+        sync_file = self.state / 'roots' / 'ns' / 'sync' / 'op.json'
+        sync_file.parent.mkdir(parents=True, exist_ok=True)
+        sync_file.write_text('{}')
+        link = self.lessons / 'draft.md'
+        link.symlink_to(sync_file)
+        code, out, err = self.run_guard({
+            'tool_name': 'Read', 'cwd': str(self.root),
+            'tool_input': {'file_path': str(link)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_glob_pattern_with_symlinked_subdirectory_denied(self):
+        # Glob pattern containing a symlinked subdirectory pointing to state
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'item.txt').write_text('inbox file')
+        escape_link = self.plugin / 'escape_sub'
+        escape_link.symlink_to(inbox_dir)
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': 'escape_sub/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_all_tools_denied_on_sync_triage_and_staging(self):
+        # Test Read, Glob, Grep on sync, triage, and staging
+        staging = self.state / 'agents' / 'claude' / 'plugin' / '.build.tmp-test'
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / 'file.txt').write_text('staging')
+        triage_dir = self.state / 'triage'
+        triage_dir.mkdir(parents=True, exist_ok=True)
+        (triage_dir / 'file.txt').write_text('triage')
+        sync_dir = self.state / 'roots' / 'ns' / 'sync'
+        sync_dir.mkdir(parents=True, exist_ok=True)
+        (sync_dir / 'op.json').write_text('{}')
+
+        for target in (staging, triage_dir, sync_dir):
+            target_file = next(target.glob('*'))
+            for tool, inp in (('Read', {'file_path': str(target_file)}),
+                              ('Glob', {'pattern': '*', 'path': str(target)}),
+                              ('Grep', {'pattern': 'test', 'path': str(target)})):
+                with self.subTest(target=str(target), tool=tool):
+                    code, out, err = self.run_guard({
+                        'tool_name': tool, 'cwd': str(self.root), 'tool_input': inp
+                    })
+                    self.assertEqual(code, 2)
+                    self.assertEqual(err.strip(),
+                                     'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_relative_glob_and_grep_path_resolved_against_payload_cwd(self):
+        sub = self.base / 'subfolder'
+        sub.mkdir()
+        (sub / 'item.txt').write_text('hello')
+        for tool, inp in (('Glob', {'pattern': '*.txt', 'path': 'subfolder'}),
+                          ('Grep', {'pattern': 'hello', 'path': 'subfolder'})):
+            with self.subTest(tool=tool):
+                code, out, err = self.run_guard({
+                    'tool_name': tool, 'cwd': str(self.base), 'tool_input': inp
+                })
+                self.assertEqual(code, 0)
+                self.assertEqual(out, '')
+                self.assertEqual(err, '')
+
 
 if __name__ == '__main__':
     unittest.main()

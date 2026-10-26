@@ -123,10 +123,18 @@ def main(argv=None):
             from .agent_guard import run
             return run(settings.root(args.root), settings.state_dir(args.state_dir))
         if args._read_guard:
-            if not args.plugin_dir or not Path(args.plugin_dir).is_absolute() or not Path(args.plugin_dir).is_dir():
-                p.error('--_read-guard requires an absolute --plugin-dir directory')
-            from .read_guard import run
-            return run(settings.root(args.root), settings.state_dir(args.state_dir), args.plugin_dir)
+            try:
+                if not args.plugin_dir or not Path(args.plugin_dir).is_absolute() or not Path(args.plugin_dir).is_dir():
+                    p.error('--_read-guard requires an absolute --plugin-dir directory')
+                root = settings.root(args.root)
+                state_dir = settings.state_dir(args.state_dir)
+                from .read_guard import run
+                return run(root, state_dir, args.plugin_dir)
+            except SystemExit:
+                raise
+            except Exception as error:
+                sys.stderr.write(f'pisar: read guard setup failed: {error}\n')
+                return 2
         if args.command == 'config':
             ctx = SimpleNamespace(flags=dict(root=args.root, state_dir=args.state_dir, ruwana=args.ruwana))
             print(json.dumps(config_command.run(args, ctx), ensure_ascii=False, indent=2))

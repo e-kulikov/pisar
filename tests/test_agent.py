@@ -541,6 +541,81 @@ class AgentTests(Fixture):
         reviewer_text = (default / 'agents/lesson-reviewer.md').read_text()
         self.assertIn('tools: Read', reviewer_text)
 
+        read_hook = settings['hooks']['PreToolUse'][1]['hooks'][0]['command']
+        # Subagent payload attempting to read wiki doc is denied with status 2
+        doc = self.root / 'wiki_secret.md'
+        doc.write_text('secret')
+        subagent_payload = {
+            'tool_name': 'Read', 'cwd': str(self.root),
+            'tool_input': {'file_path': 'wiki_secret.md'},
+            'agent': 'lesson-reviewer', 'subagent': True,
+        }
+        res = subprocess.run(read_hook, shell=True, input=json.dumps(subagent_payload),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('pisar data must be read through pisar: use pisar read', res.stderr)
+
+        # Subagent payload attempting to read inbox item in state is denied with status 2
+        inbox_file = self.state / 'inbox' / 'item.txt'
+        inbox_file.parent.mkdir(parents=True, exist_ok=True)
+        inbox_file.write_text('inbox secret')
+        res = subprocess.run(read_hook, shell=True,
+                             input=json.dumps({
+                                 'tool_name': 'Read', 'cwd': str(self.root),
+                                 'tool_input': {'file_path': str(inbox_file)},
+                                 'agent': 'lesson-reviewer', 'subagent': True,
+                             }),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('pisar state must be read through pisar', res.stderr)
+
+        # Subagent payload reading draft.md in lessons workspace is allowed with status 0
+        batch_dir = self.state / 'lessons' / 'batch1'
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        draft = batch_dir / 'draft.md'
+        draft.write_text('lesson draft')
+        res = subprocess.run(read_hook, shell=True,
+                             input=json.dumps({
+                                 'tool_name': 'Read', 'cwd': str(self.root),
+                                 'tool_input': {'file_path': str(draft)},
+                                 'agent': 'lesson-reviewer', 'subagent': True,
+                             }),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout, '')
+        self.assertEqual(res.stderr, '')
+
+        # Subagent payload reading SKILL.md in plugin dir is allowed with status 0
+        res = subprocess.run(read_hook, shell=True,
+                             input=json.dumps({
+                                 'tool_name': 'Read', 'cwd': str(self.root),
+                                 'tool_input': {'file_path': str(default / 'SKILL.md')},
+                                 'agent': 'lesson-reviewer', 'subagent': True,
+                             }),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout, '')
+        self.assertEqual(res.stderr, '')
+
+    def test_read_guard_cli_fails_closed_with_status_2_when_config_is_invalid(self):
+        # Finding 1: If config becomes invalid mid-session, read guard hook must exit 2, not 1
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        read_hook = settings['hooks']['PreToolUse'][1]['hooks'][0]['command']
+
+        config_dir = Path(self.agent_env['XDG_CONFIG_HOME']) / 'pisar'
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / 'config.toml').write_text('invalid = [unclosed toml')
+
+        payload = {'tool_name': 'Read', 'cwd': str(self.root), 'tool_input': {'file_path': 'any.md'}}
+        res = subprocess.run(read_hook, shell=True, input=json.dumps(payload),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('read guard setup failed', res.stderr)
+
     def test_reviewer_prompt_text_specifies_review_uses_only_supplied_text(self):
         _, call = self.launch()
         default = Path(values(call['argv'], '--plugin-dir')[0])

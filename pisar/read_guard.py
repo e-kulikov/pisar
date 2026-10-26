@@ -56,8 +56,21 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
 
         canonical_root = Path(root).resolve()
         canonical_state = Path(state_dir).resolve()
-        canonical_plugin = Path(plugin_dir).resolve()
-        canonical_lessons = (canonical_state / 'lessons').resolve()
+
+        plugin_path = Path(plugin_dir)
+        if plugin_path.is_symlink():
+            sys.stderr.write('read guard: plugin_dir cannot be a symlink\n')
+            return 2
+        canonical_plugin = plugin_path.resolve()
+        if canonical_plugin == canonical_state or not canonical_plugin.is_relative_to(canonical_state):
+            sys.stderr.write('read guard: plugin_dir must be inside state directory\n')
+            return 2
+
+        lessons_path = canonical_state / 'lessons'
+        if lessons_path.is_symlink() or not lessons_path.is_dir() or lessons_path.resolve() != lessons_path:
+            canonical_lessons = None
+        else:
+            canonical_lessons = lessons_path
 
         if tool_name == 'Read':
             file_path = tool_input.get('file_path')
@@ -83,6 +96,20 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
                 raw_target = search_path
             else:
                 raw_target = os.path.join(cwd, search_path)
+            if '/' in pattern:
+                pattern_dir = os.path.dirname(pattern)
+                pattern_target = Path(raw_target) / pattern_dir
+                if pattern_target.exists():
+                    resolved_pattern = pattern_target.resolve()
+                    if Path(os.path.realpath(raw_target)).is_relative_to(canonical_plugin) and not resolved_pattern.is_relative_to(canonical_plugin):
+                        if resolved_pattern.is_relative_to(canonical_root):
+                            sys.stderr.write(f'{WIKI_HINT}\n')
+                            return 2
+                        if resolved_pattern.is_relative_to(canonical_state):
+                            sys.stderr.write(f'{STATE_HINT}\n')
+                            return 2
+                        sys.stderr.write('read guard: glob pattern escapes plugin directory\n')
+                        return 2
         elif tool_name == 'Grep':
             pattern = tool_input.get('pattern')
             if pattern is not None and not isinstance(pattern, str):
@@ -110,9 +137,27 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
             sys.stderr.write(f'{WIKI_HINT}\n')
             return 2
 
+        # Traversal out of plugin directory
+        if Path(cwd).resolve().is_relative_to(canonical_plugin):
+            if not lexical_path.is_relative_to(canonical_plugin):
+                if resolved_path.is_relative_to(canonical_root):
+                    sys.stderr.write(f'{WIKI_HINT}\n')
+                    return 2
+                if resolved_path.is_relative_to(canonical_state):
+                    sys.stderr.write(f'{STATE_HINT}\n')
+                    return 2
+                sys.stderr.write('read guard: traversal out of plugin directory is denied\n')
+                return 2
+
         # 2. Active plugin generation directory exception
         if lexical_path.is_relative_to(canonical_plugin):
             if not resolved_path.is_relative_to(canonical_plugin):
+                if resolved_path.is_relative_to(canonical_root):
+                    sys.stderr.write(f'{WIKI_HINT}\n')
+                    return 2
+                if resolved_path.is_relative_to(canonical_state):
+                    sys.stderr.write(f'{STATE_HINT}\n')
+                    return 2
                 sys.stderr.write('read guard: symlink escapes plugin directory\n')
                 return 2
             return 0
@@ -121,8 +166,17 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
             return 0
 
         # 3. Lesson workspace exception (Read tool only)
-        if tool_name == 'Read':
-            if lexical_path.is_relative_to(canonical_lessons) and resolved_path.is_relative_to(canonical_lessons):
+        if tool_name == 'Read' and canonical_lessons is not None:
+            if lexical_path.is_relative_to(canonical_lessons):
+                if not resolved_path.is_relative_to(canonical_lessons):
+                    if resolved_path.is_relative_to(canonical_root):
+                        sys.stderr.write(f'{WIKI_HINT}\n')
+                        return 2
+                    if resolved_path.is_relative_to(canonical_state):
+                        sys.stderr.write(f'{STATE_HINT}\n')
+                        return 2
+                    sys.stderr.write('read guard: symlink escapes lessons directory\n')
+                    return 2
                 return 0
 
         # 4. State directory targets denial
