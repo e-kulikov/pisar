@@ -485,6 +485,68 @@ class AgentTests(Fixture):
         p = self.run_pisar('--', 'x', env=self.agent_env, ok=False)
         self.assertEqual(p.returncode, 2)
 
+    def test_read_guard_cli_argument_missing_or_relative_plugin_dir_fails_closed(self):
+        # Missing --plugin-dir with --_read-guard
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state, '--_read-guard', ok=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
+
+        # Relative --plugin-dir
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state,
+                           '--plugin-dir', 'relative/dir', '--_read-guard', ok=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
+
+    def test_guard_cli_argument_mutual_exclusion(self):
+        cases = [
+            (('--agent', 'claude', '--_read-guard'), '--_read-guard cannot be combined'),
+            (('--_read-guard', 'inbox', 'read'), '--_read-guard cannot be combined'),
+            (('--_agent-guard', '--_read-guard'), '--_read-guard cannot be combined'),
+            (('--_agent-guard', 'spaces'), '--_agent-guard cannot be combined'),
+        ]
+        for flags, expected_err in cases:
+            with self.subTest(flags=flags):
+                p = self.run_pisar('--root', self.root, '--state-dir', self.state,
+                                   '--plugin-dir', str(self.base), *flags, ok=False)
+                self.assertEqual(p.returncode, 2)
+                self.assertIn(expected_err, p.stderr)
+
+    def test_claude_command_registers_read_guard_as_pretooluse_hook_1_and_executes(self):
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hooks = settings['hooks']['PreToolUse']
+        self.assertEqual(len(hooks), 2)
+        self.assertEqual(hooks[0]['matcher'], 'Write|Edit|Bash')
+        self.assertEqual(hooks[1]['matcher'], 'Read|Glob|Grep')
+        read_hook = hooks[1]['hooks'][0]['command']
+        self.assertIn('--_read-guard', read_hook)
+        self.assertIn('--plugin-dir', read_hook)
+
+        # Execute the generated read_hook command directly
+        doc = self.root / 'secret.md'
+        doc.write_text('secret')
+        payload = {'tool_name': 'Read', 'cwd': str(self.root), 'tool_input': {'file_path': 'secret.md'}}
+        res = subprocess.run(read_hook, shell=True, input=json.dumps(payload),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('pisar data must be read through pisar: use pisar read', res.stderr)
+
+    def test_subagent_lesson_reviewer_only_has_read_tool_which_is_guarded(self):
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        read_matcher = settings['hooks']['PreToolUse'][1]['matcher']
+        self.assertIn('Read', read_matcher.split('|'))
+        default = Path(values(call['argv'], '--plugin-dir')[0])
+        reviewer_text = (default / 'agents/lesson-reviewer.md').read_text()
+        self.assertIn('tools: Read', reviewer_text)
+
+    def test_reviewer_prompt_text_specifies_review_uses_only_supplied_text(self):
+        _, call = self.launch()
+        default = Path(values(call['argv'], '--plugin-dir')[0])
+        reviewer_text = (default / 'agents/lesson-reviewer.md').read_text()
+        self.assertIn('You review only the supplied text given in your prompt. Do not attempt to read files directly.', reviewer_text)
+
 
 
 class CodexAllowlistTests(unittest.TestCase):

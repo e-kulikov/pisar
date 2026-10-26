@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 from . import (__version__, agent, commit_message, config_command, guard, lesson_command, mcp, research_command,
@@ -88,6 +89,8 @@ def parser():
             leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[name]
         commit_message.add_flags(leaf)
     p.add_argument('--_agent-guard', action='store_true', help=argparse.SUPPRESS)
+    p.add_argument('--_read-guard', action='store_true', help=argparse.SUPPRESS)
+    p.add_argument('--plugin-dir', help=argparse.SUPPRESS)
     mcp.add_parser(commands)
     return p
 
@@ -104,7 +107,11 @@ def main(argv=None):
         p.error(f'argument --agent: invalid choice: {args.agent!r}')
     if args.agent and args.command:
         p.error('--agent cannot be combined with a command')
-    if not args.agent and not args.command and not args._agent_guard:
+    if args._read_guard and (args.agent or args.command or args._agent_guard):
+        p.error('--_read-guard cannot be combined with --agent, a command, or --_agent-guard')
+    if args._agent_guard and (args.agent or args.command):
+        p.error('--_agent-guard cannot be combined with --agent or a command')
+    if not args.agent and not args.command and not args._agent_guard and not args._read_guard:
         p.error('a command is required (or --agent)')
     token = None
     try:
@@ -115,6 +122,11 @@ def main(argv=None):
         if args._agent_guard:
             from .agent_guard import run
             return run(settings.root(args.root), settings.state_dir(args.state_dir))
+        if args._read_guard:
+            if not args.plugin_dir or not Path(args.plugin_dir).is_absolute() or not Path(args.plugin_dir).is_dir():
+                p.error('--_read-guard requires an absolute --plugin-dir directory')
+            from .read_guard import run
+            return run(settings.root(args.root), settings.state_dir(args.state_dir), args.plugin_dir)
         if args.command == 'config':
             ctx = SimpleNamespace(flags=dict(root=args.root, state_dir=args.state_dir, ruwana=args.ruwana))
             print(json.dumps(config_command.run(args, ctx), ensure_ascii=False, indent=2))
