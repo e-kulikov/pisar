@@ -109,10 +109,12 @@ class InboxTests(Fixture):
         fifo = self.inbox_dir / 'fifo.txt'
         try:
             os.mkfifo(fifo)
+            has_fifo = True
+        except (AttributeError, OSError):
+            has_fifo = False
+        if has_fifo:
             with self.assertRaisesRegex(WikiError, 'regular'):
                 inbox.read_item(self.state, 'fifo.txt')
-        except (AttributeError, OSError):
-            pass
 
     def test_read_item_malformed_utf8_raises_wiki_error(self):
         (self.inbox_dir / 'bad.txt').write_bytes(b'\xff\xfe\x00')
@@ -122,6 +124,50 @@ class InboxTests(Fixture):
     def test_read_item_empty_id_raises_wiki_error(self):
         with self.assertRaises(WikiError):
             inbox.read_item(self.state, '')
+
+    def test_listing_skips_entries_rejected_by_validate_id(self):
+        (self.inbox_dir / 'name..txt').write_text('dots')
+        (self.inbox_dir / 'normal file.txt').write_text('normal')
+        items = inbox.list_items(self.state)
+        self.assertEqual(items, ['normal file.txt'])
+
+    def test_read_item_dir_replacement_race(self):
+        (self.inbox_dir / 'target.txt').write_text('inside')
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'target.txt').write_text('outside')
+
+        real_open = os.open
+        def racy_open(path, flags, *args, **kwargs):
+            if str(path) == 'target.txt' or str(path).endswith('/target.txt'):
+                renamed = self.inbox_dir.parent / 'inbox_old'
+                if self.inbox_dir.exists() and not self.inbox_dir.is_symlink():
+                    self.inbox_dir.rename(renamed)
+                    self.inbox_dir.symlink_to(outside)
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch('os.open', side_effect=racy_open):
+            text = inbox.read_item(self.state, 'target.txt')
+            self.assertEqual(text, 'inside')
+
+    def test_read_item_wraps_fstat_and_read_os_errors_in_wiki_error(self):
+        (self.inbox_dir / 'err.txt').write_text('data')
+        with patch('os.fstat', side_effect=OSError('mocked fstat error')):
+            with self.assertRaisesRegex(WikiError, 'cannot inspect'):
+                inbox.read_item(self.state, 'err.txt')
+        with patch('os.read', side_effect=OSError('mocked read error')):
+            with self.assertRaisesRegex(WikiError, 'cannot read'):
+                inbox.read_item(self.state, 'err.txt')
+
+    def test_cli_dispatch_bypasses_ruwana_and_wiki(self):
+        (self.inbox_dir / 'probe.txt').write_text('data\n')
+        from pisar import cli
+        with patch('pisar.settings.ruwana', side_effect=AssertionError('ruwana called')), \
+             patch('pisar.spaces.Wiki', side_effect=AssertionError('Wiki called')):
+            code = cli.main(['--state-dir', str(self.state), 'inbox', 'read'])
+            self.assertEqual(code, 0)
+            code = cli.main(['--state-dir', str(self.state), 'inbox', 'read', '--id', 'probe.txt'])
+            self.assertEqual(code, 0)
 
     def test_cli_inbox_read_listing_and_content(self):
         (self.inbox_dir / 'hello.txt').write_text('world\n')

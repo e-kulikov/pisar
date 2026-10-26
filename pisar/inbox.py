@@ -31,16 +31,19 @@ def validate_id(name: str) -> str:
 def list_items(state_dir: Path | str) -> list[str]:
     """Return sorted filenames of regular files in <state-dir>/inbox/."""
     inbox_dir = Path(state_dir) / 'inbox'
-    if inbox_dir.is_symlink() or not inbox_dir.is_dir():
+    dir_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        dfd = os.open(inbox_dir, dir_flags)
+    except (FileNotFoundError, OSError):
         return []
     items = []
     try:
-        with os.scandir(inbox_dir) as entries:
+        with os.scandir(dfd) as entries:
             for entry in entries:
                 name = entry.name
-                if name.startswith('.'):
-                    continue
-                if any(ord(c) < 32 or ord(c) == 127 for c in name):
+                try:
+                    validate_id(name)
+                except WikiError:
                     continue
                 if entry.is_symlink():
                     continue
@@ -52,6 +55,8 @@ def list_items(state_dir: Path | str) -> list[str]:
                     continue
     except OSError:
         return []
+    finally:
+        os.close(dfd)
     return sorted(items)
 
 
@@ -59,37 +64,52 @@ def read_item(state_dir: Path | str, ident: str) -> str:
     """Read up to 64 KiB of UTF-8 content from <state-dir>/inbox/ID."""
     ident = validate_id(ident)
     inbox_dir = Path(state_dir) / 'inbox'
-    if inbox_dir.is_symlink():
-        raise WikiError(f'inbox directory {inbox_dir} must not be a symlink')
-    if not inbox_dir.is_dir():
-        raise WikiError(f'inbox directory {inbox_dir} does not exist')
-
-    target = inbox_dir / ident
-    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    dir_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
     try:
-        fd = os.open(target, flags)
+        dfd = os.open(inbox_dir, dir_flags)
     except FileNotFoundError:
-        raise WikiError(f'inbox item {ident} not found') from None
+        raise WikiError(f'inbox directory {inbox_dir} does not exist') from None
     except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise WikiError(f'inbox item {ident} is not a regular file') from None
-        raise WikiError(f'cannot open inbox item {ident}: {exc}') from None
+        if exc.errno == errno.ELOOP or inbox_dir.is_symlink():
+            raise WikiError(f'inbox directory {inbox_dir} must not be a symlink') from None
+        if exc.errno == errno.ENOTDIR:
+            raise WikiError(f'inbox directory {inbox_dir} is not a directory') from None
+        raise WikiError(f'cannot access inbox directory {inbox_dir}: {exc}') from None
 
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise WikiError(f'inbox item {ident} is not a regular file')
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        try:
+            fd = os.open(ident, flags, dir_fd=dfd)
+        except FileNotFoundError:
+            raise WikiError(f'inbox item {ident} not found') from None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise WikiError(f'inbox item {ident} is not a regular file') from None
+            raise WikiError(f'cannot open inbox item {ident}: {exc}') from None
 
-        chunks = []
-        total = 0
-        while total < BUFFER_LIMIT:
-            chunk = os.read(fd, BUFFER_LIMIT - total)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
+        try:
+            try:
+                st = os.fstat(fd)
+            except OSError as exc:
+                raise WikiError(f'cannot inspect inbox item {ident}: {exc}') from None
+            if not stat.S_ISREG(st.st_mode):
+                raise WikiError(f'inbox item {ident} is not a regular file')
+
+            chunks = []
+            total = 0
+            while total < BUFFER_LIMIT:
+                try:
+                    chunk = os.read(fd, BUFFER_LIMIT - total)
+                except OSError as exc:
+                    raise WikiError(f'cannot read inbox item {ident}: {exc}') from None
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(dfd)
 
     raw = b''.join(chunks)
     if len(raw) <= TRUNCATION_LIMIT:
