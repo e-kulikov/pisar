@@ -124,10 +124,17 @@ def main(argv=None):
             return run(settings.root(args.root), settings.state_dir(args.state_dir))
         if args._read_guard:
             try:
-                if not args.plugin_dir or not Path(args.plugin_dir).is_absolute() or not Path(args.plugin_dir).is_dir():
+                plugin_p = Path(args.plugin_dir) if args.plugin_dir else None
+                if not plugin_p or not plugin_p.is_absolute() or not plugin_p.is_dir() or plugin_p.is_symlink():
                     p.error('--_read-guard requires an absolute --plugin-dir directory')
-                root = settings.root(args.root)
                 state_dir = settings.state_dir(args.state_dir)
+                canonical_state = Path(state_dir).resolve()
+                chk = plugin_p
+                while chk != canonical_state and chk != chk.parent:
+                    if chk.is_symlink():
+                        p.error('--_read-guard requires a non-symlinked --plugin-dir path')
+                    chk = chk.parent
+                root = settings.root(args.root)
                 from .read_guard import run
                 return run(root, state_dir, args.plugin_dir)
             except SystemExit:

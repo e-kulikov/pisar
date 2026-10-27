@@ -325,6 +325,30 @@ class ReadGuardTests(unittest.TestCase):
             sys.stdin = old_stdin
         self.assertEqual(code, 2)
 
+    def test_plugin_parent_symlink_replacement_fails_closed(self):
+        # Finding 1 (review-task2-1.md):
+        # Rename plugin parent and replace with symlink to state/triage containing gen1/secret.txt
+        # Must fail closed with exit code 2 and must NOT grant access to secret.txt
+        import shutil
+        triage = self.state / 'triage'
+        triage.mkdir(parents=True, exist_ok=True)
+        triage_gen = triage / 'gen1'
+        triage_gen.mkdir(parents=True, exist_ok=True)
+        secret = triage_gen / 'secret.txt'
+        secret.write_text('triage secret')
+
+        plugin_parent = self.plugin.parent  # <state>/agents/claude/plugin
+        shutil.rmtree(plugin_parent)
+        plugin_parent.symlink_to(triage)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Read', 'cwd': str(self.root),
+            'tool_input': {'file_path': str(secret)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('pisar state must be read through pisar', err)
+
     def test_symlinked_lessons_dir_fails_closed_or_denies_access_to_destination(self):
         # Finding 2: symlink at <state>/lessons -> <state>/inbox must not allow reading inbox items
         inbox_dir = self.state / 'inbox'
@@ -376,6 +400,66 @@ class ReadGuardTests(unittest.TestCase):
         self.assertEqual(out, '')
         self.assertEqual(err.strip(),
                          'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_glob_wildcard_pattern_with_symlink_inside_plugin_denied(self):
+        # Finding 2 (review-task2-1.md):
+        # <plugin>/escape -> <state>/inbox, Glob(path=<plugin>, pattern="escape*/*.txt")
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape_link = self.plugin / 'escape'
+        escape_link.symlink_to(inbox_dir)
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': 'escape*/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_glob_outside_search_root_with_symlink_to_state_denied(self):
+        # Finding 2 (review-task2-1.md):
+        # <outside>/escape -> <state>/inbox, Glob(path=<outside>, pattern="escape/*.txt") and "escape*/*.txt"
+        outside_dir = self.base / 'outside_search'
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape_link = outside_dir / 'escape'
+        escape_link.symlink_to(inbox_dir)
+
+        for pat in ('escape/*.txt', 'escape*/*.txt'):
+            with self.subTest(pattern=pat):
+                code, out, err = self.run_guard({
+                    'tool_name': 'Glob', 'cwd': str(outside_dir),
+                    'tool_input': {'pattern': pat, 'path': str(outside_dir)}
+                })
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertEqual(err.strip(),
+                                 'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_glob_outside_search_root_with_symlink_to_wiki_denied(self):
+        # Finding 2:
+        # <outside>/escape_wiki -> <root>, Glob(path=<outside>, pattern="escape_wiki*/*.md")
+        outside_dir = self.base / 'outside_wiki_search'
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        doc = self.root / 'doc.md'
+        doc.write_text('wiki doc')
+        escape_link = outside_dir / 'escape_wiki'
+        escape_link.symlink_to(self.root)
+
+        for pat in ('escape_wiki/*.md', 'escape_wiki*/*.md'):
+            with self.subTest(pattern=pat):
+                code, out, err = self.run_guard({
+                    'tool_name': 'Glob', 'cwd': str(outside_dir),
+                    'tool_input': {'pattern': pat, 'path': str(outside_dir)}
+                })
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertEqual(err.strip(),
+                                 'pisar data must be read through pisar: use pisar read <root-relative-path>, pisar search <query>, or pisar inventory.')
 
     def test_all_tools_denied_on_sync_triage_and_staging(self):
         # Test Read, Glob, Grep on sync, triage, and staging

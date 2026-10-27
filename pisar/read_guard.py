@@ -4,6 +4,7 @@ Intercepts Read, Glob, and Grep tool calls to ensure pisar data and state are re
 only through pisar commands, while permitting access to the active plugin generation
 and lesson workspace.
 """
+import glob
 import json
 import os
 from pathlib import Path
@@ -58,13 +59,22 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
         canonical_state = Path(state_dir).resolve()
 
         plugin_path = Path(plugin_dir)
-        if plugin_path.is_symlink():
-            sys.stderr.write('read guard: plugin_dir cannot be a symlink\n')
-            return 2
         canonical_plugin = plugin_path.resolve()
-        if canonical_plugin == canonical_state or not canonical_plugin.is_relative_to(canonical_state):
-            sys.stderr.write('read guard: plugin_dir must be inside state directory\n')
-            return 2
+
+        chk = plugin_path
+        has_symlink = False
+        while chk != canonical_state and chk != chk.parent:
+            if chk.is_symlink():
+                has_symlink = True
+                break
+            chk = chk.parent
+
+        expected_plugin_parent = (canonical_state / 'agents' / 'claude' / 'plugin').resolve()
+        if (has_symlink or plugin_path.is_symlink() or not plugin_path.is_dir() or
+                not canonical_plugin.is_relative_to(canonical_state) or
+                canonical_plugin == canonical_state or
+                canonical_plugin.parent != expected_plugin_parent):
+            canonical_plugin = None
 
         lessons_path = canonical_state / 'lessons'
         if lessons_path.is_symlink() or not lessons_path.is_dir() or lessons_path.resolve() != lessons_path:
@@ -98,18 +108,43 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
                 raw_target = os.path.join(cwd, search_path)
             if '/' in pattern:
                 pattern_dir = os.path.dirname(pattern)
-                pattern_target = Path(raw_target) / pattern_dir
-                if pattern_target.exists():
-                    resolved_pattern = pattern_target.resolve()
-                    if Path(os.path.realpath(raw_target)).is_relative_to(canonical_plugin) and not resolved_pattern.is_relative_to(canonical_plugin):
-                        if resolved_pattern.is_relative_to(canonical_root):
-                            sys.stderr.write(f'{WIKI_HINT}\n')
-                            return 2
-                        if resolved_pattern.is_relative_to(canonical_state):
-                            sys.stderr.write(f'{STATE_HINT}\n')
-                            return 2
-                        sys.stderr.write('read guard: glob pattern escapes plugin directory\n')
-                        return 2
+                parts = pattern_dir.split('/')
+                current_dirs = [raw_target]
+                for part in parts:
+                    next_dirs = []
+                    for c in current_dirs:
+                        pattern_to_match = os.path.join(c, part)
+                        matches = glob.glob(pattern_to_match)
+                        if not matches and (os.path.isdir(pattern_to_match) or os.path.islink(pattern_to_match)):
+                            matches = [pattern_to_match]
+                        for m in matches:
+                            if os.path.isdir(m) or os.path.islink(m):
+                                resolved_m = Path(os.path.realpath(m))
+                                lexical_m = Path(os.path.abspath(m))
+
+                                # 1. Wiki target traversed
+                                if resolved_m.is_relative_to(canonical_root) or lexical_m.is_relative_to(canonical_root):
+                                    sys.stderr.write(f'{WIKI_HINT}\n')
+                                    return 2
+
+                                # 2. Check if search began in plugin
+                                if canonical_plugin is not None and Path(os.path.realpath(raw_target)).is_relative_to(canonical_plugin):
+                                    if not resolved_m.is_relative_to(canonical_plugin):
+                                        if resolved_m.is_relative_to(canonical_state):
+                                            sys.stderr.write(f'{STATE_HINT}\n')
+                                            return 2
+                                        sys.stderr.write('read guard: glob pattern escapes plugin directory\n')
+                                        return 2
+
+                                # 3. State target traversed (outside plugin)
+                                if resolved_m.is_relative_to(canonical_state) or lexical_m.is_relative_to(canonical_state):
+                                    if canonical_plugin is None or not resolved_m.is_relative_to(canonical_plugin):
+                                        sys.stderr.write(f'{STATE_HINT}\n')
+                                        return 2
+                                next_dirs.append(m)
+                    current_dirs = next_dirs
+                    if not current_dirs:
+                        break
         elif tool_name == 'Grep':
             pattern = tool_input.get('pattern')
             if pattern is not None and not isinstance(pattern, str):
@@ -138,7 +173,7 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
             return 2
 
         # Traversal out of plugin directory
-        if Path(cwd).resolve().is_relative_to(canonical_plugin):
+        if canonical_plugin is not None and Path(cwd).resolve().is_relative_to(canonical_plugin):
             if not lexical_path.is_relative_to(canonical_plugin):
                 if resolved_path.is_relative_to(canonical_root):
                     sys.stderr.write(f'{WIKI_HINT}\n')
@@ -150,20 +185,21 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
                 return 2
 
         # 2. Active plugin generation directory exception
-        if lexical_path.is_relative_to(canonical_plugin):
-            if not resolved_path.is_relative_to(canonical_plugin):
-                if resolved_path.is_relative_to(canonical_root):
-                    sys.stderr.write(f'{WIKI_HINT}\n')
+        if canonical_plugin is not None:
+            if lexical_path.is_relative_to(canonical_plugin):
+                if not resolved_path.is_relative_to(canonical_plugin):
+                    if resolved_path.is_relative_to(canonical_root):
+                        sys.stderr.write(f'{WIKI_HINT}\n')
+                        return 2
+                    if resolved_path.is_relative_to(canonical_state):
+                        sys.stderr.write(f'{STATE_HINT}\n')
+                        return 2
+                    sys.stderr.write('read guard: symlink escapes plugin directory\n')
                     return 2
-                if resolved_path.is_relative_to(canonical_state):
-                    sys.stderr.write(f'{STATE_HINT}\n')
-                    return 2
-                sys.stderr.write('read guard: symlink escapes plugin directory\n')
-                return 2
-            return 0
-        if resolved_path.is_relative_to(canonical_plugin) and not lexical_path.is_relative_to(canonical_state):
-            # Accessed from outside state via symlink pointing into plugin_dir
-            return 0
+                return 0
+            if resolved_path.is_relative_to(canonical_plugin) and not lexical_path.is_relative_to(canonical_state):
+                # Accessed from outside state via symlink pointing into plugin_dir
+                return 0
 
         # 3. Lesson workspace exception (Read tool only)
         if tool_name == 'Read' and canonical_lessons is not None:

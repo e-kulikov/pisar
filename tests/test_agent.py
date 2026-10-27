@@ -497,6 +497,14 @@ class AgentTests(Fixture):
         self.assertEqual(p.returncode, 2)
         self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
 
+        # Symlinked --plugin-dir
+        sym_plugin = self.base / 'sym_plugin'
+        sym_plugin.symlink_to(self.state)
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state,
+                           '--plugin-dir', str(sym_plugin), '--_read-guard', ok=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
+
     def test_guard_cli_argument_mutual_exclusion(self):
         cases = [
             (('--agent', 'claude', '--_read-guard'), '--_read-guard cannot be combined'),
