@@ -159,6 +159,13 @@ class AgentTests(Fixture):
         self.assertEqual(argv[argv.index('--system-prompt') + 1], prompt)
         self.assertNotIn('--system-prompt-file', argv)
 
+    def test_readme_documents_inbox_read_and_read_guard_restrictions(self):
+        readme = (CHECKOUT / 'README.md').read_text(encoding='utf-8')
+        self.assertIn('pisar inbox read', readme)
+        self.assertIn('read guard', readme)
+        self.assertIn('--plugin-dir', readme)
+        self.assertNotIn('it can still read and edit files in the repository', readme)
+
     def test_tools_are_minimal_and_mcp_is_disabled(self):
         _, call = self.launch()
         argv = call['argv']

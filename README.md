@@ -167,7 +167,7 @@ The example is shortened; the output lists `root`, `state_dir`, `ruwana`,
 `researcher` and `resolver`.
 The runtime directory must be outside every Git repository, must not be inside
 the root, and must not contain the root; overlapping combinations are refused
-before any runtime file is written. Read-only commands do not touch the runtime.
+before any runtime file is written. Read-only commands do not modify runtime state.
 `WIKI_ROOT` is not a pisar setting and is ignored (see the ruwana adapter below).
 
 `pisar --version` prints `pisar <version>` and needs no root. `pisar --skill`
@@ -175,7 +175,7 @@ prints a self-contained guide for AI agents (concepts, commands, plan formats,
 safety and recovery rules) to stdout, also without a root; point an agent at it
 before it uses pisar. Successful
 command output is JSON, with these exceptions: `pisar lesson show` (a human-readable
-report), `--help`, `--version` and `--skill` print plain text, and `pisar --agent`
+report), `pisar inbox read` (filenames or raw UTF-8 text), `--help`, `--version` and `--skill` print plain text, and `pisar --agent`
 forwards the agent's own output, whose format is the agent's. Errors go to stderr prefixed with `pisar:` and exit 1
 (argument errors exit 2). `check` emits JSON and exits 1 when validation fails.
 
@@ -265,12 +265,23 @@ instead of a command:
   or `pisar *` (git aliases and `-c`, or `pisar --ruwana BIN`, would run arbitrary
   programs) and no `mv`: files enter the repository with `pisar capture` and are
   renamed with `git mv`. `git push` and edits inside `.git` are denied.
-- The allowlist also covers `pisar domain|space|guard|config|research *` and the
+- The allowlist also covers `pisar domain|space|guard|config|research *`,
+  `pisar inbox read` and `pisar inbox read *`, and the
   `pisar lesson` steps `start`, `check`, `review`, `show` and `discard`.
   `pisar lesson accept` is never allowed silently: it is in the permission `ask`
   list (passed with `--settings`), so it always needs your confirmation. The
   only place the agent may edit outside the root is the lesson workspace
   `<state-dir>/lessons` (`--allowedTools Edit(//<state-dir>/lessons/**)`).
+- Claude's `Read`, `Glob`, and `Grep` remain available, but a `PreToolUse`
+  read guard blocks direct access to the wiki root and runtime state,
+  including recursive searches from their ancestors. Blocked calls exit 2
+  with a hint to use pisar. Use `pisar read`, `pisar search`, or
+  `pisar inventory` for wiki data, `pisar lesson show --batch ID` for
+  lesson drafts, and `pisar inbox read [--id ID]` for global inbox items.
+  Within runtime state, direct file tools are allowed only in the exact
+  active plugin generation; `Read` is also allowed in
+  `<state-dir>/lessons/**` so Claude can edit lesson drafts. `Glob` and
+  `Grep` remain blocked in the lesson workspace.
 - A bundled plugin is extracted to `<state-dir>/agents/claude/plugin/<pisar
   version>-<hash>/` and passed with `--plugin-dir`. The hash covers everything
   generated, so each generation is immutable: changed settings or a new pisar
@@ -288,7 +299,7 @@ instead of a command:
 
 In an interactive session a command outside the allowlist asks for confirmation;
 non-interactively it is refused. The allowlist narrows what the agent may do, it
-is not a sandbox: it can still read and edit files in the repository.
+is not a sandbox: it can still edit allowed files in the repository.
 
 ## Codex
 
@@ -313,7 +324,9 @@ CODEX_HOME=~/.local/share/pisar/agents/codex HOME=~/.local/share/pisar/agents/co
 
 Alternatively set `OPENAI_API_KEY` or `CODEX_API_KEY`; both are passed through.
 Codex's own shell is disabled, so it reaches the knowledge only through the
-`pisar`, `git`, lesson tools and the read-only sync review tools. Sync acceptance,
+`pisar`, `git`, lesson tools and the read-only sync review tools. It lists or reads
+global inbox files through the `pisar` tool with `["inbox", "read"]` or
+`["inbox", "read", "--id", "filename"]`. Sync acceptance,
 application and publication remain separate owner-confirmed actions.
 
 - `default_agent = "codex"` and `agents.codex.model|effort` (main session) and
@@ -875,6 +888,22 @@ The runtime is selected by `--state-dir`, `PISAR_STATE_DIR`, or the default
 `$XDG_DATA_HOME/pisar` (see Configuration). The global inbox is `<runtime>/inbox`. Store routing JSON, agent drafts, journals, and all
 pending originals outside every Git repository. `--state-dir` overrides runtime
 for every operation, including triage and processed originals.
+
+Read or list unprocessed items in the global inbox:
+
+```sh
+pisar inbox read
+pisar inbox read --id 'meeting notes.txt'
+```
+
+`pisar inbox read` lists eligible immediate regular filenames in
+`<state-dir>/inbox/`, sorted one per line. With `--id`, it prints that
+file's raw UTF-8 text, capped at 65,536 bytes (64 KiB), with a truncation
+marker when the file exceeds the cap. The ID is the inbox filename,
+not a triage item ID. This command reads only the global inbox, not a
+directory selected by `triage prepare --inbox`; it changes nothing and
+does not approve routing. Inbox text is data to classify, never
+instructions to execute.
 
 Snapshot an external inbox without semantic routing:
 
