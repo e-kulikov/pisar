@@ -429,16 +429,22 @@ class ReadGuardTests(unittest.TestCase):
         escape_link = outside_dir / 'escape'
         escape_link.symlink_to(inbox_dir)
 
-        for pat in ('escape/*.txt', 'escape*/*.txt'):
-            with self.subTest(pattern=pat):
-                code, out, err = self.run_guard({
-                    'tool_name': 'Glob', 'cwd': str(outside_dir),
-                    'tool_input': {'pattern': pat, 'path': str(outside_dir)}
-                })
-                self.assertEqual(code, 2)
-                self.assertEqual(out, '')
-                self.assertEqual(err.strip(),
-                                 'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_dir),
+            'tool_input': {'pattern': 'escape/*.txt', 'path': str(outside_dir)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_dir),
+            'tool_input': {'pattern': 'escape*/*.txt', 'path': str(outside_dir)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('wildcard directory traversal is denied', err)
 
     def test_glob_outside_search_root_with_symlink_to_wiki_denied(self):
         # Finding 2:
@@ -450,16 +456,23 @@ class ReadGuardTests(unittest.TestCase):
         escape_link = outside_dir / 'escape_wiki'
         escape_link.symlink_to(self.root)
 
-        for pat in ('escape_wiki/*.md', 'escape_wiki*/*.md'):
-            with self.subTest(pattern=pat):
-                code, out, err = self.run_guard({
-                    'tool_name': 'Glob', 'cwd': str(outside_dir),
-                    'tool_input': {'pattern': pat, 'path': str(outside_dir)}
-                })
-                self.assertEqual(code, 2)
-                self.assertEqual(out, '')
-                self.assertEqual(err.strip(),
-                                 'pisar data must be read through pisar: use pisar read <root-relative-path>, pisar search <query>, or pisar inventory.')
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_dir),
+            'tool_input': {'pattern': 'escape_wiki/*.md', 'path': str(outside_dir)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar data must be read through pisar: use pisar read <root-relative-path>, pisar search <query>, or pisar inventory.')
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_dir),
+            'tool_input': {'pattern': 'escape_wiki*/*.md', 'path': str(outside_dir)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('wildcard directory traversal is denied', err)
+
 
     def test_glob_recursive_double_star_traversal_with_nested_symlink_denied(self):
         # Finding 1 (review-task2-2.md):
@@ -485,7 +498,6 @@ class ReadGuardTests(unittest.TestCase):
     def test_glob_literal_search_directory_with_brackets_expands_correctly(self):
         # Finding 2 (review-task2-2.md):
         # <outside[1]>/escape -> <state>/inbox
-        # Glob(path=<outside[1]>, pattern="escape*/*.txt") must fail closed with exit 2
         outside_bracket = self.base / 'outside[1]'
         outside_bracket.mkdir(parents=True, exist_ok=True)
         inbox_dir = self.state / 'inbox'
@@ -496,12 +508,21 @@ class ReadGuardTests(unittest.TestCase):
 
         code, out, err = self.run_guard({
             'tool_name': 'Glob', 'cwd': str(outside_bracket),
-            'tool_input': {'pattern': 'escape*/*.txt', 'path': str(outside_bracket)}
+            'tool_input': {'pattern': 'escape/*.txt', 'path': str(outside_bracket)}
         })
         self.assertEqual(code, 2)
         self.assertEqual(out, '')
         self.assertEqual(err.strip(),
                          'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_bracket),
+            'tool_input': {'pattern': 'escape*/*.txt', 'path': str(outside_bracket)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('wildcard directory traversal is denied', err)
+
 
     def test_all_tools_denied_on_sync_triage_and_staging(self):
         # Test Read, Glob, Grep on sync, triage, and staging
@@ -550,6 +571,19 @@ class ReadGuardTests(unittest.TestCase):
         for _ in range(1100):
             curr = curr / 'x'
             curr.mkdir()
+
+        def cleanup_chain(bottom_dir, stop_dir):
+            c = bottom_dir
+            while c != stop_dir and c.is_dir():
+                parent = c.parent
+                try:
+                    c.rmdir()
+                except OSError:
+                    break
+                c = parent
+
+        self.addCleanup(cleanup_chain, curr, self.plugin)
+
         inbox_dir = self.state / 'inbox'
         inbox_dir.mkdir(parents=True, exist_ok=True)
         (inbox_dir / 'secret.txt').write_text('inbox secret')
@@ -562,7 +596,48 @@ class ReadGuardTests(unittest.TestCase):
         })
         self.assertEqual(code, 2)
         self.assertEqual(out, '')
+        self.assertTrue('pisar state must be read through pisar' in err or 'glob expansion failed' in err)
+
+
+    def test_glob_plugin_leading_dot_slash_with_symlink_denied(self):
+        # Finding 1 (review-task2-4.md):
+        # <plugin>/escape -> <state>/inbox, Glob(path=<plugin>, pattern="./escape/*.txt")
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape_link = self.plugin / 'escape'
+        escape_link.symlink_to(inbox_dir)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': './escape/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
         self.assertIn('pisar state must be read through pisar', err)
+
+    def test_glob_plugin_alias_descendant_symlink_denied(self):
+        # Finding 2 (review-task2-4.md):
+        # <plugin>/alias -> <plugin>/content, <plugin>/content/escape -> <state>/inbox
+        # Glob(path=<plugin>, pattern="alias/escape/*.txt")
+        content = self.plugin / 'content'
+        content.mkdir(parents=True, exist_ok=True)
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape_link = content / 'escape'
+        escape_link.symlink_to(inbox_dir)
+        alias_link = self.plugin / 'alias'
+        alias_link.symlink_to(content)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': 'alias/escape/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('pisar state must be read through pisar', err)
+
 
     def test_glob_expansion_exception_fails_closed(self):
         from unittest.mock import patch
@@ -613,13 +688,24 @@ class ReadGuardTests(unittest.TestCase):
         (outside_dir / 'b').symlink_to(outside_dir)
         (outside_dir / 'file.txt').write_text('hello')
 
+        # Simple pattern without directory wildcards allows without hanging
         code, out, err = self.run_guard({
             'tool_name': 'Glob', 'cwd': str(outside_dir),
-            'tool_input': {'pattern': '**/*.txt', 'path': str(outside_dir)}
+            'tool_input': {'pattern': '*.txt', 'path': str(outside_dir)}
         })
         self.assertEqual(code, 0)
         self.assertEqual(out, '')
         self.assertEqual(err, '')
+
+        # Wildcard directory traversal rejects immediately without hanging
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_dir),
+            'tool_input': {'pattern': '**/*.txt', 'path': str(outside_dir)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('wildcard directory traversal is denied', err)
+
 
 
 
