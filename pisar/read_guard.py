@@ -106,45 +106,48 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
                 raw_target = search_path
             else:
                 raw_target = os.path.join(cwd, search_path)
-            if '/' in pattern:
-                pattern_dir = os.path.dirname(pattern)
-                parts = pattern_dir.split('/')
-                current_dirs = [raw_target]
-                for part in parts:
-                    next_dirs = []
-                    for c in current_dirs:
-                        pattern_to_match = os.path.join(c, part)
-                        matches = glob.glob(pattern_to_match)
-                        if not matches and (os.path.isdir(pattern_to_match) or os.path.islink(pattern_to_match)):
-                            matches = [pattern_to_match]
-                        for m in matches:
-                            if os.path.isdir(m) or os.path.islink(m):
-                                resolved_m = Path(os.path.realpath(m))
-                                lexical_m = Path(os.path.abspath(m))
+            if os.path.isdir(raw_target):
+                candidates = set()
+                try:
+                    for m in glob.glob(pattern, root_dir=raw_target, recursive=True, include_hidden=True):
+                        candidates.add(m)
+                except Exception:
+                    pass
+                if '/' in pattern:
+                    pattern_dir = os.path.dirname(pattern)
+                    try:
+                        for d in glob.glob(pattern_dir, root_dir=raw_target, recursive=True, include_hidden=True):
+                            candidates.add(d)
+                    except Exception:
+                        pass
 
-                                # 1. Wiki target traversed
-                                if resolved_m.is_relative_to(canonical_root) or lexical_m.is_relative_to(canonical_root):
-                                    sys.stderr.write(f'{WIKI_HINT}\n')
+                for m in candidates:
+                    curr = Path(raw_target) / m
+                    while curr != Path(raw_target) and curr != curr.parent:
+                        resolved_m = curr.resolve()
+                        lexical_m = Path(os.path.abspath(curr))
+
+                        # 1. Wiki target traversed
+                        if resolved_m.is_relative_to(canonical_root) or lexical_m.is_relative_to(canonical_root):
+                            sys.stderr.write(f'{WIKI_HINT}\n')
+                            return 2
+
+                        # 2. Check if search began in plugin
+                        if canonical_plugin is not None and Path(os.path.realpath(raw_target)).is_relative_to(canonical_plugin):
+                            if not resolved_m.is_relative_to(canonical_plugin):
+                                if resolved_m.is_relative_to(canonical_state):
+                                    sys.stderr.write(f'{STATE_HINT}\n')
                                     return 2
+                                sys.stderr.write('read guard: glob pattern escapes plugin directory\n')
+                                return 2
 
-                                # 2. Check if search began in plugin
-                                if canonical_plugin is not None and Path(os.path.realpath(raw_target)).is_relative_to(canonical_plugin):
-                                    if not resolved_m.is_relative_to(canonical_plugin):
-                                        if resolved_m.is_relative_to(canonical_state):
-                                            sys.stderr.write(f'{STATE_HINT}\n')
-                                            return 2
-                                        sys.stderr.write('read guard: glob pattern escapes plugin directory\n')
-                                        return 2
+                        # 3. State target traversed (outside plugin)
+                        if resolved_m.is_relative_to(canonical_state) or lexical_m.is_relative_to(canonical_state):
+                            if canonical_plugin is None or not resolved_m.is_relative_to(canonical_plugin):
+                                sys.stderr.write(f'{STATE_HINT}\n')
+                                return 2
 
-                                # 3. State target traversed (outside plugin)
-                                if resolved_m.is_relative_to(canonical_state) or lexical_m.is_relative_to(canonical_state):
-                                    if canonical_plugin is None or not resolved_m.is_relative_to(canonical_plugin):
-                                        sys.stderr.write(f'{STATE_HINT}\n')
-                                        return 2
-                                next_dirs.append(m)
-                    current_dirs = next_dirs
-                    if not current_dirs:
-                        break
+                        curr = curr.parent
         elif tool_name == 'Grep':
             pattern = tool_input.get('pattern')
             if pattern is not None and not isinstance(pattern, str):

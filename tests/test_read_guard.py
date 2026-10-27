@@ -461,6 +461,48 @@ class ReadGuardTests(unittest.TestCase):
                 self.assertEqual(err.strip(),
                                  'pisar data must be read through pisar: use pisar read <root-relative-path>, pisar search <query>, or pisar inventory.')
 
+    def test_glob_recursive_double_star_traversal_with_nested_symlink_denied(self):
+        # Finding 1 (review-task2-2.md):
+        # <plugin>/assets/nested/escape -> <state>/inbox containing secret.txt
+        # Glob(path=<plugin>, pattern="**/*.txt") must fail closed with exit 2 and state hint
+        nested = self.plugin / 'assets' / 'nested'
+        nested.mkdir(parents=True, exist_ok=True)
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape = nested / 'escape'
+        escape.symlink_to(inbox_dir)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
+    def test_glob_literal_search_directory_with_brackets_expands_correctly(self):
+        # Finding 2 (review-task2-2.md):
+        # <outside[1]>/escape -> <state>/inbox
+        # Glob(path=<outside[1]>, pattern="escape*/*.txt") must fail closed with exit 2
+        outside_bracket = self.base / 'outside[1]'
+        outside_bracket.mkdir(parents=True, exist_ok=True)
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape = outside_bracket / 'escape'
+        escape.symlink_to(inbox_dir)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_bracket),
+            'tool_input': {'pattern': 'escape*/*.txt', 'path': str(outside_bracket)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar state must be read through pisar: use pisar lesson show --batch ID for lesson drafts or pisar inbox read --id ID for global inbox items.')
+
     def test_all_tools_denied_on_sync_triage_and_staging(self):
         # Test Read, Glob, Grep on sync, triage, and staging
         staging = self.state / 'agents' / 'claude' / 'plugin' / '.build.tmp-test'
