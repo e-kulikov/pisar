@@ -542,6 +542,87 @@ class ReadGuardTests(unittest.TestCase):
                 self.assertEqual(out, '')
                 self.assertEqual(err, '')
 
+    def test_glob_expansion_failure_fails_closed_with_status_2(self):
+        # Finding 1 (review-task2-3.md):
+        # Deep directory chain in plugin with a symlink to state inbox.
+        # Glob expansion failure must fail closed with exit 2, never returning 0.
+        curr = self.plugin
+        for _ in range(1100):
+            curr = curr / 'x'
+            curr.mkdir()
+        inbox_dir = self.state / 'inbox'
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        (inbox_dir / 'secret.txt').write_text('inbox secret')
+        escape_link = self.plugin / 'escape'
+        escape_link.symlink_to(inbox_dir)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('pisar state must be read through pisar', err)
+
+    def test_glob_expansion_exception_fails_closed(self):
+        from unittest.mock import patch
+        with patch('os.walk', side_effect=OSError('filesystem error')):
+            code, out, err = self.run_guard({
+                'tool_name': 'Glob', 'cwd': str(self.plugin),
+                'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
+            })
+            self.assertEqual(code, 2)
+            self.assertEqual(out, '')
+            self.assertIn('glob expansion failed', err)
+
+    def test_glob_entry_limit_exceeded_fails_closed(self):
+        from unittest.mock import patch
+        fake_dirs = [f'd{i}' for i in range(10001)]
+        with patch('os.walk', return_value=[(str(self.plugin), fake_dirs, [])]):
+            code, out, err = self.run_guard({
+                'tool_name': 'Glob', 'cwd': str(self.plugin),
+                'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
+            })
+            self.assertEqual(code, 2)
+            self.assertEqual(out, '')
+            self.assertIn('glob expansion exceeded entry limit', err)
+
+
+    def test_glob_wiki_root_with_symlink_cycle_denies_instantly_with_wiki_hint(self):
+        # Finding 2 (review-task2-3.md):
+        # Wiki containing directory symlinks a -> <wiki> and b -> <wiki>.
+        # Direct path denial on <wiki> must reject before recursive enumeration.
+        (self.root / 'a').symlink_to(self.root)
+        (self.root / 'b').symlink_to(self.root)
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.root),
+            'tool_input': {'pattern': '**/*.txt', 'path': str(self.root)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertEqual(err.strip(),
+                         'pisar data must be read through pisar: use pisar read <root-relative-path>, pisar search <query>, or pisar inventory.')
+
+    def test_glob_outside_search_root_with_symlink_cycle_does_not_hang(self):
+        # Finding 2 (review-task2-3.md):
+        # Outside directory containing symlink cycle must not hang.
+        outside_dir = self.base / 'outside_cycle'
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        (outside_dir / 'a').symlink_to(outside_dir)
+        (outside_dir / 'b').symlink_to(outside_dir)
+        (outside_dir / 'file.txt').write_text('hello')
+
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(outside_dir),
+            'tool_input': {'pattern': '**/*.txt', 'path': str(outside_dir)}
+        })
+        self.assertEqual(code, 0)
+        self.assertEqual(out, '')
+        self.assertEqual(err, '')
+
+
+
 
 if __name__ == '__main__':
     unittest.main()
