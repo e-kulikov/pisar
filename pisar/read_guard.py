@@ -7,6 +7,7 @@ and lesson workspace.
 import glob
 import json
 import os
+import stat
 from pathlib import Path
 import posixpath
 import sys
@@ -202,15 +203,18 @@ def run(root: str | Path, state_dir: str | Path, plugin_dir: str | Path) -> int:
             MAX_PLUGIN_ENTRIES = 10000
             entry_count = 0
             found_symlinks = []
+            def walk_error(error):
+                raise error
+
             try:
-                for root_dir, dirs, files in os.walk(canonical_plugin, followlinks=False):
+                for root_dir, dirs, files in os.walk(canonical_plugin, followlinks=False, onerror=walk_error):
                     for name in dirs + files:
                         entry_count += 1
                         if entry_count > MAX_PLUGIN_ENTRIES:
                             sys.stderr.write('read guard: glob expansion exceeded entry limit\n')
                             return 2
                         p = Path(root_dir) / name
-                        if p.is_symlink():
+                        if stat.S_ISLNK(os.lstat(p).st_mode):
                             found_symlinks.append(p)
             except Exception as error:
                 sys.stderr.write(f'read guard: glob expansion failed: {error}\n')

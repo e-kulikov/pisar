@@ -563,41 +563,41 @@ class ReadGuardTests(unittest.TestCase):
                 self.assertEqual(out, '')
                 self.assertEqual(err, '')
 
-    def test_glob_expansion_failure_fails_closed_with_status_2(self):
-        # Finding 1 (review-task2-3.md):
-        # Deep directory chain in plugin with a symlink to state inbox.
-        # Glob expansion failure must fail closed with exit 2, never returning 0.
-        curr = self.plugin
-        for _ in range(1100):
-            curr = curr / 'x'
-            curr.mkdir()
-
-        def cleanup_chain(bottom_dir, stop_dir):
-            c = bottom_dir
-            while c != stop_dir and c.is_dir():
-                parent = c.parent
-                try:
-                    c.rmdir()
-                except OSError:
-                    break
-                c = parent
-
-        self.addCleanup(cleanup_chain, curr, self.plugin)
-
+    def _unreadable_plugin_dir(self, mode):
+        if os.geteuid() == 0:
+            self.skipTest('permission errors are not raised for root')
         inbox_dir = self.state / 'inbox'
         inbox_dir.mkdir(parents=True, exist_ok=True)
         (inbox_dir / 'secret.txt').write_text('inbox secret')
-        escape_link = self.plugin / 'escape'
-        escape_link.symlink_to(inbox_dir)
+        sub = self.plugin / 'unreadable'
+        sub.mkdir()
+        (sub / 'escape').symlink_to(inbox_dir)
+        sub.chmod(mode)
+        self.addCleanup(sub.chmod, 0o700)
 
-        code, out, err = self.run_guard({
-            'tool_name': 'Glob', 'cwd': str(self.plugin),
-            'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
-        })
-        self.assertEqual(code, 2)
-        self.assertEqual(out, '')
-        self.assertTrue('pisar state must be read through pisar' in err or 'glob expansion failed' in err)
+    def test_unlistable_plugin_directory_fails_closed(self):
+        # review-task2-5.md finding 1: os.walk hides scandir errors.
+        self._unreadable_plugin_dir(0o000)
+        for tool, inp in (('Glob', {'pattern': '**/*.txt'}), ('Grep', {'pattern': 'x'})):
+            with self.subTest(tool=tool):
+                inp = dict(inp, path=str(self.plugin))
+                code, out, err = self.run_guard({
+                    'tool_name': tool, 'cwd': str(self.plugin), 'tool_input': inp})
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertNotEqual(err, '')
 
+    def test_unstatable_plugin_entry_fails_closed(self):
+        # Listing works but lstat fails (mode r--): Path.is_symlink() hides it.
+        self._unreadable_plugin_dir(0o400)
+        for tool, inp in (('Glob', {'pattern': '**/*.txt'}), ('Grep', {'pattern': 'x'})):
+            with self.subTest(tool=tool):
+                inp = dict(inp, path=str(self.plugin))
+                code, out, err = self.run_guard({
+                    'tool_name': tool, 'cwd': str(self.plugin), 'tool_input': inp})
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertNotEqual(err, '')
 
     def test_glob_plugin_leading_dot_slash_with_symlink_denied(self):
         # Finding 1 (review-task2-4.md):
@@ -651,16 +651,15 @@ class ReadGuardTests(unittest.TestCase):
             self.assertIn('glob expansion failed', err)
 
     def test_glob_entry_limit_exceeded_fails_closed(self):
-        from unittest.mock import patch
-        fake_dirs = [f'd{i}' for i in range(10001)]
-        with patch('os.walk', return_value=[(str(self.plugin), fake_dirs, [])]):
-            code, out, err = self.run_guard({
-                'tool_name': 'Glob', 'cwd': str(self.plugin),
-                'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
-            })
-            self.assertEqual(code, 2)
-            self.assertEqual(out, '')
-            self.assertIn('glob expansion exceeded entry limit', err)
+        for i in range(10001):
+            (self.plugin / f'f{i}').touch()
+        code, out, err = self.run_guard({
+            'tool_name': 'Glob', 'cwd': str(self.plugin),
+            'tool_input': {'pattern': '**/*.txt', 'path': str(self.plugin)}
+        })
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertIn('glob expansion exceeded entry limit', err)
 
 
     def test_glob_wiki_root_with_symlink_cycle_denies_instantly_with_wiki_hint(self):
