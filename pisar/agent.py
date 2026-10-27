@@ -31,6 +31,7 @@ CLAUDE_ALLOWED = (
     'Bash(pisar spaces*)', 'Bash(pisar check*)', 'Bash(pisar search *)',
     'Bash(pisar read *)', 'Bash(pisar inventory*)', 'Bash(pisar capture *)',
     'Bash(pisar save *)', 'Bash(pisar triage *)',
+    'Bash(pisar inbox read)', 'Bash(pisar inbox read *)',
     'Bash(pisar domain *)', 'Bash(pisar space *)', 'Bash(pisar guard *)',
     'Bash(pisar config *)', 'Bash(pisar research *)',
     # Sync pull/publish are bounded CLI actions governed by the user's configured

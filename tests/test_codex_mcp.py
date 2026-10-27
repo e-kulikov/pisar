@@ -594,7 +594,34 @@ class McpTests(Fixture):
             self.assertTrue(prefix)
         self.assertNotIn(('lesson',), mcp.PISAR)
         self.assertNotIn(('lesson', 'accept'), mcp.PISAR)
+        self.assertNotIn(('inbox',), mcp.PISAR)
+        self.assertIn(('inbox', 'read'), mcp.PISAR)
         self.assertEqual(set(mcp.GIT), {'status', 'diff', 'log', 'add', 'commit', 'mv'})
+
+    def test_inbox_read_mcp_dispatch_and_description(self):
+        (self.state / 'inbox').mkdir(parents=True, exist_ok=True)
+        (self.state / 'inbox' / 'item1.txt').write_text('content1\n')
+        client = self.server()
+        try:
+            tools = client.request('tools/list')['result']['tools']
+            pisar_tool = next(t for t in tools if t['name'] == 'pisar')
+            self.assertIn('inbox', pisar_tool['description'])
+
+            # Listing call
+            text, is_error = client.text('pisar', ['inbox', 'read'])
+            self.assertFalse(is_error)
+            self.assertEqual(text, 'item1.txt\n')
+
+            # Read item call
+            text, is_error = client.text('pisar', ['inbox', 'read', '--id', 'item1.txt'])
+            self.assertFalse(is_error)
+            self.assertEqual(text, 'content1\n')
+
+            # Unapproved subcommands refused
+            text, is_error = client.text('pisar', ['inbox', 'write'])
+            self.assertTrue(is_error)
+        finally:
+            client.close()
 
 
 if __name__ == '__main__':

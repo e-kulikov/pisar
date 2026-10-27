@@ -630,6 +630,61 @@ class AgentTests(Fixture):
         reviewer_text = (default / 'agents/lesson-reviewer.md').read_text()
         self.assertIn('You review only the supplied text given in your prompt. Do not attempt to read files directly.', reviewer_text)
 
+    def test_inbox_read_allowlist_rules_and_arbitrary_code_prohibition(self):
+        """Satisfies Finding 7: Show new allowlist rules cannot run arbitrary code.
+        Because agent_guard returns 0 early when no reservation is pending, the Claude permission matcher
+        is the sole gate; verify only bounded prefixes are allowed, and no wildcards or arbitrary code gates exist."""
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        self.assertIn('Bash(pisar inbox read)', allowed)
+        self.assertIn('Bash(pisar inbox read *)', allowed)
+        self.assertNotIn('Bash(pisar inbox *)', allowed)
+        self.assertNotIn('Bash(pisar inbox)', allowed)
+        for rule in allowed:
+            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ', 'Edit(//', 'Agent(', 'Skill(')), rule)
+            self.assertNotIn(rule, ('Bash(git *)', 'Bash(pisar *)', 'Bash(pisar inbox *)', 'Bash(*)'))
+
+    def test_agent_guard_allows_tool_when_no_reservation_pending(self):
+        """Satisfies Finding 7: agent_guard returns 0 early when no sync reservation is pending;
+        the Claude permission matcher (--allowedTools) is the only gate against arbitrary commands in that case."""
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        mutation_hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        res = subprocess.run(mutation_hook, shell=True,
+                             input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'pisar inbox read'}}),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_sync_guard_exempts_inbox_read_during_pending_sync(self):
+        """Satisfies Finding 5 & 7: test agent_guard.run with pending reservation and composition rejection."""
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir(parents=True, exist_ok=True)
+        operations.write_json(folder / 'sync-op.json',
+                              {'operation_id': 'sync-op', 'root': str(self.root.resolve()), 'status': 'prepared'})
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        mutation_hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+
+        # Allowed read actions during pending sync
+        for cmd in ('pisar inbox read', 'pisar inbox read --id item.txt', 'pisar inbox read --id "with spaces.md"'):
+            with self.subTest(cmd=cmd):
+                res = subprocess.run(mutation_hook, shell=True,
+                                     input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                                     text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
+        # Mutating, composition, or unapproved commands still blocked
+        for bad_cmd in ('git add .', 'pisar inbox delete --id item.txt', 'pisar inbox *',
+                        'pisar inbox read --id x; rm -rf y', 'pisar inbox read --id x && id',
+                        'pisar inbox read --id $(id)'):
+            with self.subTest(bad_cmd=bad_cmd):
+                res = subprocess.run(mutation_hook, shell=True,
+                                     input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': bad_cmd}}),
+                                     text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(res.returncode, 2)
+
 
 
 class CodexAllowlistTests(unittest.TestCase):
@@ -655,9 +710,16 @@ class CodexAllowlistTests(unittest.TestCase):
         with self.assertRaises(mcp.Refused):
             mcp.check_git([], self.root)
         for args in ([], ['git', 'status'], ['sh', '-c', 'true'], ['python3', '-c', 'print(1)'],
-                     ['mv', 'a', 'b'], ['lesson', 'accept', '--batch', 'x']):
+                     ['mv', 'a', 'b'], ['lesson', 'accept', '--batch', 'x'],
+                     ['inbox'], ['inbox', 'write'], ['inbox', '*']):
             with self.subTest(args=args), self.assertRaises(mcp.Refused):
                 mcp.check_pisar(args)
+
+    def test_inbox_read_is_allowed(self):
+        from pisar import mcp
+        self.assertEqual(mcp.check_pisar(['inbox', 'read']), ['inbox', 'read'])
+        self.assertEqual(mcp.check_pisar(['inbox', 'read', '--id', 'item.txt']),
+                         ['inbox', 'read', '--id', 'item.txt'])
 
     def test_pisar_ruwana_and_other_global_options_are_refused_anywhere(self):
         from pisar import mcp
