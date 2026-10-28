@@ -53,6 +53,11 @@ class SkillTests(Fixture):
                         r'herdr', r'\bcodex\b', r'~/'):
             self.assertIsNone(re.search(pattern, text, re.I), pattern)
 
+    def test_skill_documents_read_guard_and_inbox_classification(self):
+        text = self.skill().stdout
+        self.assertIn('read guard', text)
+        self.assertIn('data to classify', text)
+
     def test_skill_matches_the_packaged_source_file(self):
         self.assertEqual(self.skill().stdout, (CHECKOUT / 'pisar/skill.md').read_text(encoding='utf-8'))
 

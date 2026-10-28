@@ -27,7 +27,7 @@ TIMEOUT = 1800
 # The pisar subcommands the agent may run, as argument prefixes. `lesson accept` is not here:
 # it is `lesson_accept`, which always asks the user (see Server.accept).
 PISAR = (('spaces',), ('check',), ('search',), ('read',), ('inventory',), ('capture',), ('save',),
-         ('triage',), ('domain',), ('space',), ('guard',), ('config',), ('research',),
+         ('triage',), ('inbox', 'read'), ('domain',), ('space',), ('guard',), ('config',), ('research',),
          ('lesson', 'start'), ('lesson', 'check'), ('lesson', 'review'), ('lesson', 'show'),
          ('lesson', 'discard'))
 ACCEPT = ('lesson', 'accept')
@@ -88,7 +88,9 @@ def _tool(name, description, schema=SCHEMA_ARGS):
 
 TOOLS = (
     _tool('pisar', 'Run an allowed pisar command. Pass the arguments after `pisar` as a list, '
-                   'e.g. ["search", "--space", "work/alpha", "launch"]. Global options are never accepted.'),
+                   'e.g. ["search", "--space", "work/alpha", "launch"] or '
+                   '["inbox", "read"] / ["inbox", "read", "--id", "filename"]. '
+                   'Global options are never accepted.'),
     _tool('git', 'Run git in the knowledge root. Allowed: status, diff, log (read-only), add, commit, mv. '
                  'Arguments follow the subcommand, e.g. ["commit", "-m", "Message"].'),
     _tool('lesson_accept', 'Write a reviewed lesson revision into its destination space. The user is asked '

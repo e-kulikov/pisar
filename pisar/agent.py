@@ -31,6 +31,7 @@ CLAUDE_ALLOWED = (
     'Bash(pisar spaces*)', 'Bash(pisar check*)', 'Bash(pisar search *)',
     'Bash(pisar read *)', 'Bash(pisar inventory*)', 'Bash(pisar capture *)',
     'Bash(pisar save *)', 'Bash(pisar triage *)',
+    'Bash(pisar inbox read)', 'Bash(pisar inbox read *)',
     'Bash(pisar domain *)', 'Bash(pisar space *)', 'Bash(pisar guard *)',
     'Bash(pisar config *)', 'Bash(pisar research *)',
     # Sync pull/publish are bounded CLI actions governed by the user's configured
@@ -88,18 +89,27 @@ def session_options(agent, extra=()):
     return options
 
 
-def claude_command(executable, prompt, extra=(), mcp=None, options=(), plugin=None, workspace=None, mutation_guard=None):
+def claude_command(executable, prompt, extra=(), mcp=None, options=(), plugin=None, workspace=None,
+                   mutation_guard=None, read_guard=None):
     """Caller's own arguments come first, so variadic options cannot swallow them.
 
     MCP is strict: only servers from `mcp` (the root's .mcp.json) are loaded.
     `plugin` is the extracted plugin directory, `workspace` the Edit rule for lesson drafts.
     """
+    hooks = []
+    if mutation_guard:
+        hooks.append({'matcher': 'Write|Edit|Bash',
+                      'hooks': [{'type': 'command', 'command': mutation_guard}]})
+    if read_guard:
+        hooks.append({'matcher': 'Read|Glob|Grep',
+                      'hooks': [{'type': 'command', 'command': read_guard}]})
+    settings_payload = {'permissions': {'ask': list(CLAUDE_ASK)}}
+    if hooks:
+        settings_payload['hooks'] = {'PreToolUse': hooks}
+
     return [executable, *extra, *options,
             *(['--plugin-dir', str(plugin)] if plugin else []),
-            '--settings', json.dumps({'permissions': {'ask': list(CLAUDE_ASK)},
-                                     **({'hooks': {'PreToolUse': [{'matcher': 'Write|Edit|Bash',
-                                         'hooks': [{'type': 'command', 'command': mutation_guard}]}]}}
-                                        if mutation_guard else {})}),
+            '--settings', json.dumps(settings_payload),
             '--system-prompt', prompt,
             f'--tools={CLAUDE_TOOLS}',
             '--allowedTools', *CLAUDE_ALLOWED, *([workspace] if workspace else []),
@@ -147,7 +157,11 @@ def launch(agent, root, state_dir, ruwana, extra=()):
     mutation_guard = shlex.join(['env', *(f'{key}={value}' for key, value in guard_environment.items()),
                                 *guard_command, '--root', str(root), '--state-dir', str(runtime.base),
                                 '--_agent-guard'])
+    read_guard = shlex.join(['env', *(f'{key}={value}' for key, value in guard_environment.items()),
+                             *guard_command, '--root', str(root), '--state-dir', str(runtime.base),
+                             '--plugin-dir', str(plugin), '--_read-guard'])
     os.chdir(root)
     command = claude_command(executable, prompt_text(), extra, mcp_config(root),
-                             session_options(agent, extra), plugin, lesson_workspace_rule(runtime.base), mutation_guard)
+                             session_options(agent, extra), plugin, lesson_workspace_rule(runtime.base),
+                             mutation_guard, read_guard)
     os.execve(executable, command, env)

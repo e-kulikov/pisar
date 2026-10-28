@@ -159,6 +159,13 @@ class AgentTests(Fixture):
         self.assertEqual(argv[argv.index('--system-prompt') + 1], prompt)
         self.assertNotIn('--system-prompt-file', argv)
 
+    def test_readme_documents_inbox_read_and_read_guard_restrictions(self):
+        readme = (CHECKOUT / 'README.md').read_text(encoding='utf-8')
+        self.assertIn('pisar inbox read', readme)
+        self.assertIn('read guard', readme)
+        self.assertIn('--plugin-dir', readme)
+        self.assertNotIn('it can still read and edit files in the repository', readme)
+
     def test_tools_are_minimal_and_mcp_is_disabled(self):
         _, call = self.launch()
         argv = call['argv']
@@ -485,6 +492,206 @@ class AgentTests(Fixture):
         p = self.run_pisar('--', 'x', env=self.agent_env, ok=False)
         self.assertEqual(p.returncode, 2)
 
+    def test_read_guard_cli_argument_missing_or_relative_plugin_dir_fails_closed(self):
+        # Missing --plugin-dir with --_read-guard
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state, '--_read-guard', ok=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
+
+        # Relative --plugin-dir
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state,
+                           '--plugin-dir', 'relative/dir', '--_read-guard', ok=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
+
+        # Symlinked --plugin-dir
+        sym_plugin = self.base / 'sym_plugin'
+        sym_plugin.symlink_to(self.state)
+        p = self.run_pisar('--root', self.root, '--state-dir', self.state,
+                           '--plugin-dir', str(sym_plugin), '--_read-guard', ok=False)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--_read-guard requires an absolute --plugin-dir directory', p.stderr)
+
+    def test_guard_cli_argument_mutual_exclusion(self):
+        cases = [
+            (('--agent', 'claude', '--_read-guard'), '--_read-guard cannot be combined'),
+            (('--_read-guard', 'inbox', 'read'), '--_read-guard cannot be combined'),
+            (('--_agent-guard', '--_read-guard'), '--_read-guard cannot be combined'),
+            (('--_agent-guard', 'spaces'), '--_agent-guard cannot be combined'),
+        ]
+        for flags, expected_err in cases:
+            with self.subTest(flags=flags):
+                p = self.run_pisar('--root', self.root, '--state-dir', self.state,
+                                   '--plugin-dir', str(self.base), *flags, ok=False)
+                self.assertEqual(p.returncode, 2)
+                self.assertIn(expected_err, p.stderr)
+
+    def test_claude_command_registers_read_guard_as_pretooluse_hook_1_and_executes(self):
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        hooks = settings['hooks']['PreToolUse']
+        self.assertEqual(len(hooks), 2)
+        self.assertEqual(hooks[0]['matcher'], 'Write|Edit|Bash')
+        self.assertEqual(hooks[1]['matcher'], 'Read|Glob|Grep')
+        read_hook = hooks[1]['hooks'][0]['command']
+        self.assertIn('--_read-guard', read_hook)
+        self.assertIn('--plugin-dir', read_hook)
+
+        # Execute the generated read_hook command directly
+        doc = self.root / 'secret.md'
+        doc.write_text('secret')
+        payload = {'tool_name': 'Read', 'cwd': str(self.root), 'tool_input': {'file_path': 'secret.md'}}
+        res = subprocess.run(read_hook, shell=True, input=json.dumps(payload),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('pisar data must be read through pisar: use pisar read', res.stderr)
+
+    def test_subagent_lesson_reviewer_only_has_read_tool_which_is_guarded(self):
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        read_matcher = settings['hooks']['PreToolUse'][1]['matcher']
+        self.assertIn('Read', read_matcher.split('|'))
+        default = Path(values(call['argv'], '--plugin-dir')[0])
+        reviewer_text = (default / 'agents/lesson-reviewer.md').read_text()
+        self.assertIn('tools: Read', reviewer_text)
+
+        read_hook = settings['hooks']['PreToolUse'][1]['hooks'][0]['command']
+        # Subagent payload attempting to read wiki doc is denied with status 2
+        doc = self.root / 'wiki_secret.md'
+        doc.write_text('secret')
+        subagent_payload = {
+            'tool_name': 'Read', 'cwd': str(self.root),
+            'tool_input': {'file_path': 'wiki_secret.md'},
+            'agent': 'lesson-reviewer', 'subagent': True,
+        }
+        res = subprocess.run(read_hook, shell=True, input=json.dumps(subagent_payload),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('pisar data must be read through pisar: use pisar read', res.stderr)
+
+        # Subagent payload attempting to read inbox item in state is denied with status 2
+        inbox_file = self.state / 'inbox' / 'item.txt'
+        inbox_file.parent.mkdir(parents=True, exist_ok=True)
+        inbox_file.write_text('inbox secret')
+        res = subprocess.run(read_hook, shell=True,
+                             input=json.dumps({
+                                 'tool_name': 'Read', 'cwd': str(self.root),
+                                 'tool_input': {'file_path': str(inbox_file)},
+                                 'agent': 'lesson-reviewer', 'subagent': True,
+                             }),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('pisar state must be read through pisar', res.stderr)
+
+        # Subagent payload reading draft.md in lessons workspace is allowed with status 0
+        batch_dir = self.state / 'lessons' / 'batch1'
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        draft = batch_dir / 'draft.md'
+        draft.write_text('lesson draft')
+        res = subprocess.run(read_hook, shell=True,
+                             input=json.dumps({
+                                 'tool_name': 'Read', 'cwd': str(self.root),
+                                 'tool_input': {'file_path': str(draft)},
+                                 'agent': 'lesson-reviewer', 'subagent': True,
+                             }),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout, '')
+        self.assertEqual(res.stderr, '')
+
+        # Subagent payload reading SKILL.md in plugin dir is allowed with status 0
+        res = subprocess.run(read_hook, shell=True,
+                             input=json.dumps({
+                                 'tool_name': 'Read', 'cwd': str(self.root),
+                                 'tool_input': {'file_path': str(default / 'SKILL.md')},
+                                 'agent': 'lesson-reviewer', 'subagent': True,
+                             }),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout, '')
+        self.assertEqual(res.stderr, '')
+
+    def test_read_guard_cli_fails_closed_with_status_2_when_config_is_invalid(self):
+        # Finding 1: If config becomes invalid mid-session, read guard hook must exit 2, not 1
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        read_hook = settings['hooks']['PreToolUse'][1]['hooks'][0]['command']
+
+        config_dir = Path(self.agent_env['XDG_CONFIG_HOME']) / 'pisar'
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / 'config.toml').write_text('invalid = [unclosed toml')
+
+        payload = {'tool_name': 'Read', 'cwd': str(self.root), 'tool_input': {'file_path': 'any.md'}}
+        res = subprocess.run(read_hook, shell=True, input=json.dumps(payload),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(res.stdout, '')
+        self.assertIn('read guard setup failed', res.stderr)
+
+    def test_reviewer_prompt_text_specifies_review_uses_only_supplied_text(self):
+        _, call = self.launch()
+        default = Path(values(call['argv'], '--plugin-dir')[0])
+        reviewer_text = (default / 'agents/lesson-reviewer.md').read_text()
+        self.assertIn('You review only the supplied text given in your prompt. Do not attempt to read files directly.', reviewer_text)
+
+    def test_inbox_read_allowlist_rules_and_arbitrary_code_prohibition(self):
+        """Satisfies Finding 7: Show new allowlist rules cannot run arbitrary code.
+        Because agent_guard returns 0 early when no reservation is pending, the Claude permission matcher
+        is the sole gate; verify only bounded prefixes are allowed, and no wildcards or arbitrary code gates exist."""
+        _, call = self.launch()
+        allowed = values(call['argv'], '--allowedTools')
+        self.assertIn('Bash(pisar inbox read)', allowed)
+        self.assertIn('Bash(pisar inbox read *)', allowed)
+        self.assertNotIn('Bash(pisar inbox *)', allowed)
+        self.assertNotIn('Bash(pisar inbox)', allowed)
+        for rule in allowed:
+            self.assertTrue(rule.startswith(('Bash(git ', 'Bash(pisar ', 'Edit(//', 'Agent(', 'Skill(')), rule)
+            self.assertNotIn(rule, ('Bash(git *)', 'Bash(pisar *)', 'Bash(pisar inbox *)', 'Bash(*)'))
+
+    def test_agent_guard_allows_tool_when_no_reservation_pending(self):
+        """Satisfies Finding 7: agent_guard returns 0 early when no sync reservation is pending;
+        the Claude permission matcher (--allowedTools) is the only gate against arbitrary commands in that case."""
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        mutation_hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        res = subprocess.run(mutation_hook, shell=True,
+                             input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'pisar inbox read'}}),
+                             text=True, capture_output=True, env=call['env'], cwd=self.root)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_sync_guard_exempts_inbox_read_during_pending_sync(self):
+        """Satisfies Finding 5 & 7: test agent_guard.run with pending reservation and composition rejection."""
+        from pisar import operations
+        runtime = operations.Runtime(self.state, self.root)
+        folder = runtime.path / 'sync'
+        folder.mkdir(parents=True, exist_ok=True)
+        operations.write_json(folder / 'sync-op.json',
+                              {'operation_id': 'sync-op', 'root': str(self.root.resolve()), 'status': 'prepared'})
+        _, call = self.launch()
+        settings = json.loads(call['argv'][call['argv'].index('--settings') + 1])
+        mutation_hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+
+        # Allowed read actions during pending sync
+        for cmd in ('pisar inbox read', 'pisar inbox read --id item.txt', 'pisar inbox read --id "with spaces.md"'):
+            with self.subTest(cmd=cmd):
+                res = subprocess.run(mutation_hook, shell=True,
+                                     input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                                     text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
+        # Mutating, composition, or unapproved commands still blocked
+        for bad_cmd in ('git add .', 'pisar inbox delete --id item.txt', 'pisar inbox *',
+                        'pisar inbox read --id x; rm -rf y', 'pisar inbox read --id x && id',
+                        'pisar inbox read --id $(id)'):
+            with self.subTest(bad_cmd=bad_cmd):
+                res = subprocess.run(mutation_hook, shell=True,
+                                     input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': bad_cmd}}),
+                                     text=True, capture_output=True, env=call['env'], cwd=self.root)
+                self.assertEqual(res.returncode, 2)
+
 
 
 class CodexAllowlistTests(unittest.TestCase):
@@ -510,9 +717,16 @@ class CodexAllowlistTests(unittest.TestCase):
         with self.assertRaises(mcp.Refused):
             mcp.check_git([], self.root)
         for args in ([], ['git', 'status'], ['sh', '-c', 'true'], ['python3', '-c', 'print(1)'],
-                     ['mv', 'a', 'b'], ['lesson', 'accept', '--batch', 'x']):
+                     ['mv', 'a', 'b'], ['lesson', 'accept', '--batch', 'x'],
+                     ['inbox'], ['inbox', 'write'], ['inbox', '*']):
             with self.subTest(args=args), self.assertRaises(mcp.Refused):
                 mcp.check_pisar(args)
+
+    def test_inbox_read_is_allowed(self):
+        from pisar import mcp
+        self.assertEqual(mcp.check_pisar(['inbox', 'read']), ['inbox', 'read'])
+        self.assertEqual(mcp.check_pisar(['inbox', 'read', '--id', 'item.txt']),
+                         ['inbox', 'read', '--id', 'item.txt'])
 
     def test_pisar_ruwana_and_other_global_options_are_refused_anywhere(self):
         from pisar import mcp

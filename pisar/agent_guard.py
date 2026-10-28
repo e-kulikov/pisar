@@ -29,6 +29,8 @@ def run(root, state):
                         check_pisar(args[1:])
                     if args[1:2] in (['spaces'], ['read'], ['search'], ['inventory'], ['check']):
                         return 0
+                    if args[1:3] == ['inbox', 'read']:
+                        return 0
                     if args[1:2] == ['sync']:
                         from .cli import parser
                         parser().parse_args(args[1:])

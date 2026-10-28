@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 from . import (__version__, agent, commit_message, config_command, guard, lesson_command, mcp, research_command,
@@ -72,6 +73,10 @@ def parser():
             sub.add_argument('--reason', help='Short note stored in the manifest and report, never in the wiki')
         if name == 'reroute':
             sub.add_argument('--space', required=True, help='New destination space address (domain/id)')
+    inbox_cmd = commands.add_parser('inbox', help='External global inbox inspection')
+    inbox_actions = inbox_cmd.add_subparsers(dest='action', required=True)
+    inbox_read = inbox_actions.add_parser('read', help='Read or list items in the global inbox')
+    inbox_read.add_argument('--id', help='Immediate filename in the global inbox')
     config_command.add_parser(commands)
     guard.add_parser(commands)
     spacecmd.add_parser(commands)
@@ -84,6 +89,8 @@ def parser():
             leaf = next(a for a in leaf._actions if isinstance(a, argparse._SubParsersAction)).choices[name]
         commit_message.add_flags(leaf)
     p.add_argument('--_agent-guard', action='store_true', help=argparse.SUPPRESS)
+    p.add_argument('--_read-guard', action='store_true', help=argparse.SUPPRESS)
+    p.add_argument('--plugin-dir', help=argparse.SUPPRESS)
     mcp.add_parser(commands)
     return p
 
@@ -100,7 +107,11 @@ def main(argv=None):
         p.error(f'argument --agent: invalid choice: {args.agent!r}')
     if args.agent and args.command:
         p.error('--agent cannot be combined with a command')
-    if not args.agent and not args.command and not args._agent_guard:
+    if args._read_guard and (args.agent or args.command or args._agent_guard):
+        p.error('--_read-guard cannot be combined with --agent, a command, or --_agent-guard')
+    if args._agent_guard and (args.agent or args.command):
+        p.error('--_agent-guard cannot be combined with --agent or a command')
+    if not args.agent and not args.command and not args._agent_guard and not args._read_guard:
         p.error('a command is required (or --agent)')
     token = None
     try:
@@ -111,12 +122,35 @@ def main(argv=None):
         if args._agent_guard:
             from .agent_guard import run
             return run(settings.root(args.root), settings.state_dir(args.state_dir))
+        if args._read_guard:
+            try:
+                plugin_p = Path(args.plugin_dir) if args.plugin_dir else None
+                if not plugin_p or not plugin_p.is_absolute() or not plugin_p.is_dir() or plugin_p.is_symlink():
+                    p.error('--_read-guard requires an absolute --plugin-dir directory')
+                state_dir = settings.state_dir(args.state_dir)
+                canonical_state = Path(state_dir).resolve()
+                chk = plugin_p
+                while chk != canonical_state and chk != chk.parent:
+                    if chk.is_symlink():
+                        p.error('--_read-guard requires a non-symlinked --plugin-dir path')
+                    chk = chk.parent
+                root = settings.root(args.root)
+                from .read_guard import run
+                return run(root, state_dir, args.plugin_dir)
+            except SystemExit:
+                raise
+            except Exception as error:
+                sys.stderr.write(f'pisar: read guard setup failed: {error}\n')
+                return 2
         if args.command == 'config':
             ctx = SimpleNamespace(flags=dict(root=args.root, state_dir=args.state_dir, ruwana=args.ruwana))
             print(json.dumps(config_command.run(args, ctx), ensure_ascii=False, indent=2))
             return 0
         args.root = settings.root(args.root)
         args.state_dir = settings.state_dir(args.state_dir)
+        if args.command == 'inbox' and args.action == 'read':
+            from . import inbox
+            return inbox.read(args.state_dir, getattr(args, 'id', None))
         args.ruwana = settings.ruwana(args.ruwana)
         if args.command == 'mcp-serve':
             return mcp.run(args)
