@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/e-kulikov/pisar/compare/v0.6.0...v0.7.0) (2026-10-28)
+
+
+### Features
+
+* **agent:** restrict agent file reads and add pisar inbox read ([#24](https://github.com/e-kulikov/pisar/issues/24)) ([a72eac7](https://github.com/e-kulikov/pisar/commit/a72eac7dac9844a806439ff5071a533d31041149))
+
 ## [0.6.0](https://github.com/e-kulikov/pisar/compare/v0.5.0...v0.6.0) (2026-10-22)
 
 
